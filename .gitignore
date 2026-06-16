@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Data — raw + curated stores are large/regenerable; never commit market data
+data/raw/
+data/curated/
+curated/
+snapshots/
+book/
+*.parquet
+*.zip
+*.csv
+
+# C++ build artifacts
+cpp/**/build/
+*.so
+*.o
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local Claude Code settings
+.claude/
