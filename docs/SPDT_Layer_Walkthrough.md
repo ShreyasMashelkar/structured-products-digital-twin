@@ -370,7 +370,8 @@ MarketSnapshot(date = 2023-06-15)
   spots:        { NIFTY: 18300, RELIANCE: 2450, ... }
   surfaces:     { NIFTY: <calibrated vol surface>, ... }
   correlation:  <PSD-validated matrix>
-  rate_curve:   <discount + forward rates>
+  ois_curve:    <bootstrapped risk-free curve: drift + risk-free discount>
+  funding_curve:<bootstrapped issuer funding curve: OIS + credit spread; discounts ZCB leg>
   dividends:    <schedule>
   provenance:   { each field → observed/interpolated/synthetic }
   content_hash: "a3f9c1..."   ← fingerprint of all inputs
@@ -383,6 +384,13 @@ Two properties make it special:
 
 > Note: in week 2 the snapshot holds the cleaned *IV points*. The calibrated *surface* (fitting
 > SVI/SSVI) is weeks 3–4 (L2). Week 2's job is just a frozen, reproducible snapshot existing.
+
+> Note on rates: both curves are **bootstrapped** term structures, *not* a single flat rate.
+> Bootstrapping = back out discount factors `D(T)` from traded instruments (FBIL OIS, T-bills,
+> issuer levels), solved shortest-maturity-first so each step has one unknown, interpolating
+> between pillars. We keep **two** because the **OIS curve** sets the risk-neutral drift `(r−q)`
+> and discounts the option leg, while the **funding curve** (OIS + issuer credit spread) discounts
+> the note's zero-coupon-bond leg — the note is the issuer's debt.
 
 ## Stage 4 — Replay
 
