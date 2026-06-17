@@ -59,8 +59,13 @@ A worst-of/basket product on 3 liquid names is enough to exercise the entire cor
 | **NSE cash bhavcopy** | Daily OHLC for all cash equities + indices | High | Underlying spot history, returns, correlation |
 | **yfinance** (`^NSEI`, `^NSEBANK`, `RELIANCE.NS`) | EOD OHLC, some intraday, splits | Medium (best-effort) | Quick spot series, cross-checks, gap-fill |
 | **NSE option-chain JSON endpoint** | *Live* IV snapshot for current expiries | Low (fragile, needs headers/cookies, rate-limited, changes) | Optional live "today's surface" demo only — never depend on it |
-| **FBIL / RBI** | MIBOR, OIS, T-bill yields, reference rates | High | Discount curve, drift |
+| **FBIL / RBI** | MIBOR, OIS, T-bill yields, reference rates | High | **Bootstrap** the OIS / risk-free curve → risk-neutral drift + risk-free discounting |
+| **Issuer bond / note levels** | Issuer funding/credit spread over OIS | Medium | **Bootstrap** the issuer funding curve (OIS + spread) → discounts the note's ZCB leg |
 | **NSE corporate actions** | Dividends, splits, bonus | Medium | Dividend curve, dividend delta |
+
+> **Rates are bootstrapped, never assumed flat.** Both curves are *term structures* built by bootstrapping the traded instruments above (solve maturity-by-maturity so each step has one unknown discount factor; interpolate between pillars — default log-linear on discount factors). We carry **two** curves because they play different roles: the **OIS / risk-free curve** sets the risk-neutral drift `(r−q)` and discounts the option leg, while the **issuer funding curve** discounts the note's zero-coupon-bond leg — the note is the issuer's *debt* (see §XI.8 of the interview defense). A flat rate would give the wrong drift at every tenor *and* collapse the funding-spread economics that explain a note's cost decomposition.
+>
+> **Funding curve = spread over OIS** (decision, see [ADR 0002](docs/adr/0002-funding-curve-as-spread-over-ois.md)). We fully bootstrap OIS, then add a *small parametric* spread term structure `s(T)` (piecewise-linear, 2–3 knots; **not** flat) calibrated to whatever issuer reference exists (issuance spread / benchmark bank-bond spread / CDS). Rationale: our data has no dense liquid issuer bond curve, so a direct issuer bootstrap is unstable and breaks snapshot reproducibility; spread-over-OIS stays coherent under rate moves and makes the spread a first-class **shockable** factor for structuring economics and stress. Switch to a direct issuer bootstrap only given a liquid issuer bond/CDS curve.
 
 **Key insight that solves the "no historical IV" problem:** you do **not** need a paid IV history. The F&O bhavcopy contains the **daily settlement price of every option contract**. Combined with the underlying close and a discount rate, you invert Black-Scholes per contract to get **implied vol per (strike, expiry) for every historical day**. That gives you a genuine historical implied-vol surface time series — for free — which is the single most valuable dataset for the whole project (backtesting, vega P&L, model reserve, surface versioning all depend on it).
 
@@ -79,7 +84,8 @@ A worst-of/basket product on 3 liquid names is enough to exercise the entire cor
                           │  - spot series              │
                           │  - per-contract option px   │
                           │  - implied vol points       │  ◄── BS inversion
-                          │  - rate curve               │
+                          │  - OIS curve (bootstrapped) │  ◄── FBIL/RBI instruments
+                          │  - funding curve (bootstr.) │  ◄── OIS + issuer spread
                           │  - dividend schedule         │
                           └──────────────┬──────────────┘
                                          │ snapshot
@@ -91,7 +97,7 @@ A worst-of/basket product on 3 liquid names is enough to exercise the entire cor
                           └─────────────────────────────┘
 ```
 
-**The Market Snapshot is the central abstraction of the entire system.** It is an immutable, versioned object representing "the market as of date D": spot levels, the calibrated vol surface(s), the correlation matrix, the rate curve, the dividend schedule. Every other layer takes a snapshot as input and never touches raw data. This single design choice is what makes historical replay, backtesting, and reproducible P&L attribution possible — and it is exactly how a real desk's "official close" works.
+**The Market Snapshot is the central abstraction of the entire system.** It is an immutable, versioned object representing "the market as of date D": spot levels, the calibrated vol surface(s), the correlation matrix, the two bootstrapped rate curves (OIS/risk-free + issuer funding), the dividend schedule. Every other layer takes a snapshot as input and never touches raw data. This single design choice is what makes historical replay, backtesting, and reproducible P&L attribution possible — and it is exactly how a real desk's "official close" works.
 
 ### 2.4 Synthetic fallback (declared, bounded)
 
@@ -614,10 +620,19 @@ MarketSnapshot
   spots: {underlying -> float}
   surfaces: {underlying -> VolSurface}        # calibrated SVI/SSVI params + raw points
   correlation: CorrelationMatrix              # PSD-validated
-  rate_curve: Curve                           # discount + forward rates
+  ois_curve: Curve                            # risk-free: bootstrapped from FBIL OIS/T-bills; drift + risk-free discount
+  funding_curve: Curve                        # issuer funding = OIS + spread(T) (ADR 0002); discounts the note's ZCB leg
   dividends: {underlying -> DividendSchedule}
   provenance: {field -> source_tag}           # observed / interpolated / synthetic
   content_hash: str                           # reproducibility
+
+Curve                                         # one bootstrapped term structure
+  pillars: [Date]                             # instrument maturities (knots)
+  discount_factors: {Date -> float}           # D(T); solved maturity-by-maturity
+  interp: "log_linear_df" | "monotone_convex" # default log-linear on discount factors
+  spread_over: Curve | None                   # funding curve: base OIS curve it spreads over (ADR 0002); None for OIS itself
+  spread_knots: {Date -> float} | None        # parametric credit/funding spread s(T); None for OIS itself
+  # zero rates z(T)=−ln D(T)/T and forwards f(t1,t2) derived from D(T)
 
 VolSurface
   underlying: str
@@ -677,7 +692,7 @@ MVP + LSV + model reserves + a virtual book of N notes replayed over history + d
 - **DoD:** `pip install -e .` works; one trivial test green; bus passes a message.
 
 ### Month 1 — Data + Vol surface + BS (Weeks 1–4): **the foundation slice**
-- **W1 — Ingestion:** NSE F&O + cash bhavcopy downloader → raw parquet; yfinance fallback; FBIL rate curve. Calendar + corporate-action adjustment.
+- **W1 — Ingestion:** NSE F&O + cash bhavcopy downloader → raw parquet; yfinance fallback; **bootstrap the FBIL OIS/risk-free curve and the issuer funding curve** (term structures, not flat). Calendar + corporate-action adjustment.
 - **W2 — Curation + IV inversion:** BS Newton/Brent inversion of settlement prices → historical IV points. Build & freeze the first `MarketSnapshot`. *This unlocks everything.*
 - **W3 — SVI + arbitrage:** per-slice SVI calibration; Durrleman butterfly check; basic repair. Plot a clean smile vs raw points.
 - **W4 — SSVI + Dupire + BS pricer:** SSVI surface (calendar-arb-free); Dupire local vol from the parametrisation; analytic BS/digital/barrier closed forms (your MC benchmarks).

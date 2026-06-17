@@ -11,8 +11,9 @@ through the codebase.
 
 ## Decision
 Introduce an immutable, versioned `MarketSnapshot` as the unit every layer consumes:
-spot levels, calibrated vol surface(s), correlation matrix, rate curve, dividend
-schedule, and per-field provenance tags. Snapshots are **content-addressed** (hashed
+spot levels, calibrated vol surface(s), correlation matrix, two bootstrapped rate curves
+(OIS/risk-free + issuer funding, see [ADR 0002](0002-funding-curve-as-spread-over-ois.md)),
+dividend schedule, and per-field provenance tags. Snapshots are **content-addressed** (hashed
 over their inputs) so re-running a given date yields byte-identical results.
 
 No layer above L1 touches raw data; they all take a snapshot in and emit reports out.

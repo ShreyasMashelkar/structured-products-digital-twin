@@ -20,9 +20,12 @@ Analytics (L2)**, and the **Product Definition DSL (L3)**.
 ## Central abstraction: the Market Snapshot
 
 An immutable, versioned, content-hashed object representing "the market as of date D":
-spot levels, calibrated vol surface(s), correlation matrix, rate curve, dividend
-schedule, and per-field provenance tags. Every other layer takes a snapshot as input
-and never touches raw data.
+spot levels, calibrated vol surface(s), correlation matrix, two bootstrapped rate
+curves (OIS/risk-free + issuer funding), dividend schedule, and per-field provenance
+tags. Every other layer takes a snapshot as input and never touches raw data. Rates
+are bootstrapped term structures, never assumed flat: the OIS curve sets the
+risk-neutral drift and discounts the option leg; the funding curve (OIS + issuer
+spread) discounts the note's zero-coupon-bond leg.
 
 ## No monolith without microservice theatre
 
