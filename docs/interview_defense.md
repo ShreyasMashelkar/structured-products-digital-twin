@@ -10,6 +10,9 @@ to rehearse from first principles. Build a one-page derivation card for each.
 - Newton vs Brent for BS inversion (vega → 0 on deep wings).
 - Why settlement-price IVs are biased on the wings (settlement ≠ traded mid, wide bid-offer).
 - What survivorship bias does to backtested autocall frequency (inflates it).
+- Why rates are **bootstrapped** term structures, never flat — back out `D(T)` from FBIL OIS/T-bills shortest-maturity-first; interpolation choice (log-DF vs monotone-convex forwards) and what a bad one does to the forward curve.
+- Why the snapshot carries **two** curves: OIS/risk-free (drift + option-leg discount) vs issuer funding (discounts the ZCB leg); a note is the issuer's debt.
+- Why the funding curve is a **spread over OIS** (small parametric `s(T)`), not a direct issuer bootstrap — sparse issuer data, coherent rate risk, shockable spread (ADR 0002); when you'd flip to direct bootstrap.
 
 ## Vol Analytics (L2)
 - SVI vs SSVI — slice vs surface; why SSVI removes calendar arbitrage by construction.

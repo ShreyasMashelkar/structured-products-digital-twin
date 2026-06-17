@@ -894,6 +894,43 @@ that **didn't** blow up → backtested autocall frequency and returns are **infl
 understated. Fix: **point-in-time** index membership and liquidity universe — the names as they were on
 each historical date.
 
+## X.5 Bootstrapping the rate curves — and why two, never flat
+
+**Q: Where do your discount/forward rates come from? Do you assume a flat rate?**
+
+No — the rates are **bootstrapped** term structures, and there are **two** of them in every snapshot.
+
+*Bootstrapping in one line:* the market quotes a handful of instruments (FBIL overnight/MIBOR, OIS swap
+rates, T-bill yields), each a constraint saying "this package of cashflows is worth par today." You back
+out the discount factors `D(T)` that make all quotes simultaneously consistent, solving
+**shortest-maturity-first** so that at each step exactly one new discount factor is unknown (a 2Y swap's
+par condition already knows `D(6M), D(1Y), D(18M)` from earlier steps → solve `D(2Y)`). Between the
+instrument maturities (pillars) you **interpolate** — default log-linear on discount factors, or
+monotone-convex on forwards if you care about clean forward rates (a bad scheme gives a smooth discount
+curve but a sawtooth forward curve, which poisons the drift). Output is three views of one object:
+discount factors `D(T)`, zero rates `z(T)=−ln D(T)/T`, and forwards `f(t₁,t₂)`.
+
+*Why two curves:* they do different jobs. The **OIS / risk-free curve** (from FBIL OIS/T-bills) sets the
+**risk-neutral drift** `(r−q)` in MC/PDE and discounts the **option leg**. The **issuer funding curve**
+discounts the note's **zero-coupon-bond leg**, because the note is the issuer's *debt* (see XI.8). Cheaper
+funding (wider spread) makes the ZCB leg cheaper, freeing budget for optionality — the economics behind
+why banks issue notes.
+
+*Direct bootstrap vs spread over OIS — and which I chose:* I model the funding curve as a **spread over
+OIS** (ADR 0002), not a direct issuer bootstrap. I fully bootstrap OIS, then add a *small parametric*
+spread term structure `s(T)` (2–3 knots, **not** flat) calibrated to whatever issuer reference exists
+(issuance spread / benchmark bank-bond spread / CDS). Three reasons: (1) **data** — there's no dense,
+liquid issuer bond curve in my sources, so a direct bootstrap from 2–3 stale points is unstable and
+breaks snapshot reproducibility; (2) **coherent rate risk** — `funding = OIS + spread` moves both curves
+together under a rate shock, avoiding spurious basis from two independent bootstraps; (3) **the spread
+becomes a first-class, shockable factor**, exactly what the structuring economics and the stress layer
+need. I'd switch to a **direct issuer bootstrap only given a liquid issuer bond/CDS curve** with reliable
+EOD marks.
+
+*Why not flat:* a flat rate gives the wrong drift at every tenor (mispricing forwards and skew-sensitive
+payoffs) **and** collapses the two-curve distinction, destroying the funding-spread cost decomposition.
+A flat *spread* is also wrong — credit has term structure, so `s(T)` is parametric, not a scalar.
+
 ---
 
 # Part XI — Broad equity-structuring questions
