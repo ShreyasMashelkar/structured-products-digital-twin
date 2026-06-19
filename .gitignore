@@ -39,3 +39,6 @@ cpp/**/build/
 
 # Local Claude Code settings
 .claude/
+
+# generated desk dashboard cache
+dashboard_data/
