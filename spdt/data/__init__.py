@@ -1,5 +1,6 @@
 """L1 Market Data Service: ingest → curate (BS-invert) → build & store the MarketSnapshot."""
 
+from spdt.data.live import build_live_snapshot
 from spdt.data.snapshot_builder import build_snapshot
 from spdt.data.store import (
     load_iv_points,
@@ -10,6 +11,7 @@ from spdt.data.store import (
 )
 
 __all__ = [
+    "build_live_snapshot",
     "build_snapshot",
     "load_iv_points",
     "load_snapshot",
