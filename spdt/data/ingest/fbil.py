@@ -112,15 +112,23 @@ def _run_date(entries: list[dict]) -> date:
     return datetime.strptime(entries[0]["processRunDate"][:10], "%Y-%m-%d").date()
 
 
-def fetch_fbil_ois_instruments(*, timeout: float = 30.0) -> tuple[date, list[RateInstrument]]:
-    """Download the latest published MIBOR-OIS curve and build bootstrap instruments."""
+def fetch_fbil_ois_instruments(
+    *, anchor: date | None = None, timeout: float = 30.0
+) -> tuple[date, list[RateInstrument]]:
+    """Download the latest MIBOR-OIS curve; ``anchor`` overrides the curve's run date.
+
+    Pass ``anchor`` (e.g. the snapshot's business date) so the relative tenors hang off the
+    right valuation date when pairing with a market snapshot.
+    """
     entries = _download_fbil("miborois", timeout=timeout)
-    anchor = _run_date(entries)
+    anchor = anchor or _run_date(entries)
     return anchor, instruments_from_fbil_entries(entries, anchor)
 
 
-def fetch_fbil_tbill_instruments(*, timeout: float = 30.0) -> tuple[date, list[RateInstrument]]:
-    """Download the latest published T-bill curve and build bootstrap instruments (all zeros)."""
+def fetch_fbil_tbill_instruments(
+    *, anchor: date | None = None, timeout: float = 30.0
+) -> tuple[date, list[RateInstrument]]:
+    """Download the latest T-bill curve and build bootstrap instruments (all zeros)."""
     entries = _download_fbil("tbill", timeout=timeout)
-    anchor = _run_date(entries)
+    anchor = anchor or _run_date(entries)
     return anchor, instruments_from_fbil_entries(entries, anchor)
