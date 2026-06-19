@@ -1,7 +1,6 @@
 """LSV: leverage calibration reprices the surface; the LSV − LV reserve is real (L4/L11)."""
 
 import numpy as np
-import pytest
 
 from spdt.modelrisk import model_gap_reserve
 from spdt.pricing import bs_vanilla, price_mc
