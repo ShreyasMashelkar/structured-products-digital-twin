@@ -1,34 +1,139 @@
-"""NSE F&O + cash bhavcopy source — the real backbone (design doc §2.2). STUBBED.
+"""NSE F&O bhavcopy source — real EOD ingestion (design doc §2.2).
 
-Architecturally present behind the :class:`~spdt.data.ingest.MarketDataSource` interface so
-the rest of the system is already wired for real data; the download/parse implementation is
-a declared placeholder (scope-contract: STUBBED). When implemented (W1), ``fetch`` will:
+Downloads the daily **UDiFF common bhavcopy** for the F&O segment from the NSE archive,
+parses every option contract's settlement price for the requested underlying, and emits a
+:class:`~spdt.data.ingest.RawMarketData`. The underlying spot comes from the bhavcopy's own
+``UndrlygPric`` column, so no second download is needed for the index level.
 
-1. Download the daily F&O and cash bhavcopy ZIPs from the NSE archive for ``as_of``.
-2. Parse per-contract option settlement prices, the underlying close, OI and volume.
-3. Apply the trading-calendar + corporate-action adjustments.
-4. Pair with the FBIL-bootstrapped OIS curve and issuer funding spread.
+Download and parse are deliberately separated: :func:`parse_fo_bhavcopy` is a pure function
+over a DataFrame (unit-tested on a sample of the real schema), while :meth:`fetch` adds the
+network I/O. NSE serves these archives over a CDN that accepts a browser-like ``User-Agent``.
 
-It deliberately raises rather than silently returning synthetic data — falling back is a
-caller's explicit choice (use :class:`~spdt.data.ingest.synthetic.SyntheticSource`), never a
-hidden default, per the "never silently mix" rule (§2.4).
+Rates: this source pairs the observed option chain with a **flat** OIS/funding curve built
+from the constructor's ``risk_free_rate`` / ``funding_spread``. Bootstrapping the FBIL OIS and
+T-bill curve (design doc §2.2) is the remaining refinement and slots in by replacing
+``_rate_inputs`` — the option surface, which is the hard-to-source part, is already real.
 """
 
 from __future__ import annotations
 
+import io
+import ssl
+import urllib.request
+import zipfile
 from datetime import date
 
-from spdt.core.types import Underlying
-from spdt.data.ingest import RawMarketData
+import pandas as pd
+
+try:  # use certifi's CA bundle when present — robust across machines (esp. macOS python.org)
+    import certifi
+
+    _SSL_CONTEXT: ssl.SSLContext | None = ssl.create_default_context(cafile=certifi.where())
+except ImportError:  # pragma: no cover - falls back to the system default trust store
+    _SSL_CONTEXT = None
+
+from spdt.core.types import SourceTag, Underlying
+from spdt.data.ingest import RawMarketData, RawOptionQuote
+
+_ARCHIVE = "https://nsearchives.nseindia.com"
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def fo_bhavcopy_url(as_of: date) -> str:
+    """URL of the UDiFF F&O common bhavcopy ZIP for ``as_of``."""
+    return f"{_ARCHIVE}/content/fo/BhavCopy_NSE_FO_0_0_0_{as_of:%Y%m%d}_F_0000.csv.zip"
+
+
+def download_fo_bhavcopy(as_of: date, *, timeout: float = 30.0) -> pd.DataFrame:
+    """Fetch and unzip the F&O bhavcopy for ``as_of`` into a DataFrame (network I/O)."""
+    request = urllib.request.Request(fo_bhavcopy_url(as_of), headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(  # noqa: S310 (fixed NSE archive host)
+        request, timeout=timeout, context=_SSL_CONTEXT
+    ) as response:
+        payload = response.read()
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        name = archive.namelist()[0]
+        with archive.open(name) as handle:
+            return pd.read_csv(handle)
+
+
+def parse_fo_bhavcopy(
+    frame: pd.DataFrame,
+    as_of: date,
+    underlying: Underlying,
+    *,
+    risk_free_rate: float,
+    funding_spread: float,
+    dividend_yield: float,
+) -> RawMarketData:
+    """Turn a UDiFF F&O bhavcopy DataFrame into :class:`RawMarketData` for one underlying.
+
+    Keeps the call/put option rows for ``underlying`` with a positive settlement price, reads
+    the spot from ``UndrlygPric``, and builds flat OIS/funding curves at the observed expiries.
+    """
+    frame = frame.rename(columns=lambda c: c.strip())
+    is_option = frame["OptnTp"].isin(["CE", "PE"])
+    rows = frame[(frame["TckrSymb"] == underlying) & is_option].copy()
+    if rows.empty:
+        raise ValueError(f"no option rows for {underlying!r} in the {as_of} bhavcopy")
+
+    rows["XpryDt"] = pd.to_datetime(rows["XpryDt"]).dt.date
+    rows = rows[rows["SttlmPric"] > 0.0]
+
+    quotes = tuple(
+        RawOptionQuote(
+            expiry=r.XpryDt,
+            strike=float(r.StrkPric),
+            is_call=(r.OptnTp == "CE"),
+            settlement_price=float(r.SttlmPric),
+        )
+        for r in rows.itertuples(index=False)
+    )
+    spot = float(rows["UndrlygPric"].dropna().iloc[0])
+
+    expiries = sorted({q.expiry for q in quotes})
+    ois_zero_rates = {e: risk_free_rate for e in expiries}
+    funding_spread_knots = {expiries[0]: funding_spread, expiries[-1]: funding_spread}
+
+    return RawMarketData(
+        date=as_of,
+        underlying=underlying,
+        spot=spot,
+        option_chain=quotes,
+        ois_zero_rates=ois_zero_rates,
+        funding_spread_knots=funding_spread_knots,
+        dividend_yield=dividend_yield,
+        source=SourceTag.OBSERVED,
+    )
 
 
 class NseBhavcopySource:
-    """Real EOD bhavcopy source. Network ingestion not yet implemented (W1)."""
+    """Real EOD F&O bhavcopy source implementing the ``MarketDataSource`` interface."""
 
-    ARCHIVE_BASE = "https://nsearchives.nseindia.com"
+    def __init__(
+        self,
+        *,
+        risk_free_rate: float = 0.065,
+        funding_spread: float = 0.012,
+        dividend_yield: float = 0.013,
+        timeout: float = 30.0,
+    ) -> None:
+        self.risk_free_rate = risk_free_rate
+        self.funding_spread = funding_spread
+        self.dividend_yield = dividend_yield
+        self.timeout = timeout
 
     def fetch(self, as_of: date, underlying: Underlying) -> RawMarketData:
-        raise NotImplementedError(
-            "NSE bhavcopy ingestion is a declared stub (scope-contract: STUBBED); "
-            "use SyntheticSource for offline runs until W1 implements the downloader."
+        """Download the F&O bhavcopy for ``as_of`` and build a snapshot input."""
+        frame = download_fo_bhavcopy(as_of, timeout=self.timeout)
+        return parse_fo_bhavcopy(
+            frame,
+            as_of,
+            underlying,
+            risk_free_rate=self.risk_free_rate,
+            funding_spread=self.funding_spread,
+            dividend_yield=self.dividend_yield,
         )

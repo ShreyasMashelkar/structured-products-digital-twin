@@ -7,7 +7,6 @@ import pytest
 from spdt.core.types import SourceTag
 from spdt.data import build_snapshot, load_snapshot, save_snapshot
 from spdt.data.curate import invert_chain
-from spdt.data.ingest.nse_bhavcopy import NseBhavcopySource
 from spdt.data.ingest.synthetic import SyntheticSource, _smile_vol
 from spdt.data.store import load_iv_points, save_iv_points
 
@@ -95,10 +94,3 @@ def test_iv_points_parquet_round_trip(raw, tmp_path):
     assert [round(p.implied_vol, 9) for p in reloaded] == [
         round(p.implied_vol, 9) for p in points
     ]
-
-
-# --- the real source is a declared, loud stub -----------------------------------------
-
-def test_nse_source_is_a_declared_stub():
-    with pytest.raises(NotImplementedError, match="STUBBED"):
-        NseBhavcopySource().fetch(AS_OF, "NIFTY")
