@@ -19,7 +19,7 @@ needs a uniform plus two normals per step, which the single-normal path interfac
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import exp, log, sqrt
+from math import exp, log
 
 import numpy as np
 from numpy.typing import NDArray
