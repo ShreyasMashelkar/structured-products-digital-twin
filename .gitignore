@@ -22,7 +22,6 @@ data/raw/
 data/curated/
 curated/
 snapshots/
-book/
 *.parquet
 *.zip
 *.csv
@@ -39,3 +38,6 @@ cpp/**/build/
 
 # Local Claude Code settings
 .claude/
+
+# generated desk dashboard cache
+dashboard_data/
