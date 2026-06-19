@@ -22,7 +22,6 @@ data/raw/
 data/curated/
 curated/
 snapshots/
-book/
 *.parquet
 *.zip
 *.csv
