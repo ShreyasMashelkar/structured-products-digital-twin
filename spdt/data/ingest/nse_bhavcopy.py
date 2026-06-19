@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - falls back to the system default trust
     _SSL_CONTEXT = None
 
 from spdt.core.types import SourceTag, Underlying
+from spdt.data.curate.rate_bootstrap import RateInstrument, bootstrap_zero_rates
 from spdt.data.ingest import RawMarketData, RawOptionQuote
 
 _ARCHIVE = "https://nsearchives.nseindia.com"
@@ -68,11 +69,13 @@ def parse_fo_bhavcopy(
     risk_free_rate: float,
     funding_spread: float,
     dividend_yield: float,
+    rate_instruments: list[RateInstrument] | None = None,
 ) -> RawMarketData:
     """Turn a UDiFF F&O bhavcopy DataFrame into :class:`RawMarketData` for one underlying.
 
-    Keeps the call/put option rows for ``underlying`` with a positive settlement price, reads
-    the spot from ``UndrlygPric``, and builds flat OIS/funding curves at the observed expiries.
+    Keeps the call/put option rows for ``underlying`` with a positive settlement price and reads
+    the spot from ``UndrlygPric``. If ``rate_instruments`` (FBIL T-bills/OIS) are supplied the
+    OIS curve is **bootstrapped** from them; otherwise a flat ``risk_free_rate`` is used.
     """
     frame = frame.rename(columns=lambda c: c.strip())
     is_option = frame["OptnTp"].isin(["CE", "PE"])
@@ -94,9 +97,12 @@ def parse_fo_bhavcopy(
     )
     spot = float(rows["UndrlygPric"].dropna().iloc[0])
 
-    expiries = sorted({q.expiry for q in quotes})
-    ois_zero_rates = {e: risk_free_rate for e in expiries}
-    funding_spread_knots = {expiries[0]: funding_spread, expiries[-1]: funding_spread}
+    if rate_instruments:
+        ois_zero_rates = bootstrap_zero_rates(as_of, rate_instruments)
+    else:
+        ois_zero_rates = {e: risk_free_rate for e in sorted({q.expiry for q in quotes})}
+    pillars = sorted(ois_zero_rates)
+    funding_spread_knots = {pillars[0]: funding_spread, pillars[-1]: funding_spread}
 
     return RawMarketData(
         date=as_of,
@@ -119,11 +125,13 @@ class NseBhavcopySource:
         risk_free_rate: float = 0.065,
         funding_spread: float = 0.012,
         dividend_yield: float = 0.013,
+        rate_instruments: list[RateInstrument] | None = None,
         timeout: float = 30.0,
     ) -> None:
         self.risk_free_rate = risk_free_rate
         self.funding_spread = funding_spread
         self.dividend_yield = dividend_yield
+        self.rate_instruments = rate_instruments
         self.timeout = timeout
 
     def fetch(self, as_of: date, underlying: Underlying) -> RawMarketData:
@@ -136,4 +144,5 @@ class NseBhavcopySource:
             risk_free_rate=self.risk_free_rate,
             funding_spread=self.funding_spread,
             dividend_yield=self.dividend_yield,
+            rate_instruments=self.rate_instruments,
         )
