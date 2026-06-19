@@ -1,7 +1,7 @@
 """Curve discounting: OIS bootstrap shape + funding-as-spread-over-OIS (ADR-0002)."""
 
 from datetime import date
-from math import exp, log
+from math import exp
 
 import pytest
 
