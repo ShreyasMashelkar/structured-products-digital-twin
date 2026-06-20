@@ -17,9 +17,9 @@ Two rules govern everything here:
 
 | Bucket | Meaning | Examples in SPDT |
 |---|---|---|
-| **REAL** | Mathematically correct, production-shaped, owned end to end | SVI/SSVI calibration, autocallable MC pricing, bump & pathwise Greeks, P&L attribution |
-| **FAITHFUL** | Correct method, scoped scale; real version differs only in size/optimisation | AAD over the pricing graph, LSV calibration, the payoff DSL, historical replay |
-| **STUBBED** | Architecturally present with a clean interface; placeholder implementation | C++/GPU pricing kernels (Python reference behind the interface), message queue (in-process bus that *could* be Kafka) |
+| **REAL** | Mathematically correct, production-shaped, owned end to end | SVI/SSVI calibration, autocallable MC pricing, bump/pathwise/**AAD** Greeks (cross-checked on the autocallable), P&L attribution with **bucketed vega**, **two-curve discounting**, autocallable/Phoenix/**BRC/reverse-convertible/capital-protected** catalog |
+| **FAITHFUL** | Correct method, scoped scale; real version differs only in size/optimisation | LSV calibration, the payoff DSL (composable leg primitives), Heston QE + Carr–Madan FFT, BGK barrier correction, historical replay, **C++ MC kernel** (one product ported, measured speedup; rest "same pattern") |
+| **STUBBED** | Architecturally present with a clean interface; placeholder implementation | GPU pricing kernels (designed-for; CPU C++ path implemented), message queue (in-process bus that *could* be Kafka) |
 | **SKIPPED (declared)** | Out of scope, named explicitly | Real-time market connectivity, regulatory capital (FRTB), multi-currency/quanto at scale |
 
 ---

@@ -16,7 +16,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from spdt.products.catalog import Autocallable
-from spdt.products.graph import PathSet, PriceResult, Product, present_value
+from spdt.products.graph import Discount, PathSet, PriceResult, Product, present_value
 from spdt.pricing.mc.paths import correlated_gbm_paths
 from spdt.pricing.mc.rng import standard_normals
 
@@ -40,7 +40,9 @@ def _simulation_grid(monitoring: tuple[float, ...], steps_per_year: int | None) 
         return np.array([0.0, *obs])
     n = max(1, int(np.ceil(obs[-1] * steps_per_year)))
     mesh = np.linspace(0.0, obs[-1], n + 1)
-    return np.array(sorted(set([0.0, *mesh.tolist(), *obs])))
+    knots: set[float] = {0.0, *obs}
+    knots.update(float(x) for x in mesh)
+    return np.array(sorted(knots))
 
 
 def price_mc(
@@ -52,8 +54,14 @@ def price_mc(
     seed: int = 0,
     method: str = "pseudo",
     steps_per_year: int | None = None,
+    discount: Discount | None = None,
 ) -> PriceResult:
-    """Monte-Carlo price of ``product`` under ``model`` with a sampling standard error."""
+    """Monte-Carlo price of ``product`` under ``model`` with a sampling standard error.
+
+    ``discount`` overrides the discounting: pass a :class:`~spdt.products.graph.Discounter`
+    to discount the note's funding leg on the issuer curve and its option leg on OIS. When
+    omitted it falls back to the model's own flat ``discount`` (single curve, every leg).
+    """
     grid = _simulation_grid(product.monitoring_times(), steps_per_year)
     normals = standard_normals(
         n_paths, grid.size - 1, antithetic=antithetic, seed=seed, method=method
@@ -61,7 +69,7 @@ def price_mc(
     spots = model.simulate(grid, normals)
     paths = PathSet(times=grid, spots=spots)
     cashflows = product.cashflows(paths)
-    return present_value(cashflows, model.discount, n_paths)
+    return present_value(cashflows, discount or model.discount, n_paths)
 
 
 def price_worst_of_autocallable(
