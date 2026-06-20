@@ -40,8 +40,14 @@ class HestonModel:
     rho: float
     seed: int = 0
 
-    def characteristic_function(self, u: complex | NDArray[np.complex128], t: float) -> complex:
-        """``E[exp(i·u·ln S_T)]`` — Albrecher "little trap" form (stable branch)."""
+    def characteristic_function(
+        self, u: complex | NDArray[np.complex128], t: float
+    ) -> complex | NDArray[np.complex128]:
+        """``E[exp(i·u·ln S_T)]`` — Albrecher "little trap" form (stable branch).
+
+        Accepts a scalar ``u`` (the quadrature vanilla) or a vector ``u`` (the Carr–Madan FFT),
+        returning the matching scalar/array.
+        """
         i = 1j
         xi, kappa, theta, rho, v0 = self.xi, self.kappa, self.theta, self.rho, self.v0
         d = np.sqrt((rho * xi * i * u - kappa) ** 2 + xi * xi * (i * u + u * u))
