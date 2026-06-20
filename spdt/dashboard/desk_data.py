@@ -271,12 +271,20 @@ def _hedging_convergence(model: BlackScholes, *, n_paths: int, seed: int) -> lis
         slip = simulate_delta_hedge(
             model, option, n_steps=n_steps, n_paths=n_paths, seed=seed, slippage_bps=2.0
         )
+        # Same hedge with an overnight-gap overlay: the diffusion error (std) shrinks with
+        # frequency, but the gap tail does not — it can't be rebalanced away.
+        gap = simulate_delta_hedge(
+            model, option, n_steps=n_steps, n_paths=n_paths, seed=seed,
+            jump_intensity=1.0, jump_mean=-0.10, jump_std=0.03,
+        )
         rows.append({
             "n_steps": n_steps,
             "std_pnl": clean.std_pnl,
             "mean_pnl": clean.mean_pnl,
             "mean_pnl_slippage": slip.mean_pnl,
             "slippage_cost": slip.mean_slippage_cost,
+            "tail_clean": -clean.tail_5pct,  # 5% worst loss, no gaps (≈ diffusion error)
+            "tail_gap": -gap.tail_5pct,  # 5% worst loss with overnight gaps (un-hedgeable)
         })
     return rows
 

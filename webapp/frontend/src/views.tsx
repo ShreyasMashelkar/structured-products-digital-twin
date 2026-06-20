@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Desk, PriceResult, StructureResult, priceTrade, solveStructure } from "./lib/api";
 import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trades";
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
-import { AreaSpark, Bars, Histogram, Surface3D, Waterfall } from "./components/charts";
+import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
 import { cn } from "./lib/cn";
 import { fmt, pct, signed } from "./lib/format";
 import { C } from "./lib/theme";
@@ -87,7 +87,7 @@ export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: 
 
 /* ======================= Originate ======================= */
 
-export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) => void }) {
+export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onStage: (t: Trade) => void; volShiftPct?: number }) {
   const [tc, setTc] = useState(0.12);
   const [dd, setDd] = useState(0.3);
   const [mat, setMat] = useState(1);
@@ -178,7 +178,7 @@ export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) =
 
       <SectionTitle>Implied-vol surface · SSVI (arb-free)</SectionTitle>
       <Panel className="p-2">
-        <Surface3D z={desk.surface.iv} x={desk.surface.log_moneyness} y={desk.surface.tenors} height={460} />
+        <Surface3D z={desk.surface.iv} x={desk.surface.log_moneyness} y={desk.surface.tenors} height={460} zShift={volShiftPct} />
       </Panel>
     </div>
   );
@@ -454,8 +454,22 @@ export function Validate({ desk, selectedId }: { desk: Desk; selectedId: string 
           <div className="px-1 pt-1 text-[12px] text-muted">Multi-factor shocks (a crash also spikes vol). {selectedId ? "Showing the selected trade's contribution." : "Select a trade in Book & Risk to decompose."}</div>
         </Panel>
         <Panel className="p-3">
-          <SectionTitle>Dynamic hedge replication error</SectionTitle>
-          <AreaSpark data={desk.hedging} x="n_steps" y="std_pnl" color={C.down} height={300} logX xLabel="rebalances" yLabel="hedging P&L std" />
+          <SectionTitle>Hedge error vs gap risk</SectionTitle>
+          <Lines
+            data={desk.hedging}
+            x="n_steps"
+            logX
+            xLabel="rebalances"
+            yLabel="hedging P&L (₹)"
+            series={[
+              { key: "std_pnl", name: "diffusion error (std)", color: C.teal },
+              { key: "tail_gap", name: "gap-loss tail (5%)", color: C.down },
+            ]}
+            height={300}
+          />
+          <div className="px-1 pt-1 text-[12px] text-muted">
+            Rebalancing more tightens the <span className="text-teal">diffusion error</span> (~1/√N) but leaves the <span className="text-down">overnight gap-loss tail</span> ~flat — gap risk can't be delta-hedged away, the structural tail of a short-gamma autocallable book.
+          </div>
         </Panel>
       </div>
 
