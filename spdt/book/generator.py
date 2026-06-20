@@ -80,10 +80,13 @@ def generate_mixed_book(
         if kind == "autocallable":
             note = _autocallable(rng, initial_fixing)
         elif kind == "brc":
+            # Coupons are semi-annual, but the knock-in is watched quarterly — the barrier
+            # schedule is deliberately denser than (and distinct from) the coupon schedule.
+            quarterly = tuple((j + 1) * 0.25 for j in range(round(maturity * 4)))
             note = BarrierReverseConvertible(
                 100.0, obs, round(float(rng.uniform(0.05, 0.09)), 4),
                 strike=1.0, knock_in=round(float(rng.uniform(0.60, 0.75)), 4),
-                initial_fixing=initial_fixing,
+                barrier_monitoring=quarterly, initial_fixing=initial_fixing,
             )
         elif kind == "reverse_convertible":
             note = ReverseConvertible(

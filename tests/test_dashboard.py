@@ -17,7 +17,9 @@ def test_payload_has_the_desk_sections(desk):
     for key in ("as_of", "spot", "nav", "day_pnl", "net_greeks", "total_reserve",
                 "positions", "pnl_explain", "stress", "reserves", "vega_ladder", "surface"):
         assert key in p
-    assert len(p["positions"]) == 4
+    assert len(p["positions"]) == 7  # 4 generated notes + a 3-basket worst-of sub-book
+    assert sum(pos["product_type"] == "worst_of" for pos in p["positions"]) == 3
+    assert len(p["correlation_risk"]["baskets"]) == 3
     assert p["arb_clean"] is True
 
 
