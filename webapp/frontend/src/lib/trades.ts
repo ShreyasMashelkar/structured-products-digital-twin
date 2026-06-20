@@ -15,6 +15,8 @@ export interface Trade {
   gamma?: number;
   vega?: number;
   rho?: number;
+  vanna?: number;
+  volga?: number;
   day_pnl?: number;
 }
 
@@ -23,6 +25,7 @@ const LABEL: Record<string, string> = {
   brc: "Barrier reverse conv.",
   reverse_convertible: "Reverse conv.",
   capital_protected: "Capital protected",
+  worst_of: "Worst-of autocallable",
 };
 
 export const TYPE_ABBR: Record<string, string> = {
@@ -30,6 +33,7 @@ export const TYPE_ABBR: Record<string, string> = {
   brc: "BRC",
   reverse_convertible: "RC",
   capital_protected: "CPN",
+  worst_of: "WO",
 };
 
 export function productLabel(t: string): string {
@@ -50,6 +54,8 @@ export function bookTrades(desk: Desk): Trade[] {
     gamma: p.gamma,
     vega: p.vega,
     rho: p.rho,
+    vanna: p.vanna,
+    volga: p.volga,
     day_pnl: p.day_pnl,
   }));
 }

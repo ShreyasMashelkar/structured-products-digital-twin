@@ -5,6 +5,7 @@ from spdt.products.catalog import (
     BarrierReverseConvertible,
     CapitalProtectedNote,
     ReverseConvertible,
+    WorstOfAutocallable,
 )
 from spdt.products.graph import (
     Cashflow,
@@ -46,6 +47,7 @@ __all__ = [
     "PriceResult",
     "Product",
     "ReverseConvertible",
+    "WorstOfAutocallable",
     "ShortDownInPutLeg",
     "TermSheet",
     "ZeroCouponLeg",
