@@ -7,7 +7,7 @@ export interface Desk {
   market_move: { spot_bp: number; vol_pt: number; horizon_days: number };
   nav: number;
   day_pnl: number;
-  net_greeks: { delta: number; gamma: number; vega: number; rho: number };
+  net_greeks: { delta: number; gamma: number; vega: number; rho: number; vanna: number; volga: number };
   total_reserve: number;
   total_model_reserve: number;
   funding_spread_bp: number;

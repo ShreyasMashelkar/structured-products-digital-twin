@@ -110,6 +110,31 @@ def _position_record(product: Product) -> dict[str, Any]:
     raise TypeError(f"no position record for {type(product).__name__}")
 
 
+def _book_cross_greeks(trades, model0, *, n_paths: int, seed: int) -> tuple[float, float]:
+    """Net **vanna** (∂²PV/∂S∂σ) and **volga** (∂²PV/∂σ²) for the book, by CRN central bumps.
+
+    These let the live strip re-mark vega as spot/vol tick (vega ≈ vega₀ + vanna·dS + volga·dσ)
+    rather than freezing it — the cross-greeks a desk watches alongside delta.
+    """
+    import dataclasses
+
+    s0, sig0 = model0.spot, model0.sigma
+    hs, hv = s0 * 1e-2, 1e-2
+
+    def pv(spot: float | None = None, sigma: float | None = None) -> float:
+        m = dataclasses.replace(
+            model0, spot=s0 if spot is None else spot, sigma=sig0 if sigma is None else sigma
+        )
+        return sum(t.direction * price_mc(t.product, m, n_paths=n_paths, seed=seed).price
+                   for t in trades)
+
+    pp, pm = pv(s0 + hs, sig0 + hv), pv(s0 + hs, sig0 - hv)
+    mp, mm = pv(s0 - hs, sig0 + hv), pv(s0 - hs, sig0 - hv)
+    vanna = (pp - pm - mp + mm) / (4.0 * hs * hv)
+    volga = (pv(sigma=sig0 + hv) - 2.0 * pv() + pv(sigma=sig0 - hv)) / (hv * hv)
+    return vanna, volga
+
+
 def _flat_total_variance(sigma: float):
     """A flat total-variance surface ``w(k, t) = σ²·t`` for the model-risk LV/LSV models."""
 
@@ -350,6 +375,9 @@ def build_desk_data(
         bucket = f"{p['maturity']:.1f}y"
         vega_ladder[bucket] = vega_ladder.get(bucket, 0.0) + p["vega"]
 
+    # Net cross-greeks so the live strip can re-mark vega as spot/vol tick (vanna, volga).
+    net_vanna, net_volga = _book_cross_greeks(trades, model0, n_paths=min(n_paths, 8000), seed=seed)
+
     # L11 — model reserve: LSV − LV per note (merged into the per-trade reserve rows).
     lsv_lv = _lsv_lv_reserves(notes_list, spot, r, q, atm_vol, seed=seed)
     for row, gap in zip(reserves, lsv_lv):
@@ -386,6 +414,7 @@ def build_desk_data(
         "net_greeks": {
             "delta": book.net_greeks.delta, "gamma": book.net_greeks.gamma,
             "vega": book.net_greeks.vega, "rho": book.net_greeks.rho,
+            "vanna": net_vanna, "volga": net_volga,
         },
         "total_reserve": sum(r_["bid_offer"] for r_ in reserves),
         "total_model_reserve": sum(r_.get("lsv_minus_lv", 0.0) for r_ in reserves),

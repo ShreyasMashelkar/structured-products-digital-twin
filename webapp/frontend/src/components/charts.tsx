@@ -51,6 +51,7 @@ export function AreaSpark({
   xLabel,
   yLabel,
   logX = false,
+  yTickFormat,
 }: {
   data: any[];
   x: string;
@@ -61,11 +62,12 @@ export function AreaSpark({
   xLabel?: string;
   yLabel?: string;
   logX?: boolean;
+  yTickFormat?: (v: number) => string;
 }) {
   const id = `g-${y}-${color.replace("#", "")}`;
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <AreaChart data={data} margin={{ top: 10, right: 16, bottom: 18, left: 4 }}>
+      <AreaChart data={data} margin={{ top: 10, right: 16, bottom: 18, left: yLabel ? 16 : 4 }}>
         <defs>
           <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={color} stopOpacity={0.28} />
@@ -83,8 +85,9 @@ export function AreaSpark({
         <YAxis
           {...axis}
           domain={yDomain ?? ["auto", "auto"]}
-          width={48}
-          label={yLabel ? { value: yLabel, angle: -90, position: "insideLeft", fill: C.muted, fontSize: 11 } : undefined}
+          width={58}
+          tickFormatter={yTickFormat}
+          label={yLabel ? { value: yLabel, angle: -90, position: "left", offset: -2, fill: C.muted, fontSize: 11 } : undefined}
         />
         <Tooltip content={<Tip />} cursor={{ stroke: C.border }} />
         <Area
@@ -137,7 +140,13 @@ export function Bars({
         {horizontal ? (
           <>
             <XAxis type="number" {...axis} />
-            <YAxis type="category" dataKey={x} {...axis} width={64} />
+            <YAxis
+              type="category"
+              dataKey={x}
+              {...axis}
+              width={104}
+              tickFormatter={(v) => String(v).replace(/_/g, " ")}
+            />
           </>
         ) : (
           <>

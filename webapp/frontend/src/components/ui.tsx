@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 
 export function Panel({ className, children }: { className?: string; children: ReactNode }) {
@@ -16,7 +16,7 @@ export function Panel({ className, children }: { className?: string; children: R
 
 export function SectionTitle({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-3 flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.13em] text-ink">
+    <div className="mb-3 flex items-center gap-2 text-small font-bold uppercase tracking-[0.13em] text-ink">
       <span className="h-[2px] w-3.5 rounded bg-accent" />
       {children}
     </div>
@@ -42,22 +42,39 @@ export function Kpi({
   value,
   sub,
   tone = "",
+  flashKey,
 }: {
   label: string;
   value: string;
   sub?: string;
   tone?: Tone;
+  flashKey?: number; // when this number changes, the tile flashes up/down (live re-mark)
 }) {
+  const prev = useRef(flashKey);
+  const [flash, setFlash] = useState("");
+  useEffect(() => {
+    if (flashKey === undefined || prev.current === undefined) {
+      prev.current = flashKey;
+      return;
+    }
+    if (flashKey !== prev.current) {
+      setFlash(flashKey > prev.current ? "flash-up" : "flash-down");
+      const t = setTimeout(() => setFlash(""), 600);
+      prev.current = flashKey;
+      return () => clearTimeout(t);
+    }
+  }, [flashKey]);
   return (
     <div className="group relative h-full overflow-hidden rounded-xl border border-border bg-gradient-to-br from-panel to-panel2 px-4 py-3 transition-all hover:-translate-y-0.5 hover:border-accent/60">
+      {flash && <span className={cn("pointer-events-none absolute inset-0", flash)} />}
       <span className={cn("absolute left-0 top-0 bottom-0 w-[3px]", barTone[tone])} />
-      <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted">
+      <div className="relative text-label font-semibold uppercase tracking-[0.12em] text-muted">
         {label}
       </div>
-      <div className={cn("tnum mt-1.5 text-[1.55rem] font-semibold leading-none", valTone[tone])}>
+      <div className={cn("tnum relative mt-1.5 text-display font-semibold leading-none", valTone[tone])}>
         {value}
       </div>
-      {sub && <div className="mt-1.5 text-[11px] text-muted">{sub}</div>}
+      {sub && <div className="relative mt-1.5 text-small text-muted">{sub}</div>}
     </div>
   );
 }
@@ -72,7 +89,7 @@ export function Chip({
   return (
     <span
       className={cn(
-        "mr-1.5 inline-block rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
+        "mr-1.5 inline-block rounded-full border px-2.5 py-0.5 text-small font-medium",
         hot
           ? "border-accent/60 bg-accent/10 text-accent"
           : "border-border bg-panel2 text-muted",
@@ -99,7 +116,7 @@ export function Tabs({
           key={t}
           onClick={() => onChange(t)}
           className={cn(
-            "rounded-t-lg px-4 py-2.5 text-[12.5px] font-semibold tracking-[0.04em] transition-colors",
+            "ring-desk rounded-t-lg px-4 py-2.5 text-body font-semibold tracking-[0.04em] transition-colors",
             active === t
               ? "border-b-2 border-accent text-accent"
               : "text-muted hover:bg-white/[0.02] hover:text-ink",
@@ -131,14 +148,14 @@ export function DataTable<T extends Record<string, any>>({
 }) {
   return (
     <div className="overflow-auto rounded-xl border border-border" style={{ maxHeight: max }}>
-      <table className="w-full border-collapse text-[12.5px]">
+      <table className="w-full border-collapse text-body">
         <thead className="sticky top-0 z-10 bg-panel2">
           <tr>
             {cols.map((c) => (
               <th
                 key={String(c.key)}
                 className={cn(
-                  "border-b border-border px-3 py-2.5 text-[10px] font-bold uppercase tracking-[0.06em] text-muted",
+                  "border-b border-border px-3 py-2.5 text-micro font-bold uppercase tracking-[0.06em] text-muted",
                   c.align === "right" ? "text-right" : "text-left",
                 )}
               >
