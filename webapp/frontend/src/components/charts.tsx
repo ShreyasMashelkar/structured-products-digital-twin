@@ -5,6 +5,9 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
+  Legend,
+  Line,
+  LineChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -101,6 +104,36 @@ export function AreaSpark({
           name={yLabel || y}
         />
       </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
+export function Lines({
+  data, x, series, height = 300, logX = false, xLabel, yLabel,
+}: {
+  data: any[];
+  x: string;
+  series: { key: string; name: string; color: string }[];
+  height?: number;
+  logX?: boolean;
+  xLabel?: string;
+  yLabel?: string;
+}) {
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <LineChart data={data} margin={{ top: 10, right: 18, bottom: 18, left: 8 }}>
+        <CartesianGrid stroke={C.grid} strokeDasharray="2 4" vertical={false} />
+        <XAxis dataKey={x} {...axis} scale={logX ? "log" : "auto"} domain={logX ? ["auto", "auto"] : undefined}
+          label={xLabel ? { value: xLabel, position: "insideBottom", offset: -8, fill: C.muted, fontSize: 11 } : undefined} />
+        <YAxis {...axis} width={44}
+          label={yLabel ? { value: yLabel, angle: -90, position: "left", offset: -2, fill: C.muted, fontSize: 11 } : undefined} />
+        <Tooltip content={<Tip />} cursor={{ stroke: C.border }} />
+        <Legend wrapperStyle={{ fontSize: 11, color: C.muted }} />
+        {series.map((s) => (
+          <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color}
+            strokeWidth={2.2} dot={{ r: 2, fill: s.color, strokeWidth: 0 }} activeDot={{ r: 4 }} />
+        ))}
+      </LineChart>
     </ResponsiveContainer>
   );
 }
@@ -240,18 +273,21 @@ export function Surface3D({
   x,
   y,
   height = 460,
+  zShift = 0,
 }: {
   z: number[][];
   x: number[];
   y: number[];
   height?: number;
+  zShift?: number; // parallel vol shift (in IV %) — the live ATM move, applied to the whole surface
 }) {
+  const zz = zShift ? z.map((row) => row.map((v) => v + zShift)) : z;
   return (
     <Plot
       data={[
         {
           type: "surface",
-          z,
+          z: zz,
           x,
           y,
           colorscale: SURFACE_SCALE,
