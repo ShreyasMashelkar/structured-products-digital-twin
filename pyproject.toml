@@ -59,6 +59,7 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "spdt.pricing.models.lsv",
+    "spdt.pricing.pde.crank_nicolson",
     "spdt.hedging.delta_vega",
     "spdt.vol.arbitrage",
 ]
