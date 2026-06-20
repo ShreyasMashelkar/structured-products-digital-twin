@@ -44,7 +44,8 @@ export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: 
     { name: "Vanna", value: e.vanna_pnl }, { name: "Residual", value: e.residual },
     { name: "Total", value: e.total, total: true },
   ];
-  const gamma = [...desk.positions].sort((a, b) => a.gamma - b.gamma).slice(0, 8).map((p) => ({ trade: p.trade_id, gamma: p.gamma }));
+  // Cash gamma (= Γ·S²·1%, the change in ₹-delta per 1% move) — raw ∂²PV/∂S² is ~0 at S≈22k.
+  const gamma = [...desk.positions].sort((a, b) => a.gamma - b.gamma).slice(0, 8).map((p) => ({ trade: p.trade_id, gamma: p.gamma * desk.spot * desk.spot * 0.01 }));
   const movers = [...desk.pnl_by_trade].sort((a, b) => Math.abs(b.total) - Math.abs(a.total)).slice(0, 6);
   const worst = [...desk.stress].sort((a, b) => a.pnl - b.pnl);
 
@@ -73,8 +74,8 @@ export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: 
       </div>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Panel className="p-3">
-          <SectionTitle>Top gamma concentration</SectionTitle>
-          <Bars data={gamma} x="trade" y="gamma" color={C.down} height={300} horizontal />
+          <SectionTitle>Top gamma concentration · cash Γ /1%</SectionTitle>
+          <Bars data={gamma} x="trade" y="gamma" color={C.down} height={300} horizontal yLabel="cash Γ /1%" />
         </Panel>
         <Panel className="p-3">
           <SectionTitle>Worst stress scenarios</SectionTitle>
@@ -232,7 +233,7 @@ export function TradeDetail({ trade, desk }: { trade: Trade; desk: Desk }) {
         <>
           <div className="grid grid-cols-4 gap-2">
             <GreekStat label="Δ / 1%" value={signed((trade.delta ?? 0) * desk.spot * 0.01, 2)} tone={(trade.delta ?? 0) >= 0 ? "pos" : "neg"} />
-            <GreekStat label="Γ" value={fmt(trade.gamma ?? 0, 5)} />
+            <GreekStat label="cash Γ /1%" value={fmt((trade.gamma ?? 0) * desk.spot * desk.spot * 0.01, 2)} />
             <GreekStat label="ν / pt" value={signed((trade.vega ?? 0) / 100, 2)} tone={(trade.vega ?? 0) >= 0 ? "pos" : "neg"} />
             <GreekStat label="corr Δ" value={fmt(trade.params.corr_delta ?? 0, 2)} tone={(trade.params.corr_delta ?? 0) >= 0 ? "pos" : "neg"} />
           </div>
@@ -246,7 +247,7 @@ export function TradeDetail({ trade, desk }: { trade: Trade; desk: Desk }) {
         <>
           <div className="grid grid-cols-4 gap-2">
             <GreekStat label="Δ / 1%" value={signed(r.greeks.cash_delta, 2)} tone={r.greeks.cash_delta >= 0 ? "pos" : "neg"} />
-            <GreekStat label="Γ" value={fmt(r.greeks.gamma, 5)} />
+            <GreekStat label="cash Γ /1%" value={fmt(r.greeks.gamma * desk.spot * desk.spot * 0.01, 2)} />
             <GreekStat label="ν / pt" value={signed(r.greeks.vega_pt, 2)} tone={r.greeks.vega_pt >= 0 ? "pos" : "neg"} />
             <GreekStat label="ρ" value={fmt(r.greeks.rho, 1)} />
           </div>
@@ -349,7 +350,7 @@ function BookAggregate({ desk, onPickTenor, mk }: { desk: Desk; onPickTenor: (b:
   const ladder = Object.entries(ladderMap)
     .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))
     .map(([bucket, vega]) => ({ bucket, vega }));
-  const gamma = [...desk.positions].sort((a, b) => a.gamma - b.gamma).map((p) => ({ trade: p.trade_id, gamma: p.gamma }));
+  const gamma = [...desk.positions].sort((a, b) => a.gamma - b.gamma).map((p) => ({ trade: p.trade_id, gamma: p.gamma * desk.spot * desk.spot * 0.01 }));
   const g = desk.net_greeks;
   const netDelta = desk.positions.reduce((a, p) => a + p.delta + (mk.sim ? p.gamma * mk.dS + (p.vanna ?? 0) * mk.dVol : 0), 0);
   const netVega = desk.positions.reduce((a, p) => a + liveVega(p), 0);
@@ -365,8 +366,8 @@ function BookAggregate({ desk, onPickTenor, mk }: { desk: Desk; onPickTenor: (b:
         </div>
       </Panel>
       <Panel className="p-3">
-        <SectionTitle>Gamma concentration</SectionTitle>
-        <Bars data={gamma} x="trade" y="gamma" color={C.down} height={300} horizontal />
+        <SectionTitle>Gamma concentration · cash Γ /1%</SectionTitle>
+        <Bars data={gamma} x="trade" y="gamma" color={C.down} height={300} horizontal yLabel="cash Γ /1%" />
       </Panel>
       {desk.correlation_risk.baskets.length > 0 && (
         <Panel className="p-3">
@@ -387,7 +388,7 @@ function BookAggregate({ desk, onPickTenor, mk }: { desk: Desk; onPickTenor: (b:
         </Panel>
       )}
       <div className="flex flex-wrap gap-1.5">
-        <Chip>net Δ {fmt(netDelta, 4)}</Chip><Chip>net Γ {fmt(g.gamma, 5)}</Chip>
+        <Chip>net Δ {fmt(netDelta, 4)}</Chip><Chip>net cash Γ/1% {fmt(g.gamma * desk.spot * desk.spot * 0.01, 2)}</Chip>
         <Chip>net ν {fmt(netVega, 1)}</Chip><Chip>net ρ {fmt(g.rho, 1)}</Chip>
         <Chip hot={!desk.hedge_capacity.within_capacity}>
           hedge {desk.hedge_capacity.days_to_hedge < 0.1 ? "<0.1" : fmt(desk.hedge_capacity.days_to_hedge, 1)}d @ {pct(desk.hedge_capacity.participation, 0)} ADV
