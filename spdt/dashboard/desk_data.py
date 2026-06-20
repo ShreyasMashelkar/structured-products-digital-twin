@@ -27,7 +27,14 @@ from spdt.data.ingest.synthetic import SyntheticSource
 from spdt.hedging import simulate_delta_hedge
 from spdt.modelrisk import model_gap_reserve, vol_bid_offer_reserve
 from spdt.pnl import attribute
-from spdt.pricing import BlackScholes, Discounter, price_mc
+from spdt.core.types import Curve
+from spdt.pricing import (
+    BlackScholes,
+    Discounter,
+    price_mc,
+    price_worst_of,
+    worst_of_greeks,
+)
 from spdt.pricing.models import LocalVolModel, LSVModel, local_vol_from_surface
 from spdt.products import (
     Autocallable,
@@ -37,6 +44,7 @@ from spdt.products import (
     Leg,
     Product,
     ReverseConvertible,
+    WorstOfAutocallable,
 )
 from spdt.stress import STANDARD_SCENARIOS, stress_book
 from spdt.vol import VolSurface
@@ -90,7 +98,9 @@ def _position_record(product: Product) -> dict[str, Any]:
             "observation_times": list(product.observation_times),
             "maturity": round(product.observation_times[-1], 2),
             "params": {"coupon_rate": product.coupon_rate, "strike": product.strike,
-                       "knock_in": product.knock_in},
+                       "knock_in": product.knock_in,
+                       "barrier_monitoring": (list(product.barrier_monitoring)
+                                              if product.barrier_monitoring else None)},
         }
     if isinstance(product, ReverseConvertible):
         return {
@@ -133,6 +143,114 @@ def _book_cross_greeks(trades, model0, *, n_paths: int, seed: int) -> tuple[floa
     vanna = (pp - pm - mp + mm) / (4.0 * hs * hv)
     volga = (pv(sigma=sig0 + hv) - 2.0 * pv() + pv(sigma=sig0 - hv)) / (hv * hv)
     return vanna, volga
+
+
+# A small worst-of sub-book across distinct name-triples — the desk's correlation-selling
+# franchise, with varied baskets, coupons, barriers and correlation regimes.
+_WORST_OF_SPECS = [
+    {"id": "WO-000", "short": "NIFTY/BNF/RIL", "names": ("NIFTY", "BANKNIFTY", "RELIANCE"),
+     "rho": 0.60, "coupon": 0.06, "cb": 0.75, "ki": 0.60, "vol_mult": (1.0, 1.15, 0.90)},
+    {"id": "WO-001", "short": "TCS/INFY/HCL", "names": ("TCS", "INFY", "HCLTECH"),
+     "rho": 0.55, "coupon": 0.07, "cb": 0.70, "ki": 0.55, "vol_mult": (1.10, 1.05, 1.20)},
+    {"id": "WO-002", "short": "SBI/ICICI/AXIS", "names": ("SBIN", "ICICIBANK", "AXISBANK"),
+     "rho": 0.78, "coupon": 0.05, "cb": 0.80, "ki": 0.65, "vol_mult": (1.20, 1.15, 1.25)},
+]
+
+
+def _worst_of_position(spec: dict, spot: float, atm_vol: float, r: float, q: float, *,
+                       seed: int, n_paths: int) -> tuple[dict[str, Any], float]:
+    """One struck 3-name worst-of autocallable + its correlation-breakdown stress P&L (L4/L12).
+
+    The desk's correlation-selling workhorse: a worst-of pays a higher coupon than any single
+    name because the investor is short the basket's dispersion. Returns the booked position
+    (priced + greeks, incl. a correlation delta) and the P&L if average correlation jumps to 0.9.
+    """
+    names = spec["names"]
+    spots0 = np.array([spot, spot, spot])
+    vols = np.array([atm_vol * m for m in spec["vol_mult"]])
+    corr = np.full((3, 3), spec["rho"])
+    np.fill_diagonal(corr, 1.0)
+    obs = (0.25, 0.5, 0.75, 1.0)
+    note = WorstOfAutocallable(
+        notional=100.0, observation_times=obs, coupon_rate=spec["coupon"], autocall_level=1.0,
+        coupon_barrier=spec["cb"], knock_in=spec["ki"], memory=True, underlyings=names,
+        initial_fixings=tuple(float(s) for s in spots0),
+    )
+    g = worst_of_greeks(note, spots0, vols, corr, r=r, q=q, n_paths=n_paths, seed=seed)
+    corr_up = np.full((3, 3), 0.9)
+    np.fill_diagonal(corr_up, 1.0)
+    pv_corr = price_worst_of(note, spots0, vols, corr_up, r=r, q=q, n_paths=n_paths, seed=seed).price
+
+    pos = {
+        "trade_id": spec["id"], "underlying": spec["short"], "product_type": "worst_of",
+        "notional": 100.0, "observation_times": list(obs), "maturity": obs[-1],
+        "params": {"coupon_rate": spec["coupon"], "autocall_level": 1.0, "coupon_barrier": spec["cb"],
+                   "knock_in": spec["ki"], "underlyings": list(names), "correlation": spec["rho"],
+                   "corr_delta": g["corr_delta"]},
+        "coupon": spec["coupon"], "autocall": 1.0, "coupon_barrier": spec["cb"],
+        "knock_in": spec["ki"], "memory": True,
+        "pv": g["pv"], "delta": g["delta"] / spot, "gamma": g["gamma"] / (spot * spot),
+        "vega": g["vega"], "vanna": 0.0, "volga": 0.0, "day_pnl": 0.0,
+    }
+    return pos, pv_corr - g["pv"]
+
+
+def _worst_of_book(spot: float, atm_vol: float, r: float, q: float, *, seed: int,
+                   n_paths: int = 12_000) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    """The worst-of sub-book: one position per spec, plus per-trade correlation-breakdown P&L."""
+    positions: list[dict[str, Any]] = []
+    corr_pnl: dict[str, float] = {}
+    for i, spec in enumerate(_WORST_OF_SPECS):
+        pos, cp = _worst_of_position(spec, spot, atm_vol, r, q, seed=seed + i, n_paths=n_paths)
+        positions.append(pos)
+        corr_pnl[str(spec["id"])] = cp
+    return positions, corr_pnl
+
+
+def _issuer_spread_stress(trades, model0, snap, *, spread_bp: float, n_paths: int, seed: int
+                          ) -> dict[str, float]:
+    """Per-trade MTM impact of the issuer's own funding spread widening by ``spread_bp`` (L11/L12).
+
+    Re-discounts every booked note's funding (bond) leg on a wider issuer curve — the classic
+    own-credit effect on outstanding liabilities. Realises ADR-0002's claim that the spread is
+    a *shockable* factor, flowed through to booked positions, not just used at origination.
+    """
+    base = Discounter.from_snapshot(snap)
+    fc = snap.funding_curve
+    wide_knots = {d: s + spread_bp * 1e-4 for d, s in (fc.spread_knots or {}).items()}
+    wide = Curve(anchor=fc.anchor, spread_over=snap.ois_curve, spread_knots=wide_knots)
+    wide_disc = Discounter(ois=snap.ois_curve.df, funding=wide.df)
+    out: dict[str, float] = {}
+    for t in trades:
+        b = t.direction * price_mc(t.product, model0, n_paths=n_paths, seed=seed, discount=base).price
+        w = t.direction * price_mc(t.product, model0, n_paths=n_paths, seed=seed, discount=wide_disc).price
+        out[t.trade_id] = w - b
+    return out
+
+
+def _hedge_capacity(positions: list[dict[str, Any]], spot: float, *, face_per_note: float = 5e7
+                    ) -> dict[str, Any]:
+    """Rough ADV-based delta-hedge capacity sanity check (illustrative ADV/ticket) (L9).
+
+    A real desk never quotes a note without checking it can actually delta-hedge the size in
+    the underlying's traded volume. We scale each position's delta to a representative ticket,
+    sum the gross underlying hedge notional, and express it as days-to-unwind at 20% of a
+    representative NIFTY ADV — a back-of-envelope guardrail, not a precise capacity model.
+    """
+    adv_inr = 1.2e11  # representative NIFTY cash+futures ADV (₹)
+    participation = 0.20
+    scale = face_per_note / 100.0  # positions are quoted per 100 notional
+    # |∂PV/∂S|·S = the ₹ underlying position the desk must hold to be delta-flat, per note.
+    hedge_notional = sum(abs(p.get("delta", 0.0)) * spot * scale for p in positions)
+    days = hedge_notional / (adv_inr * participation) if adv_inr else 0.0
+    return {
+        "book_face_inr": face_per_note * len(positions),
+        "hedge_notional_inr": hedge_notional,
+        "adv_inr": adv_inr,
+        "participation": participation,
+        "days_to_hedge": days,
+        "within_capacity": days < 1.0,
+    }
 
 
 def _flat_total_variance(sigma: float):
@@ -351,6 +469,8 @@ def build_desk_data(
             "gamma": mark.greeks.gamma,
             "vega": mark.greeks.vega,
             "rho": mark.greeks.rho,
+            "vanna": explain.vanna,
+            "volga": explain.volga,
             "day_pnl": explain.total,
         })
         pnl_by_trade.append({"trade_id": trade.trade_id, "total": explain.total,
@@ -359,15 +479,49 @@ def build_desk_data(
         for key in book_pnl:
             book_pnl[key] += getattr(explain, key)
 
+    # L4 — a first-class worst-of *sub-book* (uses correlation) booked alongside the single names.
+    worst_of_positions, wo_corr_pnl = _worst_of_book(spot, atm_vol, r, q, seed=seed)
+    positions.extend(worst_of_positions)
+    wo_pv = sum(p["pv"] for p in worst_of_positions)
+    wo_delta = sum(p["delta"] for p in worst_of_positions)
+    wo_gamma = sum(p["gamma"] for p in worst_of_positions)
+    wo_vega = sum(p["vega"] for p in worst_of_positions)
+    net_corr_delta = sum(p["params"]["corr_delta"] for p in worst_of_positions)
+    correlation_risk = {
+        "net_corr_delta": net_corr_delta,
+        "baskets": [
+            {"trade_id": p["trade_id"], "underlyings": p["params"]["underlyings"],
+             "correlation": p["params"]["correlation"], "corr_delta": p["params"]["corr_delta"],
+             "pv": p["pv"], "coupon": p["coupon"]}
+            for p in worst_of_positions
+        ],
+    }
+
     # L12 — coherent stress scenarios across the book, with a per-trade decomposition.
     stress_results = [
         stress_book(trades, model0, sc, n_paths=n_paths, seed=seed) for sc in STANDARD_SCENARIOS
     ]
+    book_pv_total = book.total_pv + wo_pv
     stress = [
-        {"scenario": r.scenario, "pnl": r.pnl, "pct": 100.0 * r.pnl / book.total_pv}
+        {"scenario": r.scenario, "pnl": r.pnl, "pct": 100.0 * r.pnl / book_pv_total}
         for r in stress_results
     ]
     stress_by_trade = {r.scenario: r.per_trade_pnl for r in stress_results}
+
+    # Correlation breakdown — the worst-of sub-book's signature risk (single names are immune).
+    corr_total = sum(wo_corr_pnl.values())
+    stress.append({"scenario": "corr_breakdown", "pnl": corr_total,
+                   "pct": 100.0 * corr_total / book_pv_total})
+    stress_by_trade["corr_breakdown"] = wo_corr_pnl
+
+    # Issuer funding-spread widening (+50bp), re-discounted through every booked note (own-credit).
+    spread_pnl = _issuer_spread_stress(
+        trades, model0, snap, spread_bp=50.0, n_paths=min(n_paths, 10_000), seed=seed
+    )
+    spread_total = sum(spread_pnl.values())
+    stress.append({"scenario": "issuer_spread_+50bp", "pnl": spread_total,
+                   "pct": 100.0 * spread_total / book_pv_total})
+    stress_by_trade["issuer_spread_+50bp"] = spread_pnl
 
     # Risk aggregations: vega by maturity bucket, gamma concentration.
     vega_ladder: dict[str, float] = {}
@@ -392,6 +546,7 @@ def build_desk_data(
     funding_spread_bp = round(
         (snap.funding_curve.zero_rate(longest) - snap.ois_curve.zero_rate(longest)) * 1e4, 1
     )
+    hedge_capacity = _hedge_capacity(positions, spot)
 
     # L2 — surface grid for the heatmap.
     ks = np.linspace(-0.35, 0.35, 25)
@@ -409,11 +564,13 @@ def build_desk_data(
         "spot": spot,
         "model": {"r": r, "q": q, "atm_vol": atm_vol},
         "market_move": {"spot_bp": 80, "vol_pt": 0.3, "horizon_days": 1},
-        "nav": book.total_pv,
+        "nav": book.total_pv + wo_pv,
         "day_pnl": book_pnl["total"],
         "net_greeks": {
-            "delta": book.net_greeks.delta, "gamma": book.net_greeks.gamma,
-            "vega": book.net_greeks.vega, "rho": book.net_greeks.rho,
+            "delta": book.net_greeks.delta + wo_delta,
+            "gamma": book.net_greeks.gamma + wo_gamma,
+            "vega": book.net_greeks.vega + wo_vega,
+            "rho": book.net_greeks.rho,
             "vanna": net_vanna, "volga": net_volga,
         },
         "total_reserve": sum(r_["bid_offer"] for r_ in reserves),
@@ -432,6 +589,8 @@ def build_desk_data(
         "backtest": backtest,
         "structuring": structuring,
         "catalog": catalog,
+        "hedge_capacity": hedge_capacity,
+        "correlation_risk": correlation_risk,
     }
     return DeskData(payload)
 
