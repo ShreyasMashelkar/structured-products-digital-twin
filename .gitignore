@@ -46,3 +46,4 @@ webapp/frontend/.vite/
 
 # generated desk dashboard cache
 dashboard_data/
+webapp/frontend/tsconfig.tsbuildinfo
