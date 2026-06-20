@@ -11,9 +11,33 @@ from __future__ import annotations
 from datetime import date
 
 from spdt.core.snapshot import MarketSnapshot
+from spdt.data.ingest import RawMarketData
 from spdt.data.ingest.fbil import fetch_fbil_ois_instruments
 from spdt.data.ingest.nse_bhavcopy import NseBhavcopySource
 from spdt.data.snapshot_builder import build_snapshot
+
+
+def fetch_live_raw(
+    as_of: date,
+    underlying: str = "NIFTY",
+    *,
+    dividend_yield: float = 0.013,
+    funding_spread: float = 0.012,
+    timeout: float = 30.0,
+) -> RawMarketData:
+    """Fetch the raw live market data (NSE option chain + FBIL-bootstrapped rates) for ``as_of``.
+
+    Hits the network. Exposed separately from :func:`build_live_snapshot` so callers that also
+    need the raw option chain (e.g. surface calibration) don't have to fetch it twice.
+    """
+    _, rate_instruments = fetch_fbil_ois_instruments(anchor=as_of, timeout=timeout)
+    source = NseBhavcopySource(
+        dividend_yield=dividend_yield,
+        funding_spread=funding_spread,
+        rate_instruments=rate_instruments,
+        timeout=timeout,
+    )
+    return source.fetch(as_of, underlying)
 
 
 def build_live_snapshot(
@@ -30,11 +54,9 @@ def build_live_snapshot(
     public endpoint serves the latest published curve, so for historical ``as_of`` the rates
     are the most recent ones (point-in-time FBIL history via ``fetchfiltered`` is a refinement).
     """
-    _, rate_instruments = fetch_fbil_ois_instruments(anchor=as_of, timeout=timeout)
-    source = NseBhavcopySource(
-        dividend_yield=dividend_yield,
-        funding_spread=funding_spread,
-        rate_instruments=rate_instruments,
-        timeout=timeout,
+    return build_snapshot(
+        fetch_live_raw(
+            as_of, underlying, dividend_yield=dividend_yield,
+            funding_spread=funding_spread, timeout=timeout,
+        )
     )
-    return build_snapshot(source.fetch(as_of, underlying))
