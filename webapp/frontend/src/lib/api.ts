@@ -23,6 +23,18 @@ export interface Desk {
   hedging: any[];
   backtest: any;
   catalog: any[];
+  hedge_capacity: {
+    book_face_inr: number;
+    hedge_notional_inr: number;
+    adv_inr: number;
+    participation: number;
+    days_to_hedge: number;
+    within_capacity: boolean;
+  };
+  correlation_risk: {
+    net_corr_delta: number;
+    baskets: { trade_id: string; underlyings: string[]; correlation: number; corr_delta: number; pv: number; coupon: number }[];
+  };
 }
 
 export interface StructureResult {
@@ -72,6 +84,7 @@ export async function solveStructure(body: {
   max_downside: number;
   maturity: number;
   obs_per_year: number;
+  fee?: number;
 }): Promise<StructureResult> {
   const r = await fetch("/api/structure", {
     method: "POST",

@@ -92,6 +92,7 @@ export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) =
   const [dd, setDd] = useState(0.3);
   const [mat, setMat] = useState(1);
   const [obs, setObs] = useState(4);
+  const [fee, setFee] = useState(1);
   const [res, setRes] = useState<StructureResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [staged, setStaged] = useState(false);
@@ -100,11 +101,11 @@ export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) =
     let cancel = false;
     setLoading(true);
     const id = setTimeout(() => {
-      solveStructure({ target_coupon: tc, max_downside: dd, maturity: mat, obs_per_year: obs })
+      solveStructure({ target_coupon: tc, max_downside: dd, maturity: mat, obs_per_year: obs, fee })
         .then((r) => !cancel && setRes(r)).finally(() => !cancel && setLoading(false));
     }, 250);
     return () => { cancel = true; clearTimeout(id); };
-  }, [tc, dd, mat, obs]);
+  }, [tc, dd, mat, obs, fee]);
 
   function addToBook() {
     if (!res?.solved_annual_coupon) return;
@@ -129,11 +130,12 @@ export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) =
     <div className="space-y-4">
       <SectionTitle>Client brief → proposed structure → solve to par → book</SectionTitle>
       <Panel className="p-4">
-        <div className="grid grid-cols-1 gap-5 md:grid-cols-4">
+        <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
           <Slider label="Target annual coupon" value={tc} min={0.04} max={0.2} step={0.01} onChange={setTc} display={pct(tc, 0)} />
           <Slider label="Downside they can stomach" value={dd} min={0.1} max={0.5} step={0.05} onChange={setDd} display={pct(dd, 0)} />
           <Slider label="Maturity (years)" value={mat} min={1} max={3} step={1} onChange={setMat} display={`${mat}y`} />
           <Slider label="Observations / year" value={obs} min={2} max={12} step={2} onChange={setObs} display={`${obs}`} />
+          <Slider label="Placement fee" value={fee} min={0} max={3} step={0.25} onChange={setFee} display={`${fee.toFixed(2)}`} />
         </div>
       </Panel>
 
@@ -146,7 +148,7 @@ export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) =
           </div>
           {res?.solved_annual_coupon != null ? (
             <>
-              <div className="text-[11px] uppercase tracking-[0.1em] text-muted">Solved coupon to par (1.00 fee)</div>
+              <div className="text-small uppercase tracking-[0.1em] text-muted">Solved coupon to par ({fee.toFixed(2)} fee)</div>
               <div className="tnum mt-1 text-hero font-bold leading-none text-ink">{pct(res.solved_annual_coupon, 2)}<span className="ml-1.5 text-figure font-medium text-muted">p.a.</span></div>
               <div className="mt-1.5 text-[12px] text-muted">vs indicative {pct(res.indicative_annual_coupon, 2)} · model PV <span className="tnum text-ink">{fmt(res.achieved_pv ?? 0, 2)}</span></div>
               <div className={cn("mt-3 rounded-lg border px-3 py-2 text-[12px]", res.achievable ? "border-up/30 bg-up/5 text-up" : "border-down/30 bg-down/5 text-down")}>
@@ -185,10 +187,16 @@ export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) =
 /* ======================= Trade detail (live price) ======================= */
 
 export function TradeDetail({ trade, desk }: { trade: Trade; desk: Desk }) {
+  const isWO = trade.product_type === "worst_of";
   const [r, setR] = useState<PriceResult | null>(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     let cancel = false;
+    if (isWO) {
+      setLoading(false);
+      setR(null);
+      return;
+    }
     setLoading(true);
     setR(null);
     priceTrade(priceReq(trade)).then((res) => !cancel && setR(res)).finally(() => !cancel && setLoading(false));
@@ -205,7 +213,7 @@ export function TradeDetail({ trade, desk }: { trade: Trade; desk: Desk }) {
           <span className="ml-2 text-[12px] text-muted">{trade.label}</span>
           {trade.staged && <span className="ml-2 rounded border border-violet/50 bg-violet/10 px-1.5 py-0.5 text-micro font-bold uppercase tracking-wide text-violet">staged</span>}
         </div>
-        <span className="tnum text-[12px] text-muted">{loading ? "pricing…" : `PV ${fmt(r?.pv ?? 0, 3)} ± ${fmt(r?.std_error ?? 0, 3)}`}</span>
+        <span className="tnum text-[12px] text-muted">{isWO ? `PV ${fmt(trade.pv ?? 0, 3)}` : loading ? "pricing…" : `PV ${fmt(r?.pv ?? 0, 3)} ± ${fmt(r?.std_error ?? 0, 3)}`}</span>
       </div>
 
       <div className="flex flex-wrap gap-1.5">
@@ -216,7 +224,23 @@ export function TradeDetail({ trade, desk }: { trade: Trade; desk: Desk }) {
         {trade.params.protection != null && <Chip>protection {pct(trade.params.protection, 0)}</Chip>}
         {trade.params.participation != null && <Chip>{fmt(trade.params.participation, 2)}× upside</Chip>}
         {trade.params.memory && <Chip hot>memory</Chip>}
+        {isWO && (trade.params.underlyings ?? []).map((u: string) => <Chip key={u}>{u}</Chip>)}
+        {isWO && trade.params.correlation != null && <Chip hot>ρ {fmt(trade.params.correlation, 2)}</Chip>}
       </div>
+
+      {isWO && (
+        <>
+          <div className="grid grid-cols-4 gap-2">
+            <GreekStat label="Δ / 1%" value={signed((trade.delta ?? 0) * desk.spot * 0.01, 2)} tone={(trade.delta ?? 0) >= 0 ? "pos" : "neg"} />
+            <GreekStat label="Γ" value={fmt(trade.gamma ?? 0, 5)} />
+            <GreekStat label="ν / pt" value={signed((trade.vega ?? 0) / 100, 2)} tone={(trade.vega ?? 0) >= 0 ? "pos" : "neg"} />
+            <GreekStat label="corr Δ" value={fmt(trade.params.corr_delta ?? 0, 2)} tone={(trade.params.corr_delta ?? 0) >= 0 ? "pos" : "neg"} />
+          </div>
+          <div className="rounded-lg border border-border-soft bg-panel2/40 px-3 py-2 text-[12px] text-muted">
+            Worst-of on {(trade.params.underlyings ?? []).length} names at ρ {fmt(trade.params.correlation ?? 0, 2)} — the desk pays a higher coupon because the investor is short the basket's dispersion. <span className="tnum text-accent">corr Δ {fmt(trade.params.corr_delta ?? 0, 2)}</span> is the value change per +5 correlation points; see the <span className="text-ink">corr_breakdown</span> stress in Validate.
+          </div>
+        </>
+      )}
 
       {r && (
         <>
@@ -254,8 +278,15 @@ export function TradeDetail({ trade, desk }: { trade: Trade; desk: Desk }) {
 
 /* ======================= Book & Risk (master-detail) ======================= */
 
-function Blotter({ trades, selectedId, onSelect, tenorFilter, onClearFilter }: {
-  trades: Trade[]; selectedId: string | null; onSelect: (id: string) => void; tenorFilter: string | null; onClearFilter: () => void;
+interface MarketCtx {
+  dS: number;
+  dVol: number;
+  liveSpot: number;
+  sim: boolean;
+}
+
+function Blotter({ trades, selectedId, onSelect, tenorFilter, onClearFilter, mk }: {
+  trades: Trade[]; selectedId: string | null; onSelect: (id: string) => void; tenorFilter: string | null; onClearFilter: () => void; mk: MarketCtx;
 }) {
   const shown = tenorFilter ? trades.filter((t) => `${t.maturity.toFixed(1)}y` === tenorFilter) : trades;
   return (
@@ -275,8 +306,15 @@ function Blotter({ trades, selectedId, onSelect, tenorFilter, onClearFilter }: {
           </thead>
           <tbody>
             {shown.map((t) => {
-              const cd = t.delta != null ? t.delta * 0 + t.delta : 0; // book delta already cash-ish via marks
               const sel = t.trade_id === selectedId;
+              // Re-mark each row through its own greeks on the tick (PV ticks like the book NAV;
+              // Δ shown as cash per +1% spot, the desk-meaningful figure rather than raw ∂PV/∂S).
+              const live = mk.sim && t.delta != null;
+              const dMark = live ? (t.delta ?? 0) * mk.dS + 0.5 * (t.gamma ?? 0) * mk.dS * mk.dS + (t.vega ?? 0) * mk.dVol + (t.vanna ?? 0) * mk.dS * mk.dVol : 0;
+              const pvLive = t.pv != null ? t.pv + dMark : null;
+              const cashD = t.delta != null ? ((t.delta ?? 0) + (live ? (t.gamma ?? 0) * mk.dS + (t.vanna ?? 0) * mk.dVol : 0)) * mk.liveSpot * 0.01 : null;
+              const vegaLive = t.vega != null ? (t.vega + (live ? (t.vanna ?? 0) * mk.dS + (t.volga ?? 0) * mk.dVol : 0)) / 100 : null;
+              const pnlLive = t.day_pnl != null ? t.day_pnl + dMark : null;
               return (
                 <tr key={t.trade_id} onClick={() => onSelect(t.trade_id)} tabIndex={0}
                   onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onSelect(t.trade_id))}
@@ -286,10 +324,10 @@ function Blotter({ trades, selectedId, onSelect, tenorFilter, onClearFilter }: {
                     {TYPE_ABBR[t.product_type] ?? t.product_type}{t.staged && <span className="ml-1 text-violet">•</span>}
                   </td>
                   <td className="tnum border-b border-border-soft px-2.5 py-1.5 text-right text-ink/80">{t.maturity.toFixed(1)}y</td>
-                  <td className="tnum border-b border-border-soft px-2.5 py-1.5 text-right text-ink/80">{t.pv != null ? fmt(t.pv, 1) : "—"}</td>
-                  <td className={cn("tnum border-b border-border-soft px-2.5 py-1.5 text-right", (t.delta ?? 0) >= 0 ? "text-up/90" : "text-down/90")}>{t.delta != null ? signed(t.delta, 2) : "—"}</td>
-                  <td className={cn("tnum border-b border-border-soft px-2.5 py-1.5 text-right", (t.vega ?? 0) >= 0 ? "text-up/90" : "text-down/90")}>{t.vega != null ? signed(t.vega / 100, 2) : "—"}</td>
-                  <td className={cn("tnum border-b border-border-soft px-2.5 py-1.5 text-right", (t.day_pnl ?? 0) >= 0 ? "text-up/90" : "text-down/90")}>{t.day_pnl != null ? signed(t.day_pnl, 2) : "—"}</td>
+                  <td className="tnum border-b border-border-soft px-2.5 py-1.5 text-right text-ink/80">{pvLive != null ? fmt(pvLive, 2) : "—"}</td>
+                  <td className={cn("tnum border-b border-border-soft px-2.5 py-1.5 text-right", (cashD ?? 0) >= 0 ? "text-up/90" : "text-down/90")}>{cashD != null ? signed(cashD, 2) : "—"}</td>
+                  <td className={cn("tnum border-b border-border-soft px-2.5 py-1.5 text-right", (vegaLive ?? 0) >= 0 ? "text-up/90" : "text-down/90")}>{vegaLive != null ? signed(vegaLive, 2) : "—"}</td>
+                  <td className={cn("tnum border-b border-border-soft px-2.5 py-1.5 text-right", (pnlLive ?? 0) >= 0 ? "text-up/90" : "text-down/90")}>{pnlLive != null ? signed(pnlLive, 2) : "—"}</td>
                 </tr>
               );
             })}
@@ -300,10 +338,21 @@ function Blotter({ trades, selectedId, onSelect, tenorFilter, onClearFilter }: {
   );
 }
 
-function BookAggregate({ desk, onPickTenor }: { desk: Desk; onPickTenor: (b: string) => void }) {
-  const ladder = Object.entries(desk.vega_ladder).map(([k, v]) => ({ bucket: k, vega: v / 100 }));
+function BookAggregate({ desk, onPickTenor, mk }: { desk: Desk; onPickTenor: (b: string) => void; mk: MarketCtx }) {
+  // Live per-trade vega (vanna·dS + volga·dσ), aggregated into the ladder and net figures.
+  const liveVega = (p: any) => p.vega + (mk.sim ? (p.vanna ?? 0) * mk.dS + (p.volga ?? 0) * mk.dVol : 0);
+  const ladderMap: Record<string, number> = {};
+  for (const p of desk.positions) {
+    const k = `${p.maturity.toFixed(1)}y`;
+    ladderMap[k] = (ladderMap[k] ?? 0) + liveVega(p) / 100;
+  }
+  const ladder = Object.entries(ladderMap)
+    .sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]))
+    .map(([bucket, vega]) => ({ bucket, vega }));
   const gamma = [...desk.positions].sort((a, b) => a.gamma - b.gamma).map((p) => ({ trade: p.trade_id, gamma: p.gamma }));
   const g = desk.net_greeks;
+  const netDelta = desk.positions.reduce((a, p) => a + p.delta + (mk.sim ? p.gamma * mk.dS + (p.vanna ?? 0) * mk.dVol : 0), 0);
+  const netVega = desk.positions.reduce((a, p) => a + liveVega(p), 0);
   return (
     <div className="space-y-4">
       <Panel className="p-3">
@@ -319,29 +368,50 @@ function BookAggregate({ desk, onPickTenor }: { desk: Desk; onPickTenor: (b: str
         <SectionTitle>Gamma concentration</SectionTitle>
         <Bars data={gamma} x="trade" y="gamma" color={C.down} height={300} horizontal />
       </Panel>
+      {desk.correlation_risk.baskets.length > 0 && (
+        <Panel className="p-3">
+          <SectionTitle>Correlation risk · worst-of sub-book</SectionTitle>
+          <Bars
+            data={desk.correlation_risk.baskets.map((b) => ({ basket: b.trade_id, corr_delta: b.corr_delta }))}
+            x="basket" y="corr_delta" height={200} horizontal colorBySign
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <Chip hot>net corr Δ {fmt(desk.correlation_risk.net_corr_delta, 2)}</Chip>
+            {desk.correlation_risk.baskets.map((b) => (
+              <Chip key={b.trade_id}>{b.trade_id} · {b.underlyings.map((u) => u.slice(0, 4)).join("/")} · ρ {fmt(b.correlation, 2)}</Chip>
+            ))}
+          </div>
+          <div className="mt-2 text-[12px] text-muted">
+            Value change per +5 correlation points, per basket — the dispersion the desk is short. Sign varies by structure (a high-coupon memory autocallable can fall as names converge); the <span className="text-ink">corr_breakdown</span> stress aggregates the ρ→0.9 P&L.
+          </div>
+        </Panel>
+      )}
       <div className="flex flex-wrap gap-1.5">
-        <Chip>net Δ {fmt(g.delta, 4)}</Chip><Chip>net Γ {fmt(g.gamma, 5)}</Chip>
-        <Chip>net ν {fmt(g.vega, 1)}</Chip><Chip>net ρ {fmt(g.rho, 1)}</Chip>
+        <Chip>net Δ {fmt(netDelta, 4)}</Chip><Chip>net Γ {fmt(g.gamma, 5)}</Chip>
+        <Chip>net ν {fmt(netVega, 1)}</Chip><Chip>net ρ {fmt(g.rho, 1)}</Chip>
+        <Chip hot={!desk.hedge_capacity.within_capacity}>
+          hedge {desk.hedge_capacity.days_to_hedge < 0.1 ? "<0.1" : fmt(desk.hedge_capacity.days_to_hedge, 1)}d @ {pct(desk.hedge_capacity.participation, 0)} ADV
+        </Chip>
       </div>
     </div>
   );
 }
 
-export function BookRisk({ desk, trades, selectedId, setSelectedId, tenorFilter, setTenorFilter }: {
+export function BookRisk({ desk, trades, selectedId, setSelectedId, tenorFilter, setTenorFilter, mk }: {
   desk: Desk; trades: Trade[]; selectedId: string | null; setSelectedId: (id: string | null) => void;
-  tenorFilter: string | null; setTenorFilter: (b: string | null) => void;
+  tenorFilter: string | null; setTenorFilter: (b: string | null) => void; mk: MarketCtx;
 }) {
   const selected = trades.find((t) => t.trade_id === selectedId) ?? null;
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
       <div className="lg:col-span-2">
-        <Blotter trades={trades} selectedId={selectedId} onSelect={(id) => setSelectedId(id === selectedId ? null : id)} tenorFilter={tenorFilter} onClearFilter={() => setTenorFilter(null)} />
+        <Blotter trades={trades} selectedId={selectedId} onSelect={(id) => setSelectedId(id === selectedId ? null : id)} tenorFilter={tenorFilter} onClearFilter={() => setTenorFilter(null)} mk={mk} />
       </div>
       <Panel className="p-4 lg:col-span-3">
         {selected ? (
           <TradeDetail trade={selected} desk={desk} />
         ) : (
-          <BookAggregate desk={desk} onPickTenor={setTenorFilter} />
+          <BookAggregate desk={desk} onPickTenor={setTenorFilter} mk={mk} />
         )}
       </Panel>
     </div>

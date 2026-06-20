@@ -136,6 +136,8 @@ export default function App() {
       liveSpot,
       liveVol,
       spotChgBp: (market.spotMult - 1) * 1e4,
+      dS,
+      dVol,
     };
   }, [desk, staged, market, sim]);
 
@@ -174,7 +176,7 @@ export default function App() {
           {ws === "Overview" && <Overview desk={desk} onPickTrade={pickTrade} />}
           {ws === "Originate" && <Originate desk={desk} onStage={stageTrade} />}
           {ws === "Book & Risk" && (
-            <BookRisk desk={desk} trades={trades} selectedId={selectedId} setSelectedId={setSelectedId} tenorFilter={tenorFilter} setTenorFilter={setTenorFilter} />
+            <BookRisk desk={desk} trades={trades} selectedId={selectedId} setSelectedId={setSelectedId} tenorFilter={tenorFilter} setTenorFilter={setTenorFilter} mk={{ dS: agg.dS, dVol: agg.dVol, liveSpot: agg.liveSpot, sim }} />
           )}
           {ws === "Validate" && <Validate desk={desk} selectedId={selectedId} />}
         </div>

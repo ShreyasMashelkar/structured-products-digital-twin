@@ -81,6 +81,9 @@ class PnLExplain:
     rho_pnl: float
     explained: float  # sum of the Taylor terms above
     residual: float  # total − explained (the headline diagnostic)
+    vega: float = 0.0  # the greeks themselves (not the P&L) — used for intraday re-marking
+    vanna: float = 0.0
+    volga: float = 0.0
 
     @property
     def residual_fraction(self) -> float:
@@ -166,6 +169,9 @@ def attribute(
         rho_pnl=rho_pnl,
         explained=explained,
         residual=total - explained,
+        vega=vega,
+        vanna=vanna,
+        volga=volga,
     )
 
 
