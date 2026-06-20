@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date as Date  # aliased: the RawMarketData.date field shadows the type
 from typing import Protocol
 
 from spdt.core.types import SourceTag, Underlying
@@ -20,7 +20,7 @@ from spdt.core.types import SourceTag, Underlying
 class RawOptionQuote:
     """One option contract's settlement print from the F&O bhavcopy."""
 
-    expiry: date
+    expiry: Date
     strike: float
     is_call: bool
     settlement_price: float
@@ -36,12 +36,12 @@ class RawMarketData:
     (ADR-0002), i.e. a small set of spread knots.
     """
 
-    date: date
+    date: Date
     underlying: Underlying
     spot: float
     option_chain: tuple[RawOptionQuote, ...]
-    ois_zero_rates: Mapping[date, float]
-    funding_spread_knots: Mapping[date, float]
+    ois_zero_rates: Mapping[Date, float]
+    funding_spread_knots: Mapping[Date, float]
     dividend_yield: float
     source: SourceTag
 
@@ -49,7 +49,7 @@ class RawMarketData:
 class MarketDataSource(Protocol):
     """A source that can produce :class:`RawMarketData` for a date/underlying."""
 
-    def fetch(self, as_of: date, underlying: Underlying) -> RawMarketData: ...
+    def fetch(self, as_of: Date, underlying: Underlying) -> RawMarketData: ...
 
 
 __all__ = ["MarketDataSource", "RawMarketData", "RawOptionQuote"]

@@ -40,8 +40,14 @@ class HestonModel:
     rho: float
     seed: int = 0
 
-    def characteristic_function(self, u: complex, t: float) -> complex:
-        """``E[exp(i·u·ln S_T)]`` — Albrecher "little trap" form (stable branch)."""
+    def characteristic_function(
+        self, u: complex | NDArray[np.complex128], t: float
+    ) -> complex | NDArray[np.complex128]:
+        """``E[exp(i·u·ln S_T)]`` — Albrecher "little trap" form (stable branch).
+
+        Accepts a scalar ``u`` (the quadrature vanilla) or a vector ``u`` (the Carr–Madan FFT),
+        returning the matching scalar/array.
+        """
         i = 1j
         xi, kappa, theta, rho, v0 = self.xi, self.kappa, self.theta, self.rho, self.v0
         d = np.sqrt((rho * xi * i * u - kappa) ** 2 + xi * xi * (i * u + u * u))
@@ -70,6 +76,33 @@ class HestonModel:
             return call
         return call - self.spot * exp(-self.q * t) + strike * exp(-self.r * t)  # put-call parity
 
+    def carr_madan_call(
+        self, strikes: NDArray[np.float64] | None, t: float, *, alpha: float = 1.5, n: int = 4096, eta: float = 0.25
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Call prices across a log-strike grid via the **Carr–Madan FFT** (1999).
+
+        The damped call transform ``ψ(v) = e^{−rT} φ(v−(α+1)i) / (α²+α−v²+i(2α+1)v)`` (with
+        ``φ`` the log-spot characteristic function) is integrated by FFT in one shot, giving
+        prices at ``N`` strikes simultaneously — the canonical reason FFT is used to *calibrate*
+        a model to a whole smile. Returns ``(grid_strikes, grid_call_prices)``; if ``strikes``
+        is given, prices are linearly interpolated onto it in log-strike.
+        """
+        lam = 2.0 * np.pi / (n * eta)  # log-strike spacing
+        b = n * lam / 2.0
+        v = eta * np.arange(n)  # integration grid
+        phi = self.characteristic_function(v - (alpha + 1.0) * 1j, t)
+        psi = np.exp(-self.r * t) * phi / (alpha**2 + alpha - v**2 + 1j * (2.0 * alpha + 1.0) * v)
+        simpson = (3.0 + (-1.0) ** np.arange(1, n + 1) - np.where(np.arange(n) == 0, 1.0, 0.0)) / 3.0
+        integrand = np.exp(1j * b * v) * psi * eta * simpson
+        fft_values = np.fft.fft(integrand).real
+        log_strikes = -b + lam * np.arange(n)
+        calls = np.exp(-alpha * log_strikes) / np.pi * fft_values
+        grid_strikes = np.exp(log_strikes)
+        if strikes is None:
+            return grid_strikes, calls
+        interp = np.interp(np.log(strikes), log_strikes, calls)
+        return np.asarray(strikes, dtype=float), interp
+
     def simulate(
         self, times: NDArray[np.float64], normals: NDArray[np.float64]
     ) -> NDArray[np.float64]:
@@ -79,8 +112,8 @@ class HestonModel:
         kappa, theta, xi, rho = self.kappa, self.theta, self.xi, self.rho
         psi_c = 1.5
 
-        log_s = np.full(n_paths, log(self.spot))
-        v = np.full(n_paths, self.v0)
+        log_s: NDArray[np.float64] = np.full(n_paths, log(self.spot))
+        v: NDArray[np.float64] = np.full(n_paths, self.v0)
         columns = [np.full(n_paths, self.spot)]
 
         for j in range(times.size - 1):
@@ -95,7 +128,7 @@ class HestonModel:
 
             zv = rng.standard_normal(n_paths)
             u_unif = rng.random(n_paths)
-            v_next = np.empty(n_paths)
+            v_next: NDArray[np.float64] = np.empty(n_paths)
 
             # Quadratic branch (ψ ≤ ψc): v' = a(b + Z)².
             quad_mask = psi <= psi_c
