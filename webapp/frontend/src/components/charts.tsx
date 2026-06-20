@@ -121,14 +121,14 @@ export function Lines({
 }) {
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <LineChart data={data} margin={{ top: 10, right: 18, bottom: 18, left: 8 }}>
+      <LineChart data={data} margin={{ top: 28, right: 18, bottom: 20, left: 8 }}>
         <CartesianGrid stroke={C.grid} strokeDasharray="2 4" vertical={false} />
         <XAxis dataKey={x} {...axis} scale={logX ? "log" : "auto"} domain={logX ? ["auto", "auto"] : undefined}
-          label={xLabel ? { value: xLabel, position: "insideBottom", offset: -8, fill: C.muted, fontSize: 11 } : undefined} />
+          label={xLabel ? { value: xLabel, position: "insideBottom", offset: -10, fill: C.muted, fontSize: 11 } : undefined} />
         <YAxis {...axis} width={44}
           label={yLabel ? { value: yLabel, angle: -90, position: "left", offset: -2, fill: C.muted, fontSize: 11 } : undefined} />
         <Tooltip content={<Tip />} cursor={{ stroke: C.border }} />
-        <Legend wrapperStyle={{ fontSize: 11, color: C.muted }} />
+        <Legend verticalAlign="top" align="right" height={22} wrapperStyle={{ fontSize: 11, color: C.muted }} />
         {series.map((s) => (
           <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color}
             strokeWidth={2.2} dot={{ r: 2, fill: s.color, strokeWidth: 0 }} activeDot={{ r: 4 }} />
