@@ -174,7 +174,7 @@ export default function App() {
         <Tabs tabs={WORKSPACES} active={ws} onChange={setWs} />
         <div className="pt-5">
           {ws === "Overview" && <Overview desk={desk} onPickTrade={pickTrade} />}
-          {ws === "Originate" && <Originate desk={desk} onStage={stageTrade} />}
+          {ws === "Originate" && <Originate desk={desk} onStage={stageTrade} volShiftPct={Math.round((agg.liveVol - desk.model.atm_vol) * 1000) / 10} />}
           {ws === "Book & Risk" && (
             <BookRisk desk={desk} trades={trades} selectedId={selectedId} setSelectedId={setSelectedId} tenorFilter={tenorFilter} setTenorFilter={setTenorFilter} mk={{ dS: agg.dS, dVol: agg.dVol, liveSpot: agg.liveSpot, sim }} />
           )}
