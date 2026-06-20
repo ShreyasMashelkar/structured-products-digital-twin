@@ -132,6 +132,10 @@ def terminal_scenarios(
     never disagree with the pricer, for a BRC, reverse convertible or capital-protected note
     just as for an autocallable.
     """
+    # Strike the path at the product's own fixing (struck notes reference spot, not 100), so
+    # S_T/S₀ equals the swept level rather than collapsing to ~0 and wiping the principal leg.
+    fixing = getattr(product, "initial_fixing", None)
+    ref = float(fixing) if fixing is not None else ref
     times = np.array((0.0, *product.monitoring_times()))
     n = len(terminal_levels)
     m = times.size
@@ -144,9 +148,11 @@ def terminal_scenarios(
     for cf in cashflows:
         if abs(cf.time - maturity_time) <= 1e-12:
             pay += cf.amount
-    ki = float(getattr(product, "knock_in", 0.0))
+    # "Capital impaired" = the maturity payment (principal ± optionality + final coupon) is below
+    # par — a universal downside flag across knock-in, reverse-convertible and protected notes.
     return [
-        ScenarioRow(terminal_level=lvl, ki_breached=lvl <= ki, payment_pct=100.0 * pay[i] / notional)
+        ScenarioRow(terminal_level=lvl, ki_breached=bool(pay[i] < notional - 1e-9),
+                    payment_pct=100.0 * pay[i] / notional)
         for i, lvl in enumerate(terminal_levels)
     ]
 
