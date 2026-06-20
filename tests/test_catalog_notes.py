@@ -64,6 +64,24 @@ def test_brc_value_rises_with_coupon():
     assert _price(_brc(coupon_rate=0.05)) > _price(_brc(coupon_rate=0.01))
 
 
+def test_brc_barrier_monitoring_is_distinct_from_coupon_dates():
+    """Denser barrier monitoring (vs only at the single coupon date) catches more breaches,
+    so the investor's short down-and-in put bites more and the note is worth less — i.e. the
+    barrier schedule is genuinely decoupled from the coupon schedule, not conflated."""
+    # One coupon at maturity, but the barrier is watched quarterly along the way.
+    dense = BarrierReverseConvertible(
+        notional=100.0, observation_times=(1.0,), coupon_rate=0.06, strike=1.0, knock_in=0.8,
+        barrier_monitoring=(0.25, 0.5, 0.75, 1.0),
+    )
+    # Same note but the barrier is only checked at maturity (default).
+    sparse = BarrierReverseConvertible(
+        notional=100.0, observation_times=(1.0,), coupon_rate=0.06, strike=1.0, knock_in=0.8,
+    )
+    assert dense.monitoring_times() == (0.25, 0.5, 0.75, 1.0)
+    assert sparse.monitoring_times() == (1.0,)
+    assert _price(dense, seed=4) < _price(sparse, seed=4)
+
+
 def test_brc_from_termsheet_matches_direct():
     ts = TermSheet(
         product_type="brc",
