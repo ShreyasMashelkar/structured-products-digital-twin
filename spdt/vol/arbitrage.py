@@ -49,7 +49,9 @@ def check_butterfly(
     params: SVIParams, *, k_grid: NDArray[np.float64] | None = None, tol: float = -1e-8
 ) -> tuple[bool, float]:
     """Return ``(ok, min_g)`` for one slice. ``tol`` allows a tiny numerical slack below 0."""
-    grid = np.linspace(-1.5, 1.5, 301) if k_grid is None else np.asarray(k_grid, dtype=float)
+    grid: NDArray[np.float64] = (
+        np.linspace(-1.5, 1.5, 301) if k_grid is None else np.asarray(k_grid, dtype=np.float64)
+    )
     g = durrleman_g(params, grid)
     min_g = float(np.min(g))
     return (min_g >= tol and bool(np.all(params.total_variance(grid) > 0.0)), min_g)
@@ -59,7 +61,9 @@ def check_calendar(
     slices: list[SVIParams], *, k_grid: NDArray[np.float64] | None = None, tol: float = -1e-8
 ) -> bool:
     """Total variance non-decreasing in maturity at fixed ``k``; ``slices`` ordered by tenor."""
-    grid = np.linspace(-1.5, 1.5, 301) if k_grid is None else np.asarray(k_grid, dtype=float)
+    grid: NDArray[np.float64] = (
+        np.linspace(-1.5, 1.5, 301) if k_grid is None else np.asarray(k_grid, dtype=np.float64)
+    )
     prev = None
     for params in slices:
         w = params.total_variance(grid)

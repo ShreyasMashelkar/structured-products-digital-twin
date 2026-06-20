@@ -1,19 +1,55 @@
 """L3 Product Definition Framework: the payoff DSL and the product catalog."""
 
-from spdt.products.catalog import Autocallable
-from spdt.products.graph import Cashflow, PathSet, PriceResult, Product, present_value
+from spdt.products.catalog import (
+    Autocallable,
+    BarrierReverseConvertible,
+    CapitalProtectedNote,
+    ReverseConvertible,
+)
+from spdt.products.graph import (
+    Cashflow,
+    Discount,
+    Discounter,
+    Leg,
+    PathSet,
+    PriceResult,
+    Product,
+    present_value,
+)
+from spdt.products.legs import (
+    CompositeNote,
+    FixedCouponLeg,
+    ParticipationCallLeg,
+    ShortDownInPutLeg,
+    ZeroCouponLeg,
+    brc_from_legs,
+    capital_protected_from_legs,
+)
 from spdt.products.primitives import CashOrNothingDigital, DownBarrierPut, EuropeanOption
 from spdt.products.termsheet import TermSheet
 
 __all__ = [
     "Autocallable",
+    "BarrierReverseConvertible",
+    "CapitalProtectedNote",
     "CashOrNothingDigital",
     "Cashflow",
+    "CompositeNote",
+    "Discount",
+    "Discounter",
     "DownBarrierPut",
     "EuropeanOption",
+    "FixedCouponLeg",
+    "Leg",
+    "ParticipationCallLeg",
     "PathSet",
     "PriceResult",
     "Product",
+    "ReverseConvertible",
+    "ShortDownInPutLeg",
     "TermSheet",
+    "ZeroCouponLeg",
+    "brc_from_legs",
+    "capital_protected_from_legs",
     "present_value",
 ]

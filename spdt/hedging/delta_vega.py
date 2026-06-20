@@ -65,13 +65,13 @@ def simulate_delta_hedge(
     grow = exp(r * dt)
     slip = slippage_bps * 1e-4
 
-    times = np.linspace(0.0, t, n_steps + 1)
+    times: NDArray[np.float64] = np.linspace(0.0, t, n_steps + 1)
     normals = standard_normals(n_paths, n_steps, seed=seed)
     spots = model.simulate(times, normals)  # (n_paths, n_steps + 1)
 
     premium = bs_vanilla(model.spot, k, t, r, q, sigma, is_call)
     cash = np.full(n_paths, premium)
-    shares = np.zeros(n_paths)
+    shares: NDArray[np.float64] = np.zeros(n_paths)
     slippage_cost = np.zeros(n_paths)
 
     for i in range(n_steps):

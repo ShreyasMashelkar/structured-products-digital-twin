@@ -16,5 +16,24 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Lint
         run: ruff check spdt tests
+      - name: Type-check
+        run: mypy spdt
       - name: Test
         run: pytest
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webapp/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: webapp/frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Type-check
+        run: npx tsc -b --noEmit
