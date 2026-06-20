@@ -20,7 +20,7 @@ function Slider({
       </div>
       <input type="range" min={min} max={max} step={step} value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-border accent-accent" />
+        className="ring-desk h-1.5 w-full cursor-pointer appearance-none rounded-full bg-border accent-accent" />
     </div>
   );
 }
@@ -63,7 +63,7 @@ export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: 
           <div className="space-y-1">
             {movers.map((m) => (
               <button key={m.trade_id} onClick={() => onPickTrade(m.trade_id)}
-                className="flex w-full items-center justify-between rounded-lg border border-border-soft bg-panel2/40 px-3 py-2 text-left transition-colors hover:border-accent/50 hover:bg-panel2">
+                className="ring-desk flex w-full items-center justify-between rounded-lg border border-border-soft bg-panel2/40 px-3 py-2 text-left transition-colors hover:border-accent/50 hover:bg-panel2">
                 <span className="tnum text-[12.5px] text-ink/90">{m.trade_id}</span>
                 <span className={cn("tnum text-[12.5px] font-semibold", m.total >= 0 ? "text-up" : "text-down")}>{signed(m.total, 3)}</span>
               </button>
@@ -122,8 +122,8 @@ export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) =
   }
 
   const curve = res?.pv_curve ?? [];
-  const lo = curve.length ? Math.min(...curve.map((c) => c.pv)) - 0.5 : 90;
-  const hi = curve.length ? Math.max(...curve.map((c) => c.pv)) + 0.5 : 110;
+  const lo = curve.length ? Math.floor(Math.min(...curve.map((c) => c.pv))) : 90;
+  const hi = curve.length ? Math.ceil(Math.max(...curve.map((c) => c.pv))) : 110;
 
   return (
     <div className="space-y-4">
@@ -147,20 +147,20 @@ export function Originate({ desk, onStage }: { desk: Desk; onStage: (t: Trade) =
           {res?.solved_annual_coupon != null ? (
             <>
               <div className="text-[11px] uppercase tracking-[0.1em] text-muted">Solved coupon to par (1.00 fee)</div>
-              <div className="tnum mt-1 text-[2.3rem] font-bold leading-none text-ink">{pct(res.solved_annual_coupon, 2)}<span className="ml-1.5 text-[1rem] font-medium text-muted">p.a.</span></div>
+              <div className="tnum mt-1 text-hero font-bold leading-none text-ink">{pct(res.solved_annual_coupon, 2)}<span className="ml-1.5 text-figure font-medium text-muted">p.a.</span></div>
               <div className="mt-1.5 text-[12px] text-muted">vs indicative {pct(res.indicative_annual_coupon, 2)} · model PV <span className="tnum text-ink">{fmt(res.achieved_pv ?? 0, 2)}</span></div>
               <div className={cn("mt-3 rounded-lg border px-3 py-2 text-[12px]", res.achievable ? "border-up/30 bg-up/5 text-up" : "border-down/30 bg-down/5 text-down")}>
                 {res.achievable ? `The client's ${pct(tc, 0)} ask is achievable at this knock-in.` : `The client's ${pct(tc, 0)} ask needs a lower knock-in or more downside sold.`}
               </div>
               <button onClick={addToBook}
-                className="mt-3 w-full rounded-lg border border-accent/60 bg-accent/15 px-3 py-2 text-[12.5px] font-semibold text-accent transition-colors hover:bg-accent/25">
+                className="ring-desk mt-3 w-full rounded-lg border border-accent/60 bg-accent/15 px-3 py-2 text-body font-semibold text-accent transition-colors hover:bg-accent/25">
                 {staged ? "✓ Added to book" : "Add to book →"}
               </button>
             </>
           ) : (<div className="text-[13px] text-muted">{loading ? "Solving…" : "No coupon prices this to par."}</div>)}
         </Panel>
         <Panel className="p-3 lg:col-span-3">
-          <AreaSpark data={curve} x="annual_coupon" y="pv" color={C.teal} height={300} yDomain={[lo, hi]} xLabel="annual coupon (%)" yLabel="model PV" />
+          <AreaSpark data={curve} x="annual_coupon" y="pv" color={C.teal} height={300} yDomain={[lo, hi]} xLabel="annual coupon (%)" yLabel="model PV" yTickFormat={(v) => v.toFixed(0)} />
         </Panel>
       </div>
 
@@ -203,7 +203,7 @@ export function TradeDetail({ trade, desk }: { trade: Trade; desk: Desk }) {
         <div>
           <span className="tnum text-[15px] font-semibold text-ink">{trade.trade_id}</span>
           <span className="ml-2 text-[12px] text-muted">{trade.label}</span>
-          {trade.staged && <span className="ml-2 rounded border border-accent/50 bg-accent/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-accent">staged</span>}
+          {trade.staged && <span className="ml-2 rounded border border-violet/50 bg-violet/10 px-1.5 py-0.5 text-micro font-bold uppercase tracking-wide text-violet">staged</span>}
         </div>
         <span className="tnum text-[12px] text-muted">{loading ? "pricing…" : `PV ${fmt(r?.pv ?? 0, 3)} ± ${fmt(r?.std_error ?? 0, 3)}`}</span>
       </div>
@@ -263,7 +263,7 @@ function Blotter({ trades, selectedId, onSelect, tenorFilter, onClearFilter }: {
       <div className="mb-2 flex items-center justify-between">
         <SectionTitle>Blotter · {shown.length} notes</SectionTitle>
         {tenorFilter && (
-          <button onClick={onClearFilter} className="text-[11px] text-accent hover:underline">filter: {tenorFilter} ✕</button>
+          <button onClick={onClearFilter} className="ring-desk text-small text-accent hover:underline">filter: {tenorFilter} ✕</button>
         )}
       </div>
       <div className="overflow-auto rounded-xl border border-border" style={{ maxHeight: 560 }}>
@@ -278,11 +278,12 @@ function Blotter({ trades, selectedId, onSelect, tenorFilter, onClearFilter }: {
               const cd = t.delta != null ? t.delta * 0 + t.delta : 0; // book delta already cash-ish via marks
               const sel = t.trade_id === selectedId;
               return (
-                <tr key={t.trade_id} onClick={() => onSelect(t.trade_id)}
-                  className={cn("cursor-pointer transition-colors", sel ? "bg-accent/10" : "hover:bg-white/[0.03]")}>
+                <tr key={t.trade_id} onClick={() => onSelect(t.trade_id)} tabIndex={0}
+                  onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), onSelect(t.trade_id))}
+                  className={cn("ring-desk cursor-pointer transition-colors", sel ? "bg-accent/10" : "hover:bg-white/[0.03]")}>
                   <td className={cn("tnum border-b border-border-soft px-2.5 py-1.5", sel ? "text-accent" : "text-ink/90", t.staged && "italic")}>{t.trade_id}</td>
-                  <td className="border-b border-border-soft px-2.5 py-1.5 text-[11px] text-muted">
-                    {TYPE_ABBR[t.product_type] ?? t.product_type}{t.staged && <span className="ml-1 text-accent">•</span>}
+                  <td className="border-b border-border-soft px-2.5 py-1.5 text-small text-muted">
+                    {TYPE_ABBR[t.product_type] ?? t.product_type}{t.staged && <span className="ml-1 text-violet">•</span>}
                   </td>
                   <td className="tnum border-b border-border-soft px-2.5 py-1.5 text-right text-ink/80">{t.maturity.toFixed(1)}y</td>
                   <td className="tnum border-b border-border-soft px-2.5 py-1.5 text-right text-ink/80">{t.pv != null ? fmt(t.pv, 1) : "—"}</td>
@@ -310,7 +311,7 @@ function BookAggregate({ desk, onPickTenor }: { desk: Desk; onPickTenor: (b: str
         <Bars data={ladder} x="bucket" y="vega" color={C.teal} height={260} yLabel="vega / vol pt" />
         <div className="mt-2 flex flex-wrap gap-1.5">
           {ladder.map((l) => (
-            <button key={l.bucket} onClick={() => onPickTenor(l.bucket)} className="rounded-full border border-border bg-panel2 px-2.5 py-0.5 text-[11px] text-muted hover:border-teal hover:text-teal">{l.bucket}</button>
+            <button key={l.bucket} onClick={() => onPickTenor(l.bucket)} className="ring-desk rounded-full border border-border bg-panel2 px-2.5 py-0.5 text-small text-muted hover:border-teal hover:text-teal">{l.bucket}</button>
           ))}
         </div>
       </Panel>
