@@ -116,11 +116,19 @@ class Curve:
 
     def discount_factor(self, target: date) -> float:
         """Discount factor ``D(target)`` seen from ``anchor``."""
-        tau = year_fraction(self.anchor, target)
+        return self.df(year_fraction(self.anchor, target))
+
+    def df(self, tau: float) -> float:
+        """Discount factor at year-fraction ``tau`` from the anchor.
+
+        The year-fraction form the pricer works in (cashflows are dated in ACT/365F year
+        fractions), avoiding a tau→date→tau round trip. Funding curves compose the OIS
+        discount with the parametric spread (ADR-0002): ``D_f(τ) = D_ois(τ)·exp(−s(τ)·τ)``.
+        """
         if tau <= 0.0:
             return 1.0
         if self.spread_over is not None:
-            return self.spread_over.discount_factor(target) * exp(-self._spread(tau) * tau)
+            return self.spread_over.df(tau) * exp(-self._spread(tau) * tau)
         return exp(self._ln_df_ois(tau))
 
     def zero_rate(self, target: date) -> float:

@@ -31,6 +31,11 @@ cpp/**/build/
 *.so
 *.o
 
+# Frontend
+webapp/frontend/node_modules/
+webapp/frontend/dist/
+webapp/frontend/.vite/
+
 # OS / editor
 .DS_Store
 .idea/
