@@ -67,8 +67,8 @@ class LSVModel:
         kappa, theta, xi, rho = self.kappa, self.theta, self.xi, self.rho
         psi_c = 1.5
 
-        log_s = np.full(n, log(self.spot))
-        v = np.full(n, self.v0)
+        log_s: NDArray[np.float64] = np.full(n, log(self.spot))
+        v: NDArray[np.float64] = np.full(n, self.v0)
         columns = [np.full(n, self.spot)]
 
         for j in range(times.size - 1):

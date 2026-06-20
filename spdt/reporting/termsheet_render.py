@@ -16,7 +16,7 @@ import numpy as np
 from jinja2 import Template
 
 from spdt.products.catalog import Autocallable
-from spdt.products.graph import PathSet
+from spdt.products.graph import PathSet, Product
 from spdt.products.termsheet import TermSheet
 
 
@@ -118,3 +118,76 @@ def render_term_sheet(
 ) -> str:
     """Render an indicative term sheet (Markdown) from the term-sheet object."""
     return _TERM_SHEET.render(ts=ts, summary=summary, scenarios=scenarios)
+
+
+def terminal_scenarios(
+    product: Product, terminal_levels: tuple[float, ...], *, ref: float = 100.0
+) -> list[ScenarioRow]:
+    """Maturity payment vs final level for *any* note, by replaying its own cashflows.
+
+    Generalises :func:`maturity_scenarios` beyond the autocallable: paths are pinned at the
+    initial fixing on every intermediate observation (so the note survives and pays its
+    conditional coupons) and the terminal observation is swept across ``terminal_levels``. The
+    payment is whatever the product's ``cashflows`` emit at maturity — so the factsheet can
+    never disagree with the pricer, for a BRC, reverse convertible or capital-protected note
+    just as for an autocallable.
+    """
+    times = np.array((0.0, *product.monitoring_times()))
+    n = len(terminal_levels)
+    m = times.size
+    spots = np.full((n, m), ref)
+    spots[:, m - 1] = ref * np.asarray(terminal_levels)
+    cashflows = product.cashflows(PathSet(times=times, spots=spots))
+    maturity_time = float(times[-1])
+    notional = getattr(product, "notional", 100.0)
+    pay = np.zeros(n)
+    for cf in cashflows:
+        if abs(cf.time - maturity_time) <= 1e-12:
+            pay += cf.amount
+    ki = float(getattr(product, "knock_in", 0.0))
+    return [
+        ScenarioRow(terminal_level=lvl, ki_breached=lvl <= ki, payment_pct=100.0 * pay[i] / notional)
+        for i, lvl in enumerate(terminal_levels)
+    ]
+
+
+_FACTSHEET = Template(
+    """# Indicative Factsheet — {{ ts.product_type | replace("_", " ") | title }}
+
+**Underlying(s):** {{ ts.underlyings | join(", ") }} · **Notional:** {{ ts.notional }} {{ currency }} \
+· **Maturity:** {{ ts.maturity | round(2) }}y
+
+## Economic terms
+| Field | Value |
+|---|---|
+{% for k, v in ts.params.items() %}| {{ k | replace("_", " ") | title }} | {{ v }} |
+{% endfor %}
+{% if summary %}
+## Indicative valuation
+Model PV: **{{ "%.4f" | format(summary.pv) }} {{ summary.currency }}**\
+{% if summary.std_error %} (± {{ "%.4f" | format(summary.std_error) }} MC s.e.){% endif %}
+{% endif %}
+{% if scenarios %}
+## Scenario at maturity (held to maturity)
+| Final level (% of initial) | Knock-in breached | Maturity payment (% of notional) |
+|---|---|---|
+{% for r in scenarios %}| {{ "%.0f" | format(r.terminal_level * 100) }}% \
+| {{ "Yes" if r.ki_breached else "No" }} | {{ "%.2f" | format(r.payment_pct) }}% |
+{% endfor %}{% endif %}
+## Risk disclosures
+- Capital is at risk: the maturity payment can be **below** notional if the downside conditions are met.
+- The note is the issuer's senior obligation; its value depends on the issuer's funding/credit spread.
+- Indicative valuation is a model PV (Monte-Carlo); it is not a tradable quote and excludes fees.
+"""
+)
+
+
+def render_factsheet(
+    ts: TermSheet,
+    summary: PricingSummary | None = None,
+    scenarios: list[ScenarioRow] | None = None,
+    *,
+    currency: str = "INR",
+) -> str:
+    """Render a fuller client factsheet (terms, valuation, scenarios, risk disclosures)."""
+    return _FACTSHEET.render(ts=ts, summary=summary, scenarios=scenarios, currency=currency)

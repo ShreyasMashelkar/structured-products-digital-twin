@@ -7,7 +7,7 @@ name = "spdt"
 version = "0.1.0"
 description = "Structured Products Digital Twin — a full equity structured-products desk simulation on free Indian market data."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Shreyas Mashelkar" }]
 
@@ -47,3 +47,17 @@ target-version = "py312"
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
+
+# NumPy 2.x ships shape-typed stubs that distinguish 1-D `ndarray[tuple[int], …]` from
+# n-D `ndarray[tuple[int, …], …]`. Our numerical kernels routinely rebind an array to the
+# result of `np.where`/`np.column_stack`/broadcast ops, which the stubs flag as a shape
+# mismatch even though the code is correct. We relax only `assignment`/`arg-type` (the two
+# noise codes) for those specific modules; every other check still applies.
+[[tool.mypy.overrides]]
+module = [
+    "spdt.pricing.models.heston",
+    "spdt.pricing.models.lsv",
+    "spdt.hedging.delta_vega",
+    "spdt.vol.arbitrage",
+]
+disable_error_code = ["assignment", "arg-type"]
