@@ -276,3 +276,46 @@ class CapitalProtectedNote(Product):
             strike=p.get("strike", 1.0),
             cap=p.get("cap"),
         )
+
+
+@dataclass(frozen=True)
+class WorstOfAutocallable(Product):
+    """Worst-of autocallable on a correlated basket — the desk's correlation-selling workhorse.
+
+    The payoff is the single-name :class:`Autocallable` run on the **worst performer** of the
+    basket: at each observation the basket level is ``minₐ Sₐ(t)/Kₐ`` (struck to 1.0 at
+    inception). Selling the worst-of lets the desk pay a *higher* coupon than any single name,
+    because correlation widens the dispersion the investor is short — which is exactly why
+    worst-of notes are a large share of real structured-note issuance. Multi-asset: ``cashflows``
+    consumes a 3-D ``(paths, times, assets)`` :class:`PathSet` (see
+    :func:`spdt.pricing.engine.price_worst_of`); the correlation matrix is a first-class,
+    shockable risk factor (unlike a single-name note, this one actually *uses* correlation).
+    """
+
+    notional: float
+    observation_times: tuple[float, ...]
+    coupon_rate: float
+    autocall_level: float = 1.0
+    coupon_barrier: float = 0.8
+    knock_in: float = 0.6
+    memory: bool = False
+    underlyings: tuple[str, ...] = ()
+    initial_fixings: tuple[float, ...] | None = None  # struck per-asset references; None ⇒ float
+
+    def monitoring_times(self) -> tuple[float, ...]:
+        return self.observation_times
+
+    def cashflows(self, paths: PathSet) -> list[Cashflow]:
+        s = paths.spots  # (n_paths, n_times, n_assets)
+        if self.initial_fixings is None:
+            ref = s[:, 0:1, :]  # struck at the path start ⇒ scale-invariant (zero delta)
+        else:
+            ref = np.asarray(self.initial_fixings, dtype=float).reshape(1, 1, -1)
+        basket = (s / ref).min(axis=2)  # worst performer, struck to 1.0 at inception
+        # Barriers are fixed at 1.0 (not floated to the basket's start) so that bumping spot
+        # against fixed per-asset fixings produces a genuine basket delta.
+        inner = Autocallable(
+            self.notional, self.observation_times, self.coupon_rate, self.autocall_level,
+            self.coupon_barrier, self.knock_in, self.memory, initial_fixing=1.0,
+        )
+        return inner.cashflows(PathSet(times=paths.times, spots=basket))
