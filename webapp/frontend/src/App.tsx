@@ -24,7 +24,7 @@ function Masthead({
   return (
     <div className="mb-5 flex items-end justify-between border-b border-border-soft pb-4">
       <div>
-        <span className="text-[1.55rem] font-extrabold tracking-tight text-ink">
+        <span className="text-display font-extrabold tracking-tight text-ink">
           SPDT <span className="text-accent">//</span> Structuring Desk
         </span>
         <button
@@ -68,10 +68,11 @@ function KpiStrip({
         label="Book NAV"
         value={sim ? fmt(nav, 2) : compact(nav)}
         sub={sim ? `${nNotes} notes · ${signed(markMove, 2)} sim` : `${nNotes} notes`}
+        flashKey={Math.round(nav * 100)}
       />
       <Kpi label="Overnight P&L" value={signed(desk.day_pnl, 2)} sub="Taylor explain" tone={desk.day_pnl >= 0 ? "pos" : "neg"} />
-      <Kpi label="Net Δ" value={signed(cashDelta, 2)} sub="per +1% spot" tone={cashDelta >= 0 ? "pos" : "neg"} />
-      <Kpi label="Net Vega" value={signed(vegaPt, 2)} sub="per +1 vol pt" tone={vegaPt >= 0 ? "pos" : "neg"} />
+      <Kpi label="Net Δ" value={signed(cashDelta, 2)} sub="per +1% spot" tone={cashDelta >= 0 ? "pos" : "neg"} flashKey={Math.round(cashDelta * 100)} />
+      <Kpi label="Net Vega" value={signed(vegaPt, 2)} sub="per +1 vol pt" tone={vegaPt >= 0 ? "pos" : "neg"} flashKey={Math.round(vegaPt * 100)} />
       <Kpi label="Model reserve" value={fmt(desk.total_model_reserve, 2)} sub="LSV − LV" tone="accent" />
       <Kpi label="Worst stress" value={compact(worst)} sub="equity crash" tone="neg" />
     </div>
@@ -115,17 +116,22 @@ export default function App() {
     const rawDelta = desk.net_greeks.delta + sumStaged("delta");
     const gamma = desk.net_greeks.gamma + sumStaged("gamma");
     const vega = desk.net_greeks.vega + sumStaged("vega");
+    const vanna = desk.net_greeks.vanna; // book cross-greeks (staged not yet re-marked for these)
+    const volga = desk.net_greeks.volga;
     const stagedPv = sumStaged("pv");
     const dS = desk.spot * (market.spotMult - 1);
     const dVol = market.dVol;
-    const markMove = sim ? rawDelta * dS + 0.5 * gamma * dS * dS + vega * dVol : 0;
+    // Re-mark the book through its own greeks: PV by Δ/Γ/ν, delta by Γ (spot) + vanna (vol),
+    // vega by vanna (spot) + volga (vol). So vega ticks like delta does, not frozen.
+    const markMove = sim ? rawDelta * dS + 0.5 * gamma * dS * dS + vega * dVol + vanna * dS * dVol : 0;
     const liveSpot = sim ? desk.spot * market.spotMult : desk.spot;
     const liveVol = sim ? desk.model.atm_vol + market.dVol : desk.model.atm_vol;
-    const cashDelta = (rawDelta + (sim ? gamma * dS : 0)) * liveSpot * 0.01;
+    const liveDelta = rawDelta + (sim ? gamma * dS + vanna * dVol : 0);
+    const liveVega = vega + (sim ? vanna * dS + volga * dVol : 0);
     return {
       nav: desk.nav + stagedPv + markMove,
-      cashDelta,
-      vegaPt: vega / 100,
+      cashDelta: liveDelta * liveSpot * 0.01,
+      vegaPt: liveVega / 100,
       markMove,
       liveSpot,
       liveVol,
@@ -156,17 +162,22 @@ export default function App() {
   };
 
   return (
-    <div className="mx-auto max-w-[1560px] px-6 py-5">
-      <Masthead desk={desk} spot={agg.liveSpot} vol={agg.liveVol} spotChgBp={agg.spotChgBp} sim={sim} onToggle={() => setSim((s) => !s)} />
-      <KpiStrip desk={desk} nNotes={trades.length} nav={agg.nav} cashDelta={agg.cashDelta} vegaPt={agg.vegaPt} sim={sim} markMove={agg.markMove} />
-      <Tabs tabs={WORKSPACES} active={ws} onChange={setWs} />
-      <div className="pt-5">
-        {ws === "Overview" && <Overview desk={desk} onPickTrade={pickTrade} />}
-        {ws === "Originate" && <Originate desk={desk} onStage={stageTrade} />}
-        {ws === "Book & Risk" && (
-          <BookRisk desk={desk} trades={trades} selectedId={selectedId} setSelectedId={setSelectedId} tenorFilter={tenorFilter} setTenorFilter={setTenorFilter} />
-        )}
-        {ws === "Validate" && <Validate desk={desk} selectedId={selectedId} />}
+    <div data-ws={ws}>
+      {/* Ambient washes lean by workspace — gold when originating, teal when validating. */}
+      <div className="wash-gold" />
+      <div className="wash-teal" />
+      <div className="relative z-10 mx-auto max-w-[1560px] px-6 py-5">
+        <Masthead desk={desk} spot={agg.liveSpot} vol={agg.liveVol} spotChgBp={agg.spotChgBp} sim={sim} onToggle={() => setSim((s) => !s)} />
+        <KpiStrip desk={desk} nNotes={trades.length} nav={agg.nav} cashDelta={agg.cashDelta} vegaPt={agg.vegaPt} sim={sim} markMove={agg.markMove} />
+        <Tabs tabs={WORKSPACES} active={ws} onChange={setWs} />
+        <div className="pt-5">
+          {ws === "Overview" && <Overview desk={desk} onPickTrade={pickTrade} />}
+          {ws === "Originate" && <Originate desk={desk} onStage={stageTrade} />}
+          {ws === "Book & Risk" && (
+            <BookRisk desk={desk} trades={trades} selectedId={selectedId} setSelectedId={setSelectedId} tenorFilter={tenorFilter} setTenorFilter={setTenorFilter} />
+          )}
+          {ws === "Validate" && <Validate desk={desk} selectedId={selectedId} />}
+        </div>
       </div>
     </div>
   );
