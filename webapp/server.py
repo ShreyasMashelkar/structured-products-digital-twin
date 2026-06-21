@@ -25,13 +25,20 @@ from pydantic import BaseModel
 # `integration` is the sole cross-world seam — it re-exports everything (incl. CreditCurve) the
 # desk needs from the vendored XVA engine, so the webapp never imports `src.*` directly.
 from integration import (
+    CSA,
     CreditCurve,
     GovernanceGate,
     SpdtCurveAsOIS,
+    bacva_capital,
+    collateralise,
     economic_capital,
     exposure_metrics,
     note_exposure,
+    saccr_ead_equity,
+    stress_xva,
+    term_structure_credit_curve,
     xva_charge,
+    xva_sensitivities,
 )
 from spdt.core.types import Curve, year_fraction
 from spdt.dashboard.desk_data import build_desk_data
@@ -273,13 +280,26 @@ class XvaRequest(BaseModel):
     maturity: float | None = None
     params: dict = {}
     counterparty: str = "CP-0"
-    cds_spread_bps: float = 200.0
+    cds_spread_bps: float = 200.0       # 5y CDS; anchors the credit curve
+    cds_1y_bps: float | None = None     # if given (with the 5y above), build a term-structure curve
     recovery_rate: float = 0.40
     funding_spread_bp: float = 50.0
     hurdle_rate: float = 0.10
-    margin: float | None = None  # structuring margin in note units; default 1% of notional
+    margin: float | None = None         # structuring margin in note units; default 1% of notional
     ead_limit: float | None = None
     pfe_limit: float | None = None
+    # XVA depth (all opt-in; defaults reproduce unilateral CVA+FVA)
+    own_cds_bps: float | None = None    # issuer's own CDS → DVA benefit
+    cost_of_capital: float = 0.0        # > 0 turns on KVA
+    include_mva: bool = False           # fund initial margin → MVA
+    wwr_beta: float = 0.0               # wrong-way-risk tilt on the CVA exposure
+    collateralised: bool = False        # apply a CSA before charging
+    csa_threshold: float = 0.0
+    mpor_days: int = 10
+    # regulatory inputs
+    single_name: bool = True            # equity SA-CCR supervisory factor (32% vs 20% index)
+    sector: str = "Corporate"           # BA-CVA risk-weight bucket
+    rating: str = "IG"
     n_paths: int = 12_000
 
 
@@ -306,15 +326,35 @@ def xva(req: XvaRequest) -> dict:
     mat = req.maturity or (req.observation_times[-1] if req.observation_times else 1.0)
     grid = np.linspace(0.0, mat * 0.975, 14, dtype=np.float64)  # stop just shy of maturity
     try:
-        pkg = note_exposure(product, model, ois, funding, time_grid=grid,
-                            n_paths=req.n_paths, seed=7, counterparty_id=req.counterparty)
+        raw_pkg = note_exposure(product, model, ois, funding, time_grid=grid,
+                                n_paths=req.n_paths, seed=7, counterparty_id=req.counterparty)
     except Exception as e:  # a product whose exposure the seam can't yet build
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"could not build exposure: {e}") from e
 
-    credit = _credit(req.cds_spread_bps, req.recovery_rate)
-    charge = xva_charge(pkg, credit, funding_spread_bp=req.funding_spread_bp)
+    # Counterparty credit: a bootstrapped term structure when a 1y point is given, else flat.
+    if req.cds_1y_bps is not None:
+        credit = term_structure_credit_curve(
+            [1.0, 5.0], [max(req.cds_1y_bps, 1e-6), max(req.cds_spread_bps, 1e-6)],
+            recovery_rate=req.recovery_rate, ois_curve=ois,
+        )
+    else:
+        credit = _credit(req.cds_spread_bps, req.recovery_rate)
+    own_credit = _credit(req.own_cds_bps, req.recovery_rate) if req.own_cds_bps else None
+
+    # Optional CSA: charge the residual (collateralised) exposure.
+    pkg = collateralise(raw_pkg, CSA(threshold=req.csa_threshold, mpor_days=req.mpor_days)) \
+        if req.collateralised else raw_pkg
+
+    charge = xva_charge(
+        pkg, credit, funding_spread_bp=req.funding_spread_bp, own_credit_curve=own_credit,
+        cost_of_capital=req.cost_of_capital, wwr_beta=req.wwr_beta, include_mva=req.include_mva,
+    )
     metrics = exposure_metrics(pkg)
     ec = economic_capital(pkg, credit, ead=metrics["EAD"])
+    sens = xva_sensitivities(pkg, credit)
+    current_value = float(raw_pkg.npv_paths[:, 0].mean())
+    saccr = saccr_ead_equity(req.notional, mat, current_value=current_value, single_name=req.single_name)
+    bacva = bacva_capital(saccr["ead"], mat, sector=req.sector, rating=req.rating)
 
     limits = []
     le_id = f"LE_{req.counterparty}"
@@ -330,24 +370,33 @@ def xva(req: XvaRequest) -> dict:
     ee = pkg.expected_exposure()
     profile = [{"t": round(float(t), 4), "ee": round(float(v), 5)}
                for t, v in zip(pkg.time_grid, ee)]
-    spread_curve = []
-    for bp in _SPREAD_SWEEP_BPS:
-        ch = xva_charge(pkg, _credit(bp, req.recovery_rate), funding_spread_bp=req.funding_spread_bp)
-        spread_curve.append({"cds_bp": bp, "cva": round(ch["cva"], 5),
-                             "fva": round(ch["fva"], 5), "total": round(ch["total"], 5)})
+    spread_curve = [
+        {"cds_bp": bp, **{k: round(v, 5) for k, v in
+                          xva_charge(pkg, _credit(bp, req.recovery_rate),
+                                     funding_spread_bp=req.funding_spread_bp).items()}}
+        for bp in _SPREAD_SWEEP_BPS
+    ]
+    stress_ladder = [
+        {"shift_bp": row["shift_bp"], "cva": round(row["cva"], 5), "total": round(row["total"], 5)}
+        for row in stress_xva(pkg, credit)
+    ]
 
     return {
-        "charge": {"cva": charge["cva"], "fva": charge["fva"], "total": charge["total"]},
+        "charge": {k: charge[k] for k in ("cva", "fva", "dva", "kva", "mva", "total")},
         "metrics": {"ead": metrics["EAD"], "pfe": metrics["PFE"], "epe": metrics["EPE"],
-                    "ee_peak": metrics["EE_peak"], "capital": ec["Economic_Capital"],
-                    "expected_loss": ec["Expected_Loss"]},
+                    "ee_peak": metrics["EE_peak"], "expected_loss": ec["Expected_Loss"]},
+        "sensitivities": {"cs01": sens["cs01"], "jtd_gross": sens["jtd_gross"], "jtd_net": sens["jtd_net"]},
+        "capital": {"economic": ec["Economic_Capital"], "regulatory_bacva": bacva["capital"],
+                    "saccr_ead": saccr["ead"], "bacva_risk_weight_pct": bacva["risk_weight_pct"]},
         "decision": decision["Decision"],
         "reasons": decision["Reasons"],
         "limit_status": decision["Limit_Status"],
         "trade_raroc": decision["Trade_RAROC"],
         "margin": margin,
+        "collateralised": req.collateralised,
         "profile": profile,
         "spread_curve": spread_curve,
+        "stress_ladder": stress_ladder,
         "inputs": {"cds_spread_bps": req.cds_spread_bps, "recovery_rate": req.recovery_rate,
                    "funding_spread_bp": req.funding_spread_bp, "hurdle_rate": req.hurdle_rate},
     }

@@ -41,6 +41,7 @@ from integration.governance import (  # noqa: E402
     exposure_metrics,
 )
 from integration.xva_risk import (  # noqa: E402
+    bacva_capital,
     cva_cs01,
     saccr_ead_equity,
     stress_xva,
@@ -58,6 +59,7 @@ __all__ = [
     "GovernanceGate",
     "SpdtCurveAsOIS",
     "autocallable_exposure",
+    "bacva_capital",
     "collateralise",
     "cva_cs01",
     "economic_capital",

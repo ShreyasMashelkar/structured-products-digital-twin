@@ -69,10 +69,25 @@ Everything is **snapshot-in, report-out**: every layer consumes an immutable, ve
 SPDT (the structuring desk) and a vendored **INR OTC / CCR / XVA engine** (`xva/`, ~12.5k LOC: CVA/FVA/KVA/MVA, SA-CCR, SIMM, wrong-way risk, economic capital) are combined as **two desks over one shared core**, coupled at exactly one place — the **exposure/position seam** — so the two product models never have to be unified ([ADR-0007](docs/adr/0007-integrate-xva-at-the-exposure-seam.md)).
 
 ```
-position → mark-to-future exposure → XVA charge → all-in price → governance → desk tab
+   SPDT (equity structuring)                 vendored XVA / CCR engine
+ ┌───────────────────────────┐            ┌────────────────────────────┐
+ │ payoff DSL · MC pricing   │            │ CVAEngine · KVA · MVA      │
+ │ Heston/LSV · SSVI · AAD   │            │ CSAEngine · BA-CVA · SIMM  │
+ └─────────────┬─────────────┘            └─────────────▲──────────────┘
+               │  produces                              │  consumes
+               │            ┌──────────────────────┐    │
+               └──────────► │   ExposurePackage     │ ───┘
+                            │ path × time NPV cube  │
+                            │ + curves + cpty       │
+                            └──────────┬───────────┘
+                                       │   integration/ (the only cross-world importer)
+   position → exposure → [ netting · CSA/MPoR collateral · wrong-way tilt ]
+            → CVA + FVA + KVA + MVA − DVA → all-in coupon
+            → EAD/PFE · economic + regulatory capital · CS01/JTD/stress
+            → RAROC governance gate → React desk tab
 ```
 
-The `integration/` package is the only code allowed to import both worlds. The seam is one artefact, `ExposurePackage` (a path × time NPV cube + curves + counterparty), produced by SPDT's Monte Carlo and consumed by the XVA stack.
+The `integration/` package is the only code allowed to import both worlds. The seam is one artefact, `ExposurePackage` (a path × time NPV cube + curves + counterparty), produced by SPDT's Monte Carlo and consumed by the XVA stack. **Worked example with real numbers:** [`docs/xva_case_study.md`](docs/xva_case_study.md).
 
 | Capability | What it does | Where |
 |---|---|---|
