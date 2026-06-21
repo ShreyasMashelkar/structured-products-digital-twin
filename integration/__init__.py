@@ -22,6 +22,8 @@ from integration.exposure_export import (  # noqa: E402
     autocallable_exposure,
     european_exposure,
     mark_to_future_european,
+    note_exposure,
+    worst_of_exposure,
 )
 from integration.exposure_package import ExposurePackage  # noqa: E402
 
@@ -31,4 +33,6 @@ __all__ = [
     "autocallable_exposure",
     "european_exposure",
     "mark_to_future_european",
+    "note_exposure",
+    "worst_of_exposure",
 ]
