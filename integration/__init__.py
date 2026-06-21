@@ -17,6 +17,7 @@ _XVA_ROOT = Path(__file__).resolve().parent.parent / "xva"
 if _XVA_ROOT.is_dir() and str(_XVA_ROOT) not in sys.path:
     sys.path.insert(0, str(_XVA_ROOT))
 
+from integration.all_in_price import solve_coupon_all_in, xva_charge  # noqa: E402
 from integration.curve_adapter import SpdtCurveAsOIS  # noqa: E402
 from integration.exposure_export import (  # noqa: E402
     autocallable_exposure,
@@ -34,5 +35,7 @@ __all__ = [
     "european_exposure",
     "mark_to_future_european",
     "note_exposure",
+    "solve_coupon_all_in",
     "worst_of_exposure",
+    "xva_charge",
 ]

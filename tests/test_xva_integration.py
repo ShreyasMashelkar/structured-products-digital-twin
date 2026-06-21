@@ -20,7 +20,9 @@ from integration import (
     european_exposure,
     mark_to_future_european,
     note_exposure,
+    solve_coupon_all_in,
     worst_of_exposure,
+    xva_charge,
 )
 from spdt.core.types import Curve, year_fraction
 from spdt.pricing import BlackScholes, bs_vanilla, price_mc
@@ -230,3 +232,49 @@ def test_worst_of_exposure_flows_through_to_a_cva():
         pkg.expected_exposure(), pkg.time_grid, CreditCurve(cds_spread_bps=300.0, recovery_rate=0.40)
     )
     assert np.isfinite(cva) and cva > 0.0
+
+
+# --- Phase 4: the all-in price — XVA folded into the structurer's solve ----------------------
+
+def _allin_pieces():
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.06))
+    model = BlackScholes(spot=100.0, r=0.06, q=0.0, sigma=0.22)
+    obs = (0.5, 1.0, 1.5, 2.0)
+    profile = np.linspace(0.0, 1.95, 8)
+
+    def make(c):
+        return Autocallable(notional=100.0, observation_times=obs, coupon_rate=c, autocall_level=1.0,
+                            coupon_barrier=0.8, knock_in=0.6, memory=True, initial_fixing=None)
+
+    price = lambda c: price_mc(make(c), model, n_paths=30_000, seed=11).price  # noqa: E731
+    expo = lambda c: autocallable_exposure(make(c), model, ois, ois,  # noqa: E731
+                                           time_grid=profile, n_paths=12_000, seed=5)
+    return price, expo
+
+
+def test_xva_charge_grows_with_counterparty_spread():
+    _, expo = _allin_pieces()
+    pkg = expo(0.04)
+    near = xva_charge(pkg, CreditCurve(cds_spread_bps=1e-6, recovery_rate=0.40))
+    mid = xva_charge(pkg, CreditCurve(cds_spread_bps=200.0, recovery_rate=0.40))
+    wide = xva_charge(pkg, CreditCurve(cds_spread_bps=600.0, recovery_rate=0.40))
+    assert near["cva"] == pytest.approx(0.0, abs=1e-3)
+    assert wide["cva"] > mid["cva"] > near["cva"]
+    assert mid["fva"] > 0.0 and mid["total"] == pytest.approx(mid["cva"] + mid["fva"])
+
+
+def test_all_in_coupon_is_below_par_coupon_and_falls_with_spread():
+    """The headline of the combined platform: carrying XVA lowers the coupon the desk can offer,
+    and a wider counterparty spread lowers it further."""
+    price, expo = _allin_pieces()
+
+    def coupon_at(spread_bp):
+        res = solve_coupon_all_in(price, expo, CreditCurve(cds_spread_bps=spread_bp, recovery_rate=0.40),
+                                  par=100.0, fee=1.0, bracket=(0.0, 0.25))
+        return res["coupon_base"], res["coupon_all_in"]
+
+    base, allin_tight = coupon_at(50.0)
+    _, allin_wide = coupon_at(500.0)
+    assert allin_tight < base                 # XVA eats into the offered coupon
+    assert allin_wide < allin_tight           # and more so as the counterparty deteriorates
+    assert allin_wide > 0.0                    # still a real, sellable note
