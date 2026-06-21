@@ -27,12 +27,20 @@ from integration.exposure_export import (  # noqa: E402
     worst_of_exposure,
 )
 from integration.exposure_package import ExposurePackage  # noqa: E402
+from integration.governance import (  # noqa: E402
+    GovernanceGate,
+    economic_capital,
+    exposure_metrics,
+)
 
 __all__ = [
     "ExposurePackage",
+    "GovernanceGate",
     "SpdtCurveAsOIS",
     "autocallable_exposure",
+    "economic_capital",
     "european_exposure",
+    "exposure_metrics",
     "mark_to_future_european",
     "note_exposure",
     "solve_coupon_all_in",
