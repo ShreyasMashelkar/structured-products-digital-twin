@@ -81,6 +81,22 @@ def collateralise(pkg: ExposurePackage, csa: CSA, *, trade_id: str | None = None
     return replace(pkg, trade_id=trade_id or f"{pkg.trade_id}|csa", npv_paths=residual)
 
 
+def initial_margin_profile(
+    pkg: ExposurePackage, *, mpor_days: int = 10, quantile: float = 0.99
+) -> NDArray[np.float64]:
+    """Dynamic initial-margin profile IM(t) from the exposure cube — the MVA driver.
+
+    IM covers the close-out move over the margin period of risk at a high quantile (the ISDA-SIMM /
+    99%-10-day idea): ``IM(t) = Q_q( |V(t) − V(t−MPoR)| )`` across paths. The MPoR look-back reuses
+    the engine's ``CSAEngine`` close-out (variance-corrected on a coarse grid), so IM and collateral
+    share one consistent MPoR treatment.
+    """
+    eng = CSAEngine(mpor_days=mpor_days)
+    lagged = eng._lagged_mtm(pkg.npv_paths, pkg.time_grid)  # MtM as of t − MPoR, per path
+    close_out_move = np.abs(pkg.npv_paths - lagged)
+    return np.quantile(close_out_move, quantile, axis=0)
+
+
 def wrong_way_ee(pkg: ExposurePackage, *, beta: float) -> NDArray[np.float64]:
     """Wrong-way-adjusted EE via an exponential tilt of the path measure.
 

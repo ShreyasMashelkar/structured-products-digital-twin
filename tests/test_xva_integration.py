@@ -20,16 +20,21 @@ from integration import (
     SpdtCurveAsOIS,
     autocallable_exposure,
     collateralise,
+    cva_cs01,
     economic_capital,
     european_exposure,
     exposure_metrics,
     mark_to_future_european,
     netting_set_exposure,
     note_exposure,
+    saccr_ead_equity,
     solve_coupon_all_in,
+    stress_xva,
+    term_structure_credit_curve,
     worst_of_exposure,
     wrong_way_ee,
     xva_charge,
+    xva_sensitivities,
 )
 from spdt.core.types import Curve, year_fraction
 from spdt.pricing import BlackScholes, bs_vanilla, price_mc
@@ -460,3 +465,79 @@ def test_wrong_way_risk_lifts_ee_and_cva_right_way_lowers_it():
     assert wrong_way_ee(pkg, beta=-0.8).sum() < indep
     assert xva_charge(pkg, cc, wwr_beta=0.8)["cva"] > xva_charge(pkg, cc)["cva"]
     assert xva_charge(pkg, cc, wwr_beta=-0.8)["cva"] < xva_charge(pkg, cc)["cva"]
+
+
+# --- Phase 8: completing the suite — MVA, term-structure credit, XVA risk, regulatory EAD --------
+
+def test_mva_is_a_positive_funding_cost_added_to_the_total():
+    """Initial margin must be funded: turning MVA on adds a positive term to an otherwise unchanged
+    charge (total = CVA + FVA + KVA + MVA − DVA)."""
+    _, _, pkg = _autocall_setup()
+    cc = CreditCurve(cds_spread_bps=200.0, recovery_rate=0.40)
+    base = xva_charge(pkg, cc)
+    with_mva = xva_charge(pkg, cc, include_mva=True)
+    assert base["mva"] == 0.0
+    assert with_mva["mva"] > 0.0
+    assert with_mva["total"] == pytest.approx(
+        with_mva["cva"] + with_mva["fva"] + with_mva["kva"] + with_mva["mva"] - with_mva["dva"]
+    )
+
+
+def test_term_structure_credit_curve_drives_cva_and_is_monotone_in_spread():
+    """A bootstrapped CDS term structure drops into the charge like a flat curve, and a uniformly
+    wider curve costs more CVA."""
+    _, _, pkg = _autocall_setup()
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.06))
+    tight = term_structure_credit_curve([0.5, 1, 3, 5], [80, 110, 150, 180], recovery_rate=0.40, ois_curve=ois)
+    wide = term_structure_credit_curve([0.5, 1, 3, 5], [180, 260, 340, 400], recovery_rate=0.40, ois_curve=ois)
+    cva_tight = xva_charge(pkg, tight)["cva"]
+    cva_wide = xva_charge(pkg, wide)["cva"]
+    assert np.isfinite(cva_tight) and cva_tight > 0.0
+    assert cva_wide > cva_tight
+
+
+def test_term_structure_curve_works_in_governance_gate():
+    """The term-structure curve exposes the full CreditCurve interface, so it also feeds capital and
+    the governance decision unchanged."""
+    _, _, pkg = _autocall_setup()
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.06))
+    cc = term_structure_credit_curve([1, 3, 5], [150, 200, 240], recovery_rate=0.40, ois_curve=ois)
+    res = GovernanceGate(limits=[{"LegalEntityID": "LE_CP-0", "Metric": "EAD", "LimitAmount": 1e9}]).evaluate(
+        pkg, cc, revenue=20.0
+    )
+    assert res["Decision"] in {"APPROVED", "MANUAL_REVIEW", "REJECTED"}
+    assert economic_capital(pkg, cc)["Economic_Capital"] > 0.0
+
+
+def test_cs01_is_positive_and_jtd_exceeds_the_reserve():
+    """CS01 > 0 (CVA widens with the curve); jump-to-default loss exceeds the CVA already taken."""
+    _, _, pkg = _autocall_setup()
+    cc = CreditCurve(cds_spread_bps=200.0, recovery_rate=0.40)
+    assert cva_cs01(pkg, cc, bump_bp=1.0) > 0.0
+    s = xva_sensitivities(pkg, cc)
+    assert s["cs01"] > 0.0
+    assert s["jtd_gross"] > s["cva"] > 0.0          # immediate default hurts more than the reserve
+    assert s["jtd_net"] == pytest.approx(s["jtd_gross"] - s["cva"])
+
+
+def test_stress_ladder_is_monotone_and_anchored_at_base():
+    _, _, pkg = _autocall_setup()
+    cc = CreditCurve(cds_spread_bps=200.0, recovery_rate=0.40)
+    ladder = stress_xva(pkg, cc, shocks_bp=(-100.0, 0.0, 100.0, 300.0))
+    cvas = [row["cva"] for row in ladder]
+    assert cvas == sorted(cvas)                                   # CVA rises with the shock
+    base0 = next(r for r in ladder if r["shift_bp"] == 0.0)
+    assert base0["cva"] == pytest.approx(xva_charge(pkg, cc)["cva"])
+
+
+def test_saccr_equity_ead_uses_correct_supervisory_factors():
+    """Basel SA-CCR for equity: single-name (32%) add-on exceeds index (20%); the maturity factor
+    caps at 1y; EAD = α·(RC + PFE)."""
+    single = saccr_ead_equity(100.0, 2.0, current_value=5.0, single_name=True)
+    index = saccr_ead_equity(100.0, 2.0, current_value=5.0, single_name=False)
+    assert single["addon"] > index["addon"]
+    assert single["addon"] == pytest.approx(0.32 * 100.0 * 1.0)   # MF capped at sqrt(min(2,1))=1
+    assert single["rc"] == 5.0
+    assert single["ead"] == pytest.approx(1.4 * (single["rc"] + single["pfe"]))
+    short = saccr_ead_equity(100.0, 0.25, single_name=True)       # MF = sqrt(0.25) = 0.5
+    assert short["addon"] == pytest.approx(0.32 * 100.0 * 0.5)
