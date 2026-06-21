@@ -29,8 +29,10 @@ class ExposurePackage:
     Attributes:
         trade_id: stable identifier for the position.
         counterparty_id: who the exposure is *to* (drives the credit curve in CVA).
-        netting_set: netting-set key; positions in the same set net before exposure is taken.
-        time_grid: shape ``(n_times,)`` year-fractions from today (MPoR-aware where it matters).
+        netting_set: netting-set key; carried for portfolio netting (the current charge is
+            single-trade — see the roadmap in ``docs/adr/0007``).
+        time_grid: shape ``(n_times,)`` year-fractions from today. Exposure is **uncollateralised**:
+            no CSA / margin-period-of-risk gap is applied (collateralised EPE is a planned extension).
         npv_paths: shape ``(n_paths, n_times)`` — the position NPV on each path at each time.
         ois_curve: discounting curve for the option/hedge leg (adapted SPDT OIS curve).
         funding_curve: issuer funding curve (OIS + spread) — the FVA driver.
