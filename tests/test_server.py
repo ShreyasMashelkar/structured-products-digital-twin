@@ -98,6 +98,42 @@ def test_xva_rejects_worst_of(client):
     assert r.status_code == 400
 
 
+def test_xva_full_depth_payload(client):
+    """The full charge (CVA+FVA+KVA+MVA−DVA), XVA risk, capital, and stress ladder are returned and
+    internally consistent when the depth knobs are switched on."""
+    r = client.post(
+        "/api/xva",
+        json={"product_type": "autocallable", "notional": 100,
+              "observation_times": [0.5, 1.0, 1.5, 2.0], "maturity": 2.0,
+              "params": {"coupon_rate": 0.04, "knock_in": 0.6, "autocall_level": 1.0,
+                         "coupon_barrier": 0.8, "memory": True},
+              "cds_spread_bps": 300.0, "cds_1y_bps": 150.0, "own_cds_bps": 120.0,
+              "cost_of_capital": 0.12, "include_mva": True, "wwr_beta": 0.5, "ead_limit": 1e9},
+    )
+    assert r.status_code == 200
+    b = r.json()
+    ch = b["charge"]
+    assert ch["kva"] > 0.0 and ch["mva"] > 0.0          # KVA + MVA switched on
+    assert ch["total"] == pytest.approx(ch["cva"] + ch["fva"] + ch["kva"] + ch["mva"] - ch["dva"])
+    assert b["sensitivities"]["cs01"] > 0.0
+    assert b["capital"]["economic"] > 0.0 and b["capital"]["regulatory_bacva"] > 0.0
+    assert b["capital"]["saccr_ead"] > 0.0
+    cvas = [row["cva"] for row in b["stress_ladder"]]
+    assert cvas == sorted(cvas)                          # stress ladder monotone in the shock
+
+
+def test_xva_collateral_cuts_the_charge(client):
+    """Turning on a CSA leaves only the close-out gap, so the total charge falls."""
+    base = {"product_type": "autocallable", "notional": 100,
+            "observation_times": [0.5, 1.0, 1.5, 2.0], "maturity": 2.0,
+            "params": {"coupon_rate": 0.04, "knock_in": 0.6, "autocall_level": 1.0,
+                       "coupon_barrier": 0.8, "memory": True}, "cds_spread_bps": 300.0}
+    uncol = client.post("/api/xva", json={**base, "collateralised": False}).json()
+    col = client.post("/api/xva", json={**base, "collateralised": True}).json()
+    assert col["collateralised"] is True
+    assert col["charge"]["cva"] < uncol["charge"]["cva"]
+
+
 def test_refresh_rebuilds(client):
     r = client.post("/api/desk/refresh")
     assert r.status_code == 200

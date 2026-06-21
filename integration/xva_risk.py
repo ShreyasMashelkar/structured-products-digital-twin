@@ -19,6 +19,7 @@ from typing import Sequence
 
 from integration.all_in_price import xva_charge
 from integration.exposure_package import ExposurePackage
+from src.sa_ccr.ba_cva import BACVAEngine  # type: ignore  # resolved via integration
 from src.xva.cva import CreditCurve  # type: ignore  # resolved via integration
 
 # Basel SA-CCR supervisory factors for the equity asset class.
@@ -90,3 +91,25 @@ def saccr_ead_equity(
     addon = abs(delta) * sf * notional * mf
     ead = alpha * (rc + addon)
     return {"rc": rc, "addon": addon, "pfe": addon, "ead": ead}
+
+
+def bacva_capital(
+    ead: float, maturity: float, *, sector: str = "Corporate", rating: str = "IG",
+    capital_ratio: float = 0.105,
+) -> dict[str, float]:
+    """Basel **BA-CVA** regulatory capital for the counterparty (reduced version, no hedges).
+
+    ``SCVA = (1/α)·RW·M·EAD·DF`` with a supervisory discount factor and a sector × rating risk
+    weight; for one counterparty the reduced aggregation ``K = √(ρ²+1−ρ²)·SCVA`` collapses to SCVA.
+    The regulatory mirror of the ASRF economic capital in
+    :func:`integration.governance.economic_capital`. Delegates to the engine's ``BACVAEngine``.
+    """
+    res = BACVAEngine(capital_ratio=capital_ratio).compute_reduced(
+        [{"name": "CP", "sector": sector, "rating": rating, "ead": ead, "maturity": maturity}]
+    )
+    return {
+        "scva": res["sum_scva"],
+        "k_reduced": res["K_reduced"],
+        "capital": res["BA_CVA_capital_CR"],
+        "risk_weight_pct": res["details"][0]["rw_pct"],
+    }

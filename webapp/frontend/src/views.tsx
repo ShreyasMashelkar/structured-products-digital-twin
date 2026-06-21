@@ -515,6 +515,20 @@ const DECISION_STYLE: Record<Decision, { cls: string; text: string; dot: string;
   MANUAL_REVIEW: { cls: "border-accent/40 bg-accent/10", text: "text-accent", dot: "bg-accent", label: "Manual review" },
 };
 
+function Toggle({ label, on, onClick }: { label: string; on: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "ring-desk rounded-lg border px-3 py-2 text-[12px] font-semibold transition-colors",
+        on ? "border-accent/60 bg-accent/15 text-accent" : "border-border bg-panel2 text-muted hover:text-ink",
+      )}
+    >
+      {on ? "● " : "○ "}{label}
+    </button>
+  );
+}
+
 export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selectedId: string | null }) {
   const eligible = trades.filter((t) => XVA_PRODUCTS.has(t.product_type));
   const [tradeId, setTradeId] = useState<string | null>(null);
@@ -524,6 +538,12 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
   const [hurdle, setHurdle] = useState(0.1);
   const [margin, setMargin] = useState(1.0);
   const [eadLimit, setEadLimit] = useState(0); // 0 ⇒ no limit
+  // XVA depth knobs
+  const [ownCds, setOwnCds] = useState(0); // 0 ⇒ no DVA
+  const [coc, setCoc] = useState(0); // cost of capital; 0 ⇒ no KVA
+  const [wwr, setWwr] = useState(0); // wrong-way-risk tilt
+  const [mva, setMva] = useState(false);
+  const [collat, setCollat] = useState(false);
   const [res, setRes] = useState<XvaResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -548,18 +568,21 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
         observation_times: trade.observation_times, maturity: trade.maturity, params: trade.params,
         counterparty: "CP-0", cds_spread_bps: cds, recovery_rate: rec, funding_spread_bp: fund,
         hurdle_rate: hurdle, margin, ead_limit: eadLimit > 0 ? eadLimit : undefined,
+        own_cds_bps: ownCds > 0 ? ownCds : undefined, cost_of_capital: coc, wwr_beta: wwr,
+        include_mva: mva, collateralised: collat, single_name: true,
       })
         .then((r) => !cancel && setRes(r))
         .catch((e) => !cancel && setErr(String(e)))
         .finally(() => !cancel && setLoading(false));
     }, 250);
     return () => { cancel = true; clearTimeout(id); };
-  }, [activeId, cds, rec, fund, hurdle, margin, eadLimit]);
+  }, [activeId, cds, rec, fund, hurdle, margin, eadLimit, ownCds, coc, wwr, mva, collat]);
 
   if (eligible.length === 0)
     return <div className="text-[13px] text-muted">No single-asset notes in the book to charge — worst-of baskets aren't wired to the XVA tab yet.</div>;
 
   const ds = res ? DECISION_STYLE[res.decision] : null;
+  const ccyPct = (v: number) => (trade ? pct(v / trade.notional, 2) : "—");
 
   return (
     <div className="space-y-4">
@@ -589,6 +612,16 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
           <Slider label="Structuring margin" value={margin} min={0} max={6} step={0.25} onChange={setMargin} display={fmt(margin, 2)} />
           <Slider label="EAD limit (0=off)" value={eadLimit} min={0} max={400} step={10} onChange={setEadLimit} display={eadLimit > 0 ? fmt(eadLimit, 0) : "off"} />
         </div>
+        <div className="mt-4 border-t border-border-soft pt-4">
+          <div className="mb-3 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">XVA depth · CVA + FVA + KVA + MVA − DVA</div>
+          <div className="grid grid-cols-2 items-end gap-5 md:grid-cols-3 lg:grid-cols-5">
+            <Slider label="Own CDS → DVA (0=off)" value={ownCds} min={0} max={600} step={25} onChange={setOwnCds} display={ownCds > 0 ? `${ownCds}bp` : "off"} />
+            <Slider label="Cost of capital → KVA" value={coc} min={0} max={0.2} step={0.01} onChange={setCoc} display={coc > 0 ? pct(coc, 0) : "off"} />
+            <Slider label="Wrong-way β" value={wwr} min={-1} max={1} step={0.1} onChange={setWwr} display={wwr.toFixed(1)} />
+            <Toggle label="Initial margin → MVA" on={mva} onClick={() => setMva((x) => !x)} />
+            <Toggle label="Collateralise (CSA/MPoR)" on={collat} onClick={() => setCollat((x) => !x)} />
+          </div>
+        </div>
       </Panel>
 
       {err && <div className="rounded-lg border border-down/30 bg-down/5 px-3 py-2 text-[12px] text-down">Charge failed: {err}</div>}
@@ -606,17 +639,28 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
             <div className="flex flex-wrap gap-1.5">
               <Chip hot={res.limit_status !== "PASS"}>limit {res.limit_status.toLowerCase()}</Chip>
               <Chip>RAROC {pct(res.trade_raroc, 1)} vs {pct(res.inputs.hurdle_rate, 0)} hurdle</Chip>
-              <Chip>margin {fmt(res.margin, 2)}</Chip>
+              {res.collateralised && <Chip hot>collateralised</Chip>}
             </div>
           </Panel>
 
+          {/* Charge breakdown: CVA + FVA + KVA + MVA − DVA = Total */}
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-            <Kpi label="CVA" value={fmt(res.charge.cva, 3)} sub="credit charge" tone="neg" flashKey={Math.round(res.charge.cva * 1000)} />
-            <Kpi label="FVA" value={fmt(res.charge.fva, 3)} sub="funding charge" tone="neg" flashKey={Math.round(res.charge.fva * 1000)} />
-            <Kpi label="Total XVA" value={fmt(res.charge.total, 3)} sub={`${pct(res.charge.total / trade.notional, 2)} of notional`} tone="accent" flashKey={Math.round(res.charge.total * 1000)} />
-            <Kpi label="EAD" value={fmt(res.metrics.ead, 2)} sub="α·EEPE" />
-            <Kpi label="Peak PFE" value={fmt(res.metrics.pfe, 2)} sub="95% exposure" />
-            <Kpi label="Economic capital" value={fmt(res.metrics.capital, 2)} sub="ASRF 99.9%" tone="accent" />
+            <Kpi label="CVA" value={fmt(res.charge.cva, 3)} sub="credit" tone="neg" flashKey={Math.round(res.charge.cva * 1000)} />
+            <Kpi label="FVA" value={fmt(res.charge.fva, 3)} sub="funding" tone="neg" flashKey={Math.round(res.charge.fva * 1000)} />
+            <Kpi label="KVA" value={fmt(res.charge.kva, 3)} sub="capital" tone="neg" flashKey={Math.round(res.charge.kva * 1000)} />
+            <Kpi label="MVA" value={fmt(res.charge.mva, 3)} sub="init. margin" tone="neg" flashKey={Math.round(res.charge.mva * 1000)} />
+            <Kpi label="DVA" value={fmt(res.charge.dva, 3)} sub="own-credit benefit" tone="pos" flashKey={Math.round(res.charge.dva * 1000)} />
+            <Kpi label="Total XVA" value={fmt(res.charge.total, 3)} sub={`${ccyPct(res.charge.total)} of notional`} tone="accent" flashKey={Math.round(res.charge.total * 1000)} />
+          </div>
+
+          {/* Risk & capital */}
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+            <Kpi label="CS01" value={fmt(res.sensitivities.cs01, 4)} sub="ΔCVA / +1bp" flashKey={Math.round(res.sensitivities.cs01 * 1e5)} />
+            <Kpi label="Jump-to-default" value={fmt(res.sensitivities.jtd_net, 2)} sub="loss net of CVA" tone="neg" />
+            <Kpi label="EAD" value={fmt(res.metrics.ead, 2)} sub="α·EEPE (econ.)" />
+            <Kpi label="SA-CCR EAD" value={fmt(res.capital.saccr_ead, 1)} sub="regulatory" />
+            <Kpi label="Economic capital" value={fmt(res.capital.economic, 2)} sub="ASRF 99.9%" tone="accent" />
+            <Kpi label="Reg. capital" value={fmt(res.capital.regulatory_bacva, 2)} sub={`BA-CVA · RW ${fmt(res.capital.bacva_risk_weight_pct, 1)}%`} tone="accent" />
           </div>
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -627,7 +671,7 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
                 x="t"
                 y="ee"
                 color={C.teal}
-                height={280}
+                height={260}
                 xLabel="time (years)"
                 yLabel="EE"
                 yTickFormat={(v) => v.toFixed(0)}
@@ -636,10 +680,11 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
                 xTickFormat={(v) => `${v}y`}
               />
               <div className="px-1 pt-1 text-[12px] text-muted">
-                {trade.product_type === "autocallable"
-                  ? "Mark-to-future positive exposure. The step-downs are autocall dates — redeemed paths leave the book, collapsing the exposure."
-                  : "Mark-to-future positive exposure. With no early redemption, it stays elevated across the note's life — no autocall cliff."}{" "}
-                Credit-independent: the counterparty sliders rescale the charge, not this profile.
+                {res.collateralised
+                  ? "Collateralised (residual) exposure — only the close-out gap over the MPoR survives a CSA, so the profile sits far below the uncollateralised mark."
+                  : trade.product_type === "autocallable"
+                    ? "Mark-to-future positive exposure. The step-downs are autocall dates — redeemed paths leave the book, collapsing the exposure."
+                    : "Mark-to-future positive exposure. With no early redemption, it stays elevated across the note's life — no autocall cliff."}
               </div>
             </Panel>
             <Panel className="p-3">
@@ -649,16 +694,25 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
                 x="cds_bp"
                 xLabel="counterparty CDS (bp)"
                 yLabel="charge"
-                series={[{ key: "cva", name: "CVA", color: C.down }, { key: "total", name: "CVA + FVA", color: C.accent }]}
-                height={280}
+                series={[{ key: "cva", name: "CVA", color: C.down }, { key: "total", name: "total XVA", color: C.accent }]}
+                height={260}
                 refX={cds}
                 refLabel={`${cds}bp`}
               />
               <div className="px-1 pt-1 text-[12px] text-muted">
-                CVA scales with the counterparty's default risk; the gap up to total is FVA — credit-independent funding cost. The <span className="text-accent">dashed marker</span> is the selected spread — the operating point the all-in price carries into the coupon.
+                CVA scales with the counterparty's default risk; the gap up to total is the credit-independent FVA/KVA/MVA. The <span className="text-accent">dashed marker</span> is the selected spread.
               </div>
             </Panel>
           </div>
+
+          <Panel className="p-3">
+            <SectionTitle>CVA stress ladder · total charge under CDS shocks</SectionTitle>
+            <Bars data={res.stress_ladder.map((s) => ({ shock: `${s.shift_bp > 0 ? "+" : ""}${s.shift_bp}bp`, total: s.total }))}
+              x="shock" y="total" color={C.accent} height={220} yLabel="total XVA" />
+            <div className="px-1 pt-1 text-[12px] text-muted">
+              The charge re-struck under a parallel CDS shift — the CVA desk's daily stress view. CS01 above is the slope of this ladder at the current spread.
+            </div>
+          </Panel>
         </>
       )}
       {loading && !res && <div className="text-[13px] text-muted">Charging…</div>}
