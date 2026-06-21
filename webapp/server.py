@@ -22,8 +22,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Importing `integration` puts the vendored XVA engine on sys.path, so `src.*` resolves below.
+# `integration` is the sole cross-world seam — it re-exports everything (incl. CreditCurve) the
+# desk needs from the vendored XVA engine, so the webapp never imports `src.*` directly.
 from integration import (
+    CreditCurve,
     GovernanceGate,
     SpdtCurveAsOIS,
     economic_capital,
@@ -45,7 +47,6 @@ from spdt.products import (
 from spdt.reporting import terminal_scenarios
 from spdt.stress import STANDARD_SCENARIOS
 from spdt.structurer import ClientBrief, par_target, propose_autocallable, solve_to_par
-from src.xva.cva import CreditCurve  # type: ignore  # resolved via integration's sys.path insert
 
 # --- configuration (all env-driven so the same image runs locally and deployed) -----------
 _CORS = os.environ.get("SPDT_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")

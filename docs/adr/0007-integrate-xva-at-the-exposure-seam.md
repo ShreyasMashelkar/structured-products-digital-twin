@@ -49,8 +49,9 @@ shared core.
 - A new top-level `integration/` package depends on *both* `spdt.*` and the vendored XVA `src.*`
   (it puts `xva/` on `sys.path`). It is the only place allowed to import across both worlds.
 - The first milestone is a **curve-join proof**: one SPDT curve drives `CVAEngine` and the adapter's
-  discount factors match the source to 1e-8 (`tests/integration/test_curve_join.py`).
-- Subsequent phases (exposure export → XVA charge → all-in price → governance) each land as their
-  own PR behind a verifiable gate; no second "big bang" commit.
+  discount factors match the source to 1e-8 (`tests/test_xva_integration.py`, which carries every
+  integration-phase gate end to end).
+- Subsequent phases (exposure export → XVA charge → all-in price → governance → desk tab) each land
+  as their own commit behind a verifiable gate; no second "big bang" commit.
 - Scope discipline is explicit: integration happens *only* at `position → exposure → XVA → price`.
   Merging the two product models or the two UIs is out of scope unless a separate ADR overrides it.
