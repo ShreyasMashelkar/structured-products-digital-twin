@@ -4,9 +4,9 @@ import { Trade, bookTrades, priceReq } from "./lib/trades";
 import { Kpi, Tabs } from "./components/ui";
 import { cn } from "./lib/cn";
 import { compact, fmt, signed } from "./lib/format";
-import { BookRisk, Originate, Overview, Validate } from "./views";
+import { BookRisk, CounterpartyXva, Originate, Overview, Validate } from "./views";
 
-const WORKSPACES = ["Overview", "Originate", "Book & Risk", "Validate"];
+const WORKSPACES = ["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate"];
 
 // Rough standard normal (sum of uniforms) for the simulated tick.
 const gauss = () => Math.random() + Math.random() + Math.random() - 1.5;
@@ -178,6 +178,7 @@ export default function App() {
           {ws === "Book & Risk" && (
             <BookRisk desk={desk} trades={trades} selectedId={selectedId} setSelectedId={setSelectedId} tenorFilter={tenorFilter} setTenorFilter={setTenorFilter} mk={{ dS: agg.dS, dVol: agg.dVol, liveSpot: agg.liveSpot, sim }} />
           )}
+          {ws === "Counterparty & XVA" && <CounterpartyXva trades={trades} selectedId={selectedId} />}
           {ws === "Validate" && <Validate desk={desk} selectedId={selectedId} />}
         </div>
       </div>

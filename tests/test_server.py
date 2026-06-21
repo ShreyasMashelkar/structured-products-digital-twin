@@ -59,6 +59,44 @@ def test_structure_endpoint_solves(client):
     assert len(r.json()["pv_curve"]) > 0
 
 
+def test_xva_endpoint_charges_and_decides(client):
+    """The Phase-6 governance tab: an autocallable → charge + exposure profile + decision."""
+    r = client.post(
+        "/api/xva",
+        json={"product_type": "autocallable", "notional": 100,
+              "observation_times": [0.5, 1.0, 1.5, 2.0], "maturity": 2.0,
+              "params": {"coupon_rate": 0.04, "autocall_level": 1.0, "coupon_barrier": 0.8,
+                         "knock_in": 0.6, "memory": True},
+              "cds_spread_bps": 300.0, "recovery_rate": 0.40, "ead_limit": 1e9},
+    )
+    assert r.status_code == 200
+    b = r.json()
+    assert b["decision"] in {"APPROVED", "REJECTED", "MANUAL_REVIEW"}
+    assert b["charge"]["total"] == pytest.approx(b["charge"]["cva"] + b["charge"]["fva"])
+    assert len(b["profile"]) > 0 and b["metrics"]["ead"] > 0
+    # The spread sweep is monotone: a wider counterparty spread costs more CVA.
+    sweep = b["spread_curve"]
+    assert sweep[0]["cva"] == pytest.approx(0.0, abs=1e-3) and sweep[-1]["cva"] > sweep[0]["cva"]
+
+
+def test_xva_limit_breach_rejects(client):
+    """An EAD limit below the trade's own EAD must reject the trade."""
+    r = client.post(
+        "/api/xva",
+        json={"product_type": "autocallable", "notional": 100,
+              "observation_times": [0.5, 1.0, 1.5, 2.0], "maturity": 2.0,
+              "params": {"coupon_rate": 0.04, "knock_in": 0.6}, "ead_limit": 0.01},
+    )
+    assert r.status_code == 200
+    b = r.json()
+    assert b["decision"] == "REJECTED" and b["limit_status"] == "FAIL"
+
+
+def test_xva_rejects_worst_of(client):
+    r = client.post("/api/xva", json={"product_type": "worst_of", "notional": 100, "params": {}})
+    assert r.status_code == 400
+
+
 def test_refresh_rebuilds(client):
     r = client.post("/api/desk/refresh")
     assert r.status_code == 200
