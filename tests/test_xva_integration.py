@@ -14,17 +14,21 @@ import pytest
 
 import integration  # noqa: F401 — import side-effect: puts xva/ on sys.path
 from integration import (
+    CSA,
     ExposurePackage,
     GovernanceGate,
     SpdtCurveAsOIS,
     autocallable_exposure,
+    collateralise,
     economic_capital,
     european_exposure,
     exposure_metrics,
     mark_to_future_european,
+    netting_set_exposure,
     note_exposure,
     solve_coupon_all_in,
     worst_of_exposure,
+    wrong_way_ee,
     xva_charge,
 )
 from spdt.core.types import Curve, year_fraction
@@ -358,3 +362,101 @@ def test_amber_utilisation_downgrades_approval_to_manual_review():
     assert res["Limit_Status"] == "WARNING"
     assert res["Decision"] == "MANUAL_REVIEW"
     assert "Approaching limit (amber)." in res["Reasons"]
+
+
+# --- Phase 7: CCR depth — bilateral DVA, KVA, EEPE cap, collateral, netting, wrong-way risk ----
+
+def _two_sided_pkg(seed=0, n_paths=4000):
+    """A synthetic Brownian exposure cube with both signs — needed to exercise the negative side
+    (DVA, netting benefit) that a long autocallable note never shows."""
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.05))
+    grid = np.linspace(0.0, 1.0, 11)
+    rng = np.random.default_rng(seed)
+    incr = rng.standard_normal((n_paths, 10)) * 0.10
+    npv = np.concatenate([np.zeros((n_paths, 1)), np.cumsum(incr, axis=1)], axis=1)
+    return ExposurePackage("SYN", "CP-0", "ns", grid, npv, ois, ois), ois
+
+
+def test_expected_negative_exposure_is_nonpositive_and_mirrors_ee():
+    pkg, _ = _two_sided_pkg()
+    ene = pkg.expected_negative_exposure()
+    ee = pkg.expected_exposure()
+    assert np.all(ene <= 0.0) and np.all(ee >= 0.0)
+    assert ene.min() < 0.0 and ee.max() > 0.0  # genuinely two-sided
+
+
+def test_dva_is_a_benefit_so_bilateral_charge_is_below_unilateral():
+    """DVA nets *against* the cost: total(bilateral) = CVA + FVA − DVA < CVA + FVA."""
+    pkg, _ = _two_sided_pkg()
+    cpty = CreditCurve(cds_spread_bps=300.0, recovery_rate=0.40)
+    own = CreditCurve(cds_spread_bps=120.0, recovery_rate=0.40)
+    uni = xva_charge(pkg, cpty)
+    bil = xva_charge(pkg, cpty, own_credit_curve=own)
+    assert uni["dva"] == 0.0
+    assert bil["dva"] > 0.0
+    assert bil["total"] == pytest.approx(bil["cva"] + bil["fva"] + bil["kva"] - bil["dva"])
+    assert bil["total"] < uni["total"]
+
+
+def test_kva_adds_a_capital_cost_that_scales_with_cost_of_capital():
+    _, expo = _allin_pieces()
+    pkg = expo(0.04)
+    cc = CreditCurve(cds_spread_bps=200.0, recovery_rate=0.40)
+    base = xva_charge(pkg, cc)
+    with_kva = xva_charge(pkg, cc, cost_of_capital=0.12)
+    pricier = xva_charge(pkg, cc, cost_of_capital=0.20)
+    assert base["kva"] == 0.0
+    assert with_kva["kva"] > 0.0
+    assert pricier["kva"] > with_kva["kva"]                       # linear in cost of capital
+    assert with_kva["total"] == pytest.approx(with_kva["cva"] + with_kva["fva"] + with_kva["kva"])
+
+
+def test_eepe_horizon_cap_changes_the_regulatory_ead():
+    """Basel caps the EEPE averaging window at one year. Effective EE is the *running max* of EE
+    (non-decreasing), so averaging over the first year — which still carries the early ramp — gives a
+    strictly lower EEPE than the full-life average: the window is a real modelling choice, not cosmetic."""
+    _, _, pkg = _autocall_setup()  # maturity ≈ 2y
+    capped = exposure_metrics(pkg, eepe_horizon=1.0)
+    full = exposure_metrics(pkg, eepe_horizon=10.0)
+    assert capped["EEPE"] < full["EEPE"]
+    assert capped["EAD"] == pytest.approx(1.4 * capped["EEPE"])
+
+
+def test_collateral_reduces_exposure_and_cva():
+    """A CSA (here zero-threshold, 10-day MPoR) leaves only the close-out gap, so collateralised
+    EAD and CVA sit well below the uncollateralised values."""
+    _, _, pkg = _autocall_setup()
+    cc = CreditCurve(cds_spread_bps=300.0, recovery_rate=0.40)
+    coll = collateralise(pkg, CSA(threshold=0.0, mpor_days=10))
+    assert exposure_metrics(coll)["EAD"] < exposure_metrics(pkg)["EAD"]
+    assert xva_charge(coll, cc)["cva"] < xva_charge(pkg, cc)["cva"]
+
+
+def test_netting_benefit_offsetting_trades_net_down():
+    """Two offsetting positions on common paths: the netted exposure collapses far below the sum of
+    the standalone exposures — the netting benefit."""
+    pkg_long, ois = _two_sided_pkg(seed=1)
+    pkg_short = ExposurePackage("SYN2", "CP-0", "ns", pkg_long.time_grid, -pkg_long.npv_paths, ois, ois)
+    netted = netting_set_exposure([pkg_long, pkg_short])
+    sum_standalone = pkg_long.expected_exposure() + pkg_short.expected_exposure()
+    assert netted.expected_exposure().max() < 0.1 * sum_standalone.max()  # near-perfect offset
+
+
+def test_netting_requires_common_grid_and_counterparty():
+    pkg, ois = _two_sided_pkg()
+    other_cp = ExposurePackage("X", "OTHER-CP", "ns", pkg.time_grid, pkg.npv_paths, ois, ois)
+    with pytest.raises(ValueError):
+        netting_set_exposure([pkg, other_cp])
+
+
+def test_wrong_way_risk_lifts_ee_and_cva_right_way_lowers_it():
+    """Exponential tilt: β>0 (wrong-way) up-weights high-exposure paths → EE and CVA rise above the
+    independent case; β<0 (right-way) pulls them below. β=0 is the ordinary EE."""
+    _, _, pkg = _autocall_setup()
+    cc = CreditCurve(cds_spread_bps=300.0, recovery_rate=0.40)
+    indep = pkg.expected_exposure().sum()
+    assert wrong_way_ee(pkg, beta=0.0).sum() == pytest.approx(indep)
+    assert wrong_way_ee(pkg, beta=0.8).sum() > indep
+    assert wrong_way_ee(pkg, beta=-0.8).sum() < indep
+    assert xva_charge(pkg, cc, wwr_beta=0.8)["cva"] > xva_charge(pkg, cc)["cva"]
+    assert xva_charge(pkg, cc, wwr_beta=-0.8)["cva"] < xva_charge(pkg, cc)["cva"]

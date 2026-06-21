@@ -70,26 +70,32 @@ def require_token(x_api_token: str | None = Header(default=None)) -> None:
 
 
 # --- desk dataset cache: TTL-based so a long-lived process re-marks, not freezes -----------
-_cache: dict[str, object] = {"payload": None, "built_at": 0.0}
+@dataclasses.dataclass
+class _DeskCache:
+    payload: dict | None = None
+    built_at: float = 0.0
+
+
+_cache = _DeskCache()
 _cache_lock = threading.Lock()
 
 
 def _desk(force: bool = False) -> dict:
     """The desk payload, rebuilt when stale (older than the TTL) or on ``force``."""
     now = time.time()
-    fresh = _cache["payload"] is not None and (now - float(_cache["built_at"])) < _DESK_TTL
-    if fresh and not force:
-        return _cache["payload"]  # type: ignore[return-value]
+    if _cache.payload is not None and not force and (now - _cache.built_at) < _DESK_TTL:
+        return _cache.payload
     with _cache_lock:  # only one builder; others wait then see the fresh result
-        if force or _cache["payload"] is None or (time.time() - float(_cache["built_at"])) >= _DESK_TTL:
-            _cache["payload"] = build_desk_data(live=_LIVE).payload
-            _cache["built_at"] = time.time()
-    return _cache["payload"]  # type: ignore[return-value]
+        if force or _cache.payload is None or (time.time() - _cache.built_at) >= _DESK_TTL:
+            _cache.payload = build_desk_data(live=_LIVE).payload
+            _cache.built_at = time.time()
+    assert _cache.payload is not None
+    return _cache.payload
 
 
 @app.get("/api/health")
 def health() -> dict:
-    built = float(_cache["built_at"])
+    built = _cache.built_at
     return {"status": "ok", "live": _LIVE, "desk_age_s": round(time.time() - built, 1) if built else None}
 
 

@@ -15,9 +15,9 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Lint
-        run: ruff check spdt tests
+        run: ruff check spdt integration webapp tests
       - name: Type-check
-        run: mypy spdt
+        run: mypy spdt integration webapp
       - name: Test
         run: pytest
 
