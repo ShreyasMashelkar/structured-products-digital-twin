@@ -15,9 +15,12 @@ import pytest
 import integration  # noqa: F401 — import side-effect: puts xva/ on sys.path
 from integration import (
     ExposurePackage,
+    GovernanceGate,
     SpdtCurveAsOIS,
     autocallable_exposure,
+    economic_capital,
     european_exposure,
+    exposure_metrics,
     mark_to_future_european,
     note_exposure,
     solve_coupon_all_in,
@@ -278,3 +281,80 @@ def test_all_in_coupon_is_below_par_coupon_and_falls_with_spread():
     assert allin_tight < base                 # XVA eats into the offered coupon
     assert allin_wide < allin_tight           # and more so as the counterparty deteriorates
     assert allin_wide > 0.0                    # still a real, sellable note
+
+
+# --- Phase 5: the governance gate — APPROVE / REJECT / MANUAL_REVIEW over the exposure seam ----
+
+def _governance_pkg():
+    """An autocallable exposure package + counterparty credit, the gate's two primary inputs."""
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.06))
+    note = Autocallable(notional=100.0, observation_times=(0.5, 1.0, 1.5, 2.0), coupon_rate=0.04,
+                        autocall_level=1.0, coupon_barrier=0.8, knock_in=0.6, memory=True,
+                        initial_fixing=None)
+    model = BlackScholes(spot=100.0, r=0.06, q=0.0, sigma=0.22)
+    pkg = autocallable_exposure(note, model, ois, ois, time_grid=np.linspace(0.0, 1.95, 14),
+                                n_paths=20_000, seed=1)
+    return pkg, CreditCurve(cds_spread_bps=200.0, recovery_rate=0.40)
+
+
+def test_exposure_metrics_are_ordered_and_consistent():
+    """The CCR ladder read off the cube: a tail quantile dominates the mean peak, the running-max
+    average dominates the raw average, and EAD is exactly α·EEPE."""
+    pkg, _ = _governance_pkg()
+    m = exposure_metrics(pkg, alpha=1.4)
+    assert m["PFE"] >= m["EE_peak"] >= m["EEPE"] >= m["EPE"] >= 0.0
+    assert m["EAD"] == pytest.approx(1.4 * m["EEPE"], rel=1e-12)
+
+
+def test_economic_capital_grows_with_counterparty_spread():
+    """Unexpected loss is monotone in default risk: a wider CDS spread consumes more capital."""
+    pkg, _ = _governance_pkg()
+    tight = economic_capital(pkg, CreditCurve(cds_spread_bps=100.0, recovery_rate=0.40))
+    wide = economic_capital(pkg, CreditCurve(cds_spread_bps=600.0, recovery_rate=0.40))
+    assert wide["Economic_Capital"] > tight["Economic_Capital"] > 0.0
+
+
+def test_clean_accretive_trade_within_limits_is_approved():
+    """Generous limits + a fat margin clears every gate → APPROVED, with all charges reported."""
+    pkg, cc = _governance_pkg()
+    gate = GovernanceGate(limits=[{"LegalEntityID": "LE_CP-0", "Metric": "EAD", "LimitAmount": 1e9}])
+    res = gate.evaluate(pkg, cc, revenue=20.0)
+    assert res["Decision"] == "APPROVED"
+    assert res["Limit_Status"] == "PASS"
+    assert res["XVA_Total"] == pytest.approx(res["CVA"] + res["FVA"])
+    assert res["Trade_RAROC"] >= gate.hurdle_rate
+
+
+def test_limit_breach_rejects_the_trade():
+    """An EAD limit below the trade's own EAD is a breach → REJECTED, regardless of profitability."""
+    pkg, cc = _governance_pkg()
+    ead = exposure_metrics(pkg)["EAD"]
+    gate = GovernanceGate(limits=[{"LegalEntityID": "LE_CP-0", "Metric": "EAD",
+                                   "LimitAmount": ead * 0.5}])
+    res = gate.evaluate(pkg, cc, revenue=20.0)
+    assert res["Decision"] == "REJECTED"
+    assert res["Limit_Status"] == "FAIL"
+    assert "Limit breach detected." in res["Reasons"]
+
+
+def test_sub_hurdle_margin_routes_to_manual_review():
+    """Within limits but the margin doesn't cover XVA + capital cost → not auto-approved."""
+    pkg, cc = _governance_pkg()
+    gate = GovernanceGate(limits=[{"LegalEntityID": "LE_CP-0", "Metric": "EAD", "LimitAmount": 1e9}])
+    res = gate.evaluate(pkg, cc, revenue=1e-6)
+    assert res["Decision"] == "MANUAL_REVIEW"
+    assert res["Trade_RAROC"] < gate.hurdle_rate
+    assert "Standalone RAROC below hurdle." in res["Reasons"]
+
+
+def test_amber_utilisation_downgrades_approval_to_manual_review():
+    """A trade that would clear on profitability but lands in the amber band (80–100% of an EAD
+    limit) is held back from auto-approval for a human to sign off."""
+    pkg, cc = _governance_pkg()
+    ead = exposure_metrics(pkg)["EAD"]
+    gate = GovernanceGate(limits=[{"LegalEntityID": "LE_CP-0", "Metric": "EAD",
+                                   "LimitAmount": ead / 0.9}])  # utilisation ≈ 0.9 → amber
+    res = gate.evaluate(pkg, cc, revenue=20.0)
+    assert res["Limit_Status"] == "WARNING"
+    assert res["Decision"] == "MANUAL_REVIEW"
+    assert "Approaching limit (amber)." in res["Reasons"]
