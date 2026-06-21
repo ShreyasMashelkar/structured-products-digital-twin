@@ -1,0 +1,189 @@
+{
+  "ois_data": [
+    {
+      "tenor_label": "O/N",
+      "tenor_years": 0.0027397260273972603,
+      "ois_rate": 0.0538
+    },
+    {
+      "tenor_label": "1W",
+      "tenor_years": 0.019178082191780823,
+      "ois_rate": 0.053886426592797784
+    },
+    {
+      "tenor_label": "2W",
+      "tenor_years": 0.038356164383561646,
+      "ois_rate": 0.05398725761772853
+    },
+    {
+      "tenor_label": "1M",
+      "tenor_years": 0.08333333333333333,
+      "ois_rate": 0.05422373037857802
+    },
+    {
+      "tenor_label": "2M",
+      "tenor_years": 0.16666666666666666,
+      "ois_rate": 0.05466186518928901
+    },
+    {
+      "tenor_label": "3M",
+      "tenor_years": 0.25,
+      "ois_rate": 0.055099999999999996
+    },
+    {
+      "tenor_label": "6M",
+      "tenor_years": 0.5,
+      "ois_rate": 0.0565
+    },
+    {
+      "tenor_label": "9M",
+      "tenor_years": 0.75,
+      "ois_rate": 0.0579
+    },
+    {
+      "tenor_label": "1Y",
+      "tenor_years": 1.0,
+      "ois_rate": 0.0593
+    },
+    {
+      "tenor_label": "2Y",
+      "tenor_years": 2.0,
+      "ois_rate": 0.059977777777777776
+    },
+    {
+      "tenor_label": "3Y",
+      "tenor_years": 3.0,
+      "ois_rate": 0.06065555555555555
+    },
+    {
+      "tenor_label": "4Y",
+      "tenor_years": 4.0,
+      "ois_rate": 0.06133333333333333
+    },
+    {
+      "tenor_label": "5Y",
+      "tenor_years": 5.0,
+      "ois_rate": 0.06201111111111111
+    },
+    {
+      "tenor_label": "7Y",
+      "tenor_years": 7.0,
+      "ois_rate": 0.06336666666666667
+    },
+    {
+      "tenor_label": "10Y",
+      "tenor_years": 10.0,
+      "ois_rate": 0.0654
+    }
+  ],
+  "gsec_data": [
+    {
+      "tenor_label": "91D T-Bill",
+      "tenor_years": 0.2493150684931507,
+      "yield_rate": 0.0556
+    },
+    {
+      "tenor_label": "182D T-Bill",
+      "tenor_years": 0.4986301369863014,
+      "yield_rate": 0.057300000000000004
+    },
+    {
+      "tenor_label": "364D T-Bill",
+      "tenor_years": 0.9972602739726028,
+      "yield_rate": 0.0603
+    },
+    {
+      "tenor_label": "2Y G-Sec",
+      "tenor_years": 2.0,
+      "yield_rate": 0.06136926354230067
+    },
+    {
+      "tenor_label": "5Y G-Sec",
+      "tenor_years": 5.0,
+      "yield_rate": 0.06456828971393792
+    },
+    {
+      "tenor_label": "10Y G-Sec",
+      "tenor_years": 10.0,
+      "yield_rate": 0.0699
+    },
+    {
+      "tenor_label": "30Y G-Sec",
+      "tenor_years": 30.0,
+      "yield_rate": 0.07523171028606208
+    }
+  ],
+  "counterparty_data": [
+    {
+      "counterparty": "SBI",
+      "entity_type": "PSU Bank",
+      "rating": "AAA",
+      "risk_weight": 0.2,
+      "cds_spread_bps": 50,
+      "recovery_rate": 0.4,
+      "funding_spread_bps": 30.0
+    },
+    {
+      "counterparty": "HDFC Bank",
+      "entity_type": "Private Bank",
+      "rating": "AA+",
+      "risk_weight": 0.2,
+      "cds_spread_bps": 65,
+      "recovery_rate": 0.4,
+      "funding_spread_bps": 39.0
+    },
+    {
+      "counterparty": "ICICI Bank",
+      "entity_type": "Private Bank",
+      "rating": "AA",
+      "risk_weight": 0.2,
+      "cds_spread_bps": 85,
+      "recovery_rate": 0.4,
+      "funding_spread_bps": 51.0
+    },
+    {
+      "counterparty": "Kotak Bank",
+      "entity_type": "Private Bank",
+      "rating": "AA",
+      "risk_weight": 0.2,
+      "cds_spread_bps": 85,
+      "recovery_rate": 0.4,
+      "funding_spread_bps": 51.0
+    },
+    {
+      "counterparty": "Corporate A (Large NBFC)",
+      "entity_type": "Large NBFC",
+      "rating": "A",
+      "risk_weight": 0.75,
+      "cds_spread_bps": 150,
+      "recovery_rate": 0.4,
+      "funding_spread_bps": 90.0
+    },
+    {
+      "counterparty": "Corporate B (Mid NBFC)",
+      "entity_type": "Mid NBFC",
+      "rating": "BBB",
+      "risk_weight": 1.0,
+      "cds_spread_bps": 280,
+      "recovery_rate": 0.4,
+      "funding_spread_bps": 168.0
+    },
+    {
+      "counterparty": "Corporate C (Stressed)",
+      "entity_type": "Stressed Entity",
+      "rating": "BB",
+      "risk_weight": 1.5,
+      "cds_spread_bps": 550,
+      "recovery_rate": 0.4,
+      "funding_spread_bps": 330.0
+    }
+  ],
+  "_last_updated": "2026-06-08T14:54:15.501088",
+  "policy_rates": {
+    "repo_rate": 0.0525,
+    "sdf_rate": 0.05,
+    "msf_rate": 0.055,
+    "reverse_repo_rate": 0.0335,
+    "crr": 0.03
+  }
+}
