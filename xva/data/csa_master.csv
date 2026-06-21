@@ -1,0 +1,8 @@
+CSA_ID,Counterparty,Threshold,MTA,MPOR_Days,CSA_Type
+CSA_HDFC_01,HDFC,0.0,0.0,10,Bilateral
+CSA_SBI_01,SBI,50.0,5.0,10,Bilateral
+CSA_KOTAK_01,Kotak,10.0,1.0,10,Bilateral
+CSA_NBFC_01,NBFC_X,0.0,0.0,20,Bilateral
+CSA_ICICI_01,ICICI,25.0,2.0,10,Bilateral
+CSA_TATA_01,TATA,15.0,1.0,10,Bilateral
+CSA_KOTAK_CCP_01,Kotak,0.0,0.0,5,CCP-Cleared
