@@ -70,3 +70,11 @@ class ExposurePackage:
         testable in isolation.
         """
         return np.maximum(self.npv_paths, 0.0).mean(axis=0)
+
+    def expected_negative_exposure(self) -> NDArray[np.float64]:
+        """ENE(t) = E[min(V_t, 0)] ≤ 0 — the negative-exposure profile, undiscounted.
+
+        The bank's exposure to *its own* default: it drives DVA, the mirror of CVA. Returned as
+        non-positive values (the sign convention XVA's ``compute_dva`` expects).
+        """
+        return np.minimum(self.npv_paths, 0.0).mean(axis=0)

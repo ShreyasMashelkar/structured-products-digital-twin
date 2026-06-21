@@ -28,7 +28,8 @@ from src.xva.cva import CreditCurve  # type: ignore  # via integration
 
 
 def exposure_metrics(
-    pkg: ExposurePackage, *, alpha: float = 1.4, pfe_quantile: float = 0.95
+    pkg: ExposurePackage, *, alpha: float = 1.4, pfe_quantile: float = 0.95,
+    eepe_horizon: float = 1.0,
 ) -> dict[str, float]:
     """Counterparty-credit-risk metrics for one packaged exposure, read off its NPV cube.
 
@@ -36,9 +37,10 @@ def exposure_metrics(
     exposures Phase 3 produced and Phase 4 charged:
 
     * ``EE_peak``  — peak of the expected-exposure profile EE(t) = E[max(Vₜ, 0)].
-    * ``EPE``      — time-averaged EE (the funding/CVA-relevant mean exposure).
-    * ``EEPE``     — *effective* EPE: the time-average of the non-decreasing running max of EE,
-                     the regulatory exposure measure (Basel CCR).
+    * ``EPE``      — time-averaged EE over the full life (the funding/CVA-relevant mean exposure).
+    * ``EEPE``     — *effective* EPE: the time-average of the non-decreasing running max of EE over
+                     ``[0, min(eepe_horizon, maturity)]``. Basel caps the averaging window at one
+                     year (``eepe_horizon=1.0``); pass the full maturity for an economic EAD.
     * ``PFE``      — peak potential future exposure: the largest, over time, of the ``pfe_quantile``
                      quantile of positive exposure across paths.
     * ``EAD``      — exposure at default = ``alpha · EEPE`` (Basel α defaults to 1.4).
@@ -47,9 +49,15 @@ def exposure_metrics(
     ee = positive.mean(axis=0)
     grid = pkg.time_grid
     horizon = float(grid[-1] - grid[0])
+    eff_ee = np.maximum.accumulate(ee)
     if horizon > 0.0:
         epe = float(np.trapezoid(ee, grid) / horizon)
-        eepe = float(np.trapezoid(np.maximum.accumulate(ee), grid) / horizon)
+        # EEPE averages effective EE only over [grid[0], min(eepe_horizon, maturity)].
+        cap = min(grid[0] + eepe_horizon, grid[-1])
+        mask = grid <= cap + 1e-12
+        sub_t, sub_e = grid[mask], eff_ee[mask]
+        span = float(sub_t[-1] - sub_t[0])
+        eepe = float(np.trapezoid(sub_e, sub_t) / span) if span > 0.0 else float(sub_e[-1])
     else:  # degenerate single-point grid
         epe = eepe = float(ee.mean())
     pfe = float(np.quantile(positive, pfe_quantile, axis=0).max())
