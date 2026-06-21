@@ -14,11 +14,24 @@ import dataclasses
 import os
 import threading
 import time
+from datetime import date, timedelta
+from math import exp
 
+import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Importing `integration` puts the vendored XVA engine on sys.path, so `src.*` resolves below.
+from integration import (
+    GovernanceGate,
+    SpdtCurveAsOIS,
+    economic_capital,
+    exposure_metrics,
+    note_exposure,
+    xva_charge,
+)
+from spdt.core.types import Curve, year_fraction
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
 from spdt.pricing import BlackScholes, price_mc
@@ -32,6 +45,7 @@ from spdt.products import (
 from spdt.reporting import terminal_scenarios
 from spdt.stress import STANDARD_SCENARIOS
 from spdt.structurer import ClientBrief, par_target, propose_autocallable, solve_to_par
+from src.xva.cva import CreditCurve  # type: ignore  # resolved via integration's sys.path insert
 
 # --- configuration (all env-driven so the same image runs locally and deployed) -----------
 _CORS = os.environ.get("SPDT_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
@@ -218,4 +232,115 @@ def price(req: PriceRequest) -> dict:
              "payment_pct": s.payment_pct} for s in scen
         ],
         "stress": stress,
+    }
+
+
+# --- Counterparty & XVA: the per-trade charge + governance gate (ADR-0007, Phase 6) ---------
+#
+# The thin React surface the ADR allows: one tab over the integration layer's
+# exposure → XVA → governance seam. The endpoint marks the note to future, charges its CVA/FVA,
+# derives the CCR metrics and economic capital, and runs the governance gate — no quant of its own,
+# all of it borrowed from `integration/`.
+
+# A flat curve is sufficient for the per-trade charge surface (the desk's full bootstrapped curve
+# isn't in the cached payload); year-fraction tenors make the anchor date immaterial.
+_CURVE_TAUS = (0.5, 1.0, 2.0, 3.0, 5.0)
+_SPREAD_SWEEP_BPS = (0.0, 50.0, 100.0, 150.0, 200.0, 300.0, 400.0, 600.0, 800.0)
+
+
+def _flat_curve(rate: float) -> SpdtCurveAsOIS:
+    anchor = date(2026, 1, 1)
+    pillars = tuple(anchor + timedelta(days=round(365 * t)) for t in _CURVE_TAUS)
+    dfs = {p: exp(-rate * year_fraction(anchor, p)) for p in pillars}
+    return SpdtCurveAsOIS(Curve(anchor=anchor, pillars=pillars, discount_factors=dfs))
+
+
+def _credit(cds_spread_bps: float, recovery_rate: float) -> CreditCurve:
+    return CreditCurve(cds_spread_bps=max(cds_spread_bps, 1e-6), recovery_rate=recovery_rate)
+
+
+class XvaRequest(BaseModel):
+    product_type: str = "autocallable"  # single-asset notes only (autocallable | brc | reverse_convertible | capital_protected)
+    notional: float = 100.0
+    observation_times: list[float] | None = None
+    maturity: float | None = None
+    params: dict = {}
+    counterparty: str = "CP-0"
+    cds_spread_bps: float = 200.0
+    recovery_rate: float = 0.40
+    funding_spread_bp: float = 50.0
+    hurdle_rate: float = 0.10
+    margin: float | None = None  # structuring margin in note units; default 1% of notional
+    ead_limit: float | None = None
+    pfe_limit: float | None = None
+    n_paths: int = 12_000
+
+
+@app.post("/api/xva", dependencies=[Depends(require_token)])
+def xva(req: XvaRequest) -> dict:
+    """Mark a note to future → charge CVA/FVA → derive EAD/PFE + capital → run the governance gate.
+
+    Returns the per-trade charge, the expected-exposure profile (the autocall cliff is visible here),
+    a counterparty-spread sweep of the charge, and the APPROVED / REJECTED / MANUAL_REVIEW decision.
+    """
+    if req.product_type == "worst_of":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "worst-of exposure is not yet wired to the XVA tab")
+    d = _desk()
+    spot, m = d["spot"], d["model"]
+    model = BlackScholes(spot=spot, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    product = _build_product(
+        PriceRequest(product_type=req.product_type, notional=req.notional,
+                     observation_times=req.observation_times, maturity=req.maturity, params=req.params),
+        spot,
+    )
+
+    ois = _flat_curve(m["r"])
+    funding = _flat_curve(m["r"] + req.funding_spread_bp * 1e-4)
+    mat = req.maturity or (req.observation_times[-1] if req.observation_times else 1.0)
+    grid = np.linspace(0.0, mat * 0.975, 14, dtype=np.float64)  # stop just shy of maturity
+    try:
+        pkg = note_exposure(product, model, ois, funding, time_grid=grid,
+                            n_paths=req.n_paths, seed=7, counterparty_id=req.counterparty)
+    except Exception as e:  # a product whose exposure the seam can't yet build
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"could not build exposure: {e}") from e
+
+    credit = _credit(req.cds_spread_bps, req.recovery_rate)
+    charge = xva_charge(pkg, credit, funding_spread_bp=req.funding_spread_bp)
+    metrics = exposure_metrics(pkg)
+    ec = economic_capital(pkg, credit, ead=metrics["EAD"])
+
+    limits = []
+    le_id = f"LE_{req.counterparty}"
+    if req.ead_limit:
+        limits.append({"LegalEntityID": le_id, "Metric": "EAD", "LimitAmount": req.ead_limit})
+    if req.pfe_limit:
+        limits.append({"LegalEntityID": le_id, "Metric": "PFE", "LimitAmount": req.pfe_limit})
+    margin = req.margin if req.margin is not None else req.notional * 0.01
+    gate = GovernanceGate(limits=limits, hurdle_rate=req.hurdle_rate,
+                          funding_spread_bp=req.funding_spread_bp)
+    decision = gate.evaluate(pkg, credit, revenue=margin)
+
+    ee = pkg.expected_exposure()
+    profile = [{"t": round(float(t), 4), "ee": round(float(v), 5)}
+               for t, v in zip(pkg.time_grid, ee)]
+    spread_curve = []
+    for bp in _SPREAD_SWEEP_BPS:
+        ch = xva_charge(pkg, _credit(bp, req.recovery_rate), funding_spread_bp=req.funding_spread_bp)
+        spread_curve.append({"cds_bp": bp, "cva": round(ch["cva"], 5),
+                             "fva": round(ch["fva"], 5), "total": round(ch["total"], 5)})
+
+    return {
+        "charge": {"cva": charge["cva"], "fva": charge["fva"], "total": charge["total"]},
+        "metrics": {"ead": metrics["EAD"], "pfe": metrics["PFE"], "epe": metrics["EPE"],
+                    "ee_peak": metrics["EE_peak"], "capital": ec["Economic_Capital"],
+                    "expected_loss": ec["Expected_Loss"]},
+        "decision": decision["Decision"],
+        "reasons": decision["Reasons"],
+        "limit_status": decision["Limit_Status"],
+        "trade_raroc": decision["Trade_RAROC"],
+        "margin": margin,
+        "profile": profile,
+        "spread_curve": spread_curve,
+        "inputs": {"cds_spread_bps": req.cds_spread_bps, "recovery_rate": req.recovery_rate,
+                   "funding_spread_bp": req.funding_spread_bp, "hurdle_rate": req.hurdle_rate},
     }
