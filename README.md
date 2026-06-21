@@ -1,8 +1,10 @@
 # Structured Products Digital Twin (SPDT)
 
-> A complete simulation of an equity structured-products desk: **structuring → pricing → hedging → risk → model validation → P&L attribution**, built on free Indian market data.
+> A complete simulation of an equity structured-products desk **plus its counterparty-risk twin**: `structuring → pricing → hedging → risk → P&L attribution`, then `exposure → CVA/FVA → all-in price → governance`, built on free Indian market data.
 
 SPDT is a modular platform that structures, prices (BS / Local Vol / Heston / LSV), risk-manages, hedges, and attributes P&L for equity exotics (autocallables, Phoenix, barrier reverse convertibles, worst-of baskets) on NSE data — with AAD Greeks, model-reserve computation, historical backtesting, and a desk dashboard.
+
+It then couples to a vendored **INR OTC / CCR / XVA engine** at a single seam (the exposure cube), so a note can be priced *all-in* — coupon net of its lifetime CVA + FVA — and gated by counterparty limits, economic capital and RAROC. See [**XVA & Counterparty Credit Risk**](#xva--counterparty-credit-risk) below and [`docs/adr/0007`](docs/adr/0007-integrate-xva-at-the-exposure-seam.md).
 
 The full design specification and week-by-week build roadmap live in [`SPDT_Design_and_Build.md`](SPDT_Design_and_Build.md).
 
@@ -17,10 +19,10 @@ Two rules govern everything here:
 
 | Bucket | Meaning | Examples in SPDT |
 |---|---|---|
-| **REAL** | Mathematically correct, production-shaped, owned end to end | SVI/SSVI calibration, autocallable MC pricing, bump/pathwise/**AAD** Greeks (cross-checked on the autocallable), P&L attribution with **bucketed vega**, **two-curve discounting**, autocallable/Phoenix/**BRC/reverse-convertible/capital-protected** catalog |
-| **FAITHFUL** | Correct method, scoped scale; real version differs only in size/optimisation | LSV calibration, the payoff DSL (composable leg primitives), Heston QE + Carr–Madan FFT, BGK barrier correction, historical replay, **C++ MC kernel** (one product ported, measured speedup; rest "same pattern") |
+| **REAL** | Mathematically correct, production-shaped, owned end to end | SVI/SSVI calibration, autocallable MC pricing, bump/pathwise/**AAD** Greeks (cross-checked on the autocallable), P&L attribution with **bucketed vega**, **two-curve discounting**, autocallable/Phoenix/**BRC/reverse-convertible/capital-protected** catalog, **mark-to-future exposure (LSM) → unilateral CVA + FVA → all-in coupon**, **EAD/PFE/EEPE + ASRF economic capital + RAROC governance gate** |
+| **FAITHFUL** | Correct method, scoped scale; real version differs only in size/optimisation | LSV calibration, the payoff DSL (composable leg primitives), Heston QE + Carr–Madan FFT, BGK barrier correction, historical replay, **C++ MC kernel** (one product ported, measured speedup; rest "same pattern"), the vendored **XVA/CCR engine** (CVA/FVA/KVA/MVA, SA-CCR, SIMM, WWR — surfaced by SPDT only through the exposure seam) |
 | **STUBBED** | Architecturally present with a clean interface; placeholder implementation | GPU pricing kernels (designed-for; CPU C++ path implemented), message queue (in-process bus that *could* be Kafka) |
-| **SKIPPED (declared)** | Out of scope, named explicitly | Real-time market connectivity, regulatory capital (FRTB), multi-currency/quanto at scale |
+| **SKIPPED (declared)** | Out of scope, named explicitly | Real-time market connectivity, **collateralised (CSA/MPoR) exposure** and **bilateral DVA / KVA-in-price** (the engine has the pieces; the SPDT seam prices unilateral CVA+FVA today — see roadmap), multi-currency/quanto at scale |
 
 ---
 
@@ -58,7 +60,30 @@ Everything is **snapshot-in, report-out**: every layer consumes an immutable, ve
 | L11 | `spdt/modelrisk` | LSV−LV reserve, parameter-uncertainty, bid-offer |
 | L12 | `spdt/stress` | Coherent macro scenarios, historical replays |
 | L13 | `spdt/reporting` | Term sheet / factsheet / scenario-table generation |
-| L14 | `spdt/dashboard` | Executive desk blotter (Streamlit) |
+| L14 | `spdt/dashboard` | Executive desk blotter (Streamlit) + React desk (`webapp/`) |
+
+---
+
+## XVA & Counterparty Credit Risk
+
+SPDT (the structuring desk) and a vendored **INR OTC / CCR / XVA engine** (`xva/`, ~12.5k LOC: CVA/FVA/KVA/MVA, SA-CCR, SIMM, wrong-way risk, economic capital) are combined as **two desks over one shared core**, coupled at exactly one place — the **exposure/position seam** — so the two product models never have to be unified ([ADR-0007](docs/adr/0007-integrate-xva-at-the-exposure-seam.md)).
+
+```
+position → mark-to-future exposure → XVA charge → all-in price → governance → desk tab
+```
+
+The `integration/` package is the only code allowed to import both worlds. The seam is one artefact, `ExposurePackage` (a path × time NPV cube + curves + counterparty), produced by SPDT's Monte Carlo and consumed by the XVA stack.
+
+| Capability | What it does | Where |
+|---|---|---|
+| **Curve join** | One bootstrapped SPDT OIS curve drives XVA's `CVAEngine` directly — DFs match to 1e-8, no re-bootstrap | `integration/curve_adapter.py` |
+| **Mark-to-future exposure** | Position NPV on every path at every future time. European is exact BSM; path-dependent notes use **Longstaff–Schwartz** continuation-value regression (so EE avoids the Jensen bias), and an **autocallable's EE collapses on each autocall date** as redeemed paths leave the book | `integration/exposure_export.py` |
+| **All-in price** | Folds **CVA + FVA** into the structurer's solve: fairness becomes `PV = par − fee − XVA`, so the offered coupon falls as the counterparty's spread widens | `integration/all_in_price.py` |
+| **CCR metrics** | EE / EPE / **EEPE** / peak **PFE** / **EAD = α·EEPE** read off the exposure cube; **ASRF economic capital** from the CDS-implied PD/LGD | `integration/governance.py` |
+| **Governance gate** | Mirrors the bank's trade-approval logic — limit check on EAD/PFE + **RAROC** vs hurdle → **APPROVED / REJECTED / MANUAL_REVIEW** — fed from the exposure seam, reusing the engine's `LimitEngine` / `RAROCEngine` / `EconomicCapitalEngine` | `integration/governance.py` |
+| **Desk tab** | A "Counterparty & XVA" React workspace + `POST /api/xva`: dial counterparty CDS / recovery / funding / hurdle / margin / EAD limit and watch the decision, charge, exposure profile and CVA-vs-spread curve update live | `webapp/` |
+
+**Honest scope (and the roadmap a desk would want next):** the charge today is **unilateral** (CVA + FVA) on **uncollateralised** exposure with **single-trade** netting. The vendored engine already ships the pieces to extend this — bilateral **DVA**, **KVA** in the price, **MVA**, **CSA/MPoR**-collateralised EPE, portfolio **netting-set** aggregation, and **wrong-way risk** — each of which plugs into the same seam. Naming exactly what's in vs. out is deliberate (see the two rules above).
 
 ---
 
@@ -73,6 +98,8 @@ pytest
 ```
 
 Optional extras: `pip install -e ".[ad,dashboard]"` for JAX-based AAD and the Streamlit dashboard.
+
+To run the **React desk** (incl. the live *Counterparty & XVA* tab), see [`webapp/README.md`](webapp/README.md): `uvicorn webapp.server:app --port 8077` then `npm run dev` in `webapp/frontend`.
 
 ---
 

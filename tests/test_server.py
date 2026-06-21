@@ -16,7 +16,8 @@ def _small_desk():
     """Build a small desk (4 notes / 4k paths) so the HTTP tests stay fast."""
     original = server.build_desk_data
     server.build_desk_data = lambda **kw: original(n_notes=4, n_paths=4000, **kw)
-    server._cache.update(payload=None, built_at=0.0)
+    server._cache.payload = None
+    server._cache.built_at = 0.0
     yield
     server.build_desk_data = original
 
