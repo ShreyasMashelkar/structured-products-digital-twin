@@ -13,8 +13,17 @@ import numpy as np
 import pytest
 
 import integration  # noqa: F401 — import side-effect: puts xva/ on sys.path
-from integration import SpdtCurveAsOIS
+from integration import (
+    ExposurePackage,
+    SpdtCurveAsOIS,
+    european_exposure,
+    mark_to_future_european,
+)
 from spdt.core.types import Curve, year_fraction
+from spdt.pricing import BlackScholes, bs_vanilla
+from spdt.pricing.mc.rng import standard_normals
+from spdt.products import EuropeanOption
+from src.montecarlo.equity_mc import EquityGBM  # type: ignore  # resolved via integration
 from src.xva.cva import CVAEngine, CreditCurve  # type: ignore  # resolved via integration
 
 
@@ -57,3 +66,53 @@ def test_cva_vanishes_with_credit_spread_and_is_monotone():
     wide = engine.compute_cva(ee, time_grid, CreditCurve(cds_spread_bps=600.0, recovery_rate=0.40))
     assert near_zero == pytest.approx(0.0, abs=1e-3)
     assert wide > mid > near_zero  # CVA grows monotonically with counterparty spread
+
+
+# --- Phase 3: the exposure seam (European, cross-checked vs XVA's own equity MC) -------------
+
+def _european_setup():
+    model = BlackScholes(spot=100.0, r=0.05, q=0.01, sigma=0.20)
+    option = EuropeanOption(strike=100.0, expiry=1.0, is_call=True)
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.05))
+    time_grid = np.linspace(0.0, 1.0, 13)
+    spots = model.simulate(time_grid, standard_normals(4000, 12, seed=7))
+    return model, option, ois, time_grid, spots
+
+
+def test_spdt_mark_to_future_matches_xva_equity_mc_elementwise():
+    """SPDT's mark-to-future and XVA's equity-MC option MTM agree path-by-path on identical spots —
+    proof the exposure producer is faithful, not just close in aggregate."""
+    model, option, ois, time_grid, spots = _european_setup()
+    r = ois.zero_rate(option.expiry)
+    npv_spdt = mark_to_future_european(
+        option, r=r, q=model.q, sigma=model.sigma, spot_paths=spots, time_grid=time_grid
+    )
+    gbm = EquityGBM(spot=100.0, vol=0.20, div_yield=0.01)
+    mtm_xva = gbm.option_mtm_paths(spots, time_grid, ois, strike=100.0, maturity=1.0,
+                                   units=1.0, call=True)
+    assert np.allclose(npv_spdt, mtm_xva, atol=1e-8)
+
+
+def test_european_exposure_profile_is_economically_sane():
+    """EE(0) = today's premium; EE grows over the life of a (always-positive) long call."""
+    model, option, ois, time_grid, spots = _european_setup()
+    r = ois.zero_rate(option.expiry)
+    npv = mark_to_future_european(option, r=r, q=model.q, sigma=model.sigma,
+                                  spot_paths=spots, time_grid=time_grid)
+    pkg = ExposurePackage("EUR-0", "CP-0", "ns", time_grid, npv, ois, ois)
+    ee = pkg.expected_exposure()
+    premium = bs_vanilla(100.0, 100.0, 1.0, r, model.q, model.sigma, is_call=True)
+    assert ee[0] == pytest.approx(premium, abs=0.05)  # deterministic value at t=0
+    assert ee[-1] > ee[0]  # exposure builds toward maturity
+    assert np.all(ee >= 0.0)
+
+
+def test_spdt_european_exposure_flows_through_to_a_cva():
+    """End-to-end seam: a SPDT European → ExposurePackage → EE → XVA CVA, a finite positive cost."""
+    model, option, ois, time_grid, _ = _european_setup()
+    pkg = european_exposure(option, model, ois, ois, time_grid=time_grid, n_paths=8000, seed=3,
+                            counterparty_id="ACME-CORP")
+    cva = CVAEngine(pkg.ois_curve).compute_cva(
+        pkg.expected_exposure(), pkg.time_grid, CreditCurve(cds_spread_bps=250.0, recovery_rate=0.40)
+    )
+    assert np.isfinite(cva) and cva > 0.0
