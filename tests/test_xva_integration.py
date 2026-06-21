@@ -19,12 +19,15 @@ from integration import (
     autocallable_exposure,
     european_exposure,
     mark_to_future_european,
+    note_exposure,
+    worst_of_exposure,
 )
 from spdt.core.types import Curve, year_fraction
 from spdt.pricing import BlackScholes, bs_vanilla, price_mc
+from spdt.pricing.engine import price_worst_of
 from spdt.pricing.mc.rng import standard_normals
 from spdt.products import EuropeanOption
-from spdt.products.catalog import Autocallable
+from spdt.products.catalog import Autocallable, BarrierReverseConvertible, WorstOfAutocallable
 from src.montecarlo.equity_mc import EquityGBM  # type: ignore  # resolved via integration
 from src.xva.cva import CVAEngine, CreditCurve  # type: ignore  # resolved via integration
 
@@ -157,6 +160,72 @@ def test_autocallable_ee_rises_then_collapses_on_autocall():
 
 def test_autocallable_exposure_flows_through_to_a_cva():
     _, _, pkg = _autocall_setup()
+    cva = CVAEngine(pkg.ois_curve).compute_cva(
+        pkg.expected_exposure(), pkg.time_grid, CreditCurve(cds_spread_bps=300.0, recovery_rate=0.40)
+    )
+    assert np.isfinite(cva) and cva > 0.0
+
+
+# --- Phase 3c: the remaining products — BRC (non-callable) and worst-of (multi-asset) --------
+
+def _brc_setup():
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.06))
+    brc = BarrierReverseConvertible(notional=100.0, observation_times=(0.5, 1.0, 1.5, 2.0),
+                                    coupon_rate=0.05, strike=1.0, knock_in=0.7, initial_fixing=None)
+    model = BlackScholes(spot=100.0, r=0.06, q=0.0, sigma=0.25)
+    pkg = note_exposure(brc, model, ois, ois, time_grid=np.linspace(0.0, 1.95, 12),
+                        n_paths=20_000, seed=1)
+    return brc, model, pkg
+
+
+def test_brc_value_at_zero_reconciles_with_the_pricer():
+    brc, model, pkg = _brc_setup()
+    price = price_mc(brc, model, n_paths=60_000, seed=2).price
+    assert float(pkg.npv_paths[:, 0].mean()) == pytest.approx(price, abs=0.8)
+
+
+def test_brc_exposure_stays_elevated_with_no_autocall_cliff():
+    """A reverse convertible has no early redemption, so — unlike the autocallable — its EE does
+    not collapse: the par redemption keeps exposure high across the whole life."""
+    _, _, pkg = _brc_setup()
+    ee = pkg.expected_exposure()
+    assert np.all(np.isfinite(ee)) and np.all(ee >= 0.0)
+    assert ee.min() > 0.5 * ee.max()  # no autocall cliff
+
+
+def _wo_setup():
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.06))
+    spots0 = np.array([100.0, 100.0, 100.0])
+    vols = np.array([0.25, 0.28, 0.24])
+    corr = np.full((3, 3), 0.6)
+    np.fill_diagonal(corr, 1.0)
+    wo = WorstOfAutocallable(notional=100.0, observation_times=(0.5, 1.0, 1.5, 2.0),
+                             coupon_rate=0.06, autocall_level=1.0, coupon_barrier=0.75, knock_in=0.6,
+                             memory=True, underlyings=("A", "B", "C"),
+                             initial_fixings=(100.0, 100.0, 100.0))  # struck at the spot levels
+    pkg = worst_of_exposure(wo, spots0, vols, corr, ois, ois, time_grid=np.linspace(0.0, 1.95, 12),
+                            r=0.06, q=0.0, n_paths=20_000, seed=1)
+    return wo, spots0, vols, corr, pkg
+
+
+def test_worst_of_value_at_zero_reconciles_with_price_worst_of():
+    wo, spots0, vols, corr, pkg = _wo_setup()
+    price = price_worst_of(wo, spots0, vols, corr, r=0.06, q=0.0, n_paths=50_000, seed=2).price
+    assert float(pkg.npv_paths[:, 0].mean()) == pytest.approx(price, abs=1.5)
+
+
+def test_worst_of_ee_rises_then_collapses_on_basket_autocall():
+    _, _, _, _, pkg = _wo_setup()
+    ee = pkg.expected_exposure()
+    assert np.all(np.isfinite(ee)) and np.all(ee >= 0.0)
+    assert ee.max() > ee[0]                    # builds
+    assert ee[-1] < 0.7 * ee.max()             # collapses as the basket autocalls
+    assert ee[-1] > 0.0
+    assert (ee[1:] / np.maximum(ee[:-1], 1e-9)).min() < 0.8  # an autocall cliff
+
+
+def test_worst_of_exposure_flows_through_to_a_cva():
+    _, _, _, _, pkg = _wo_setup()
     cva = CVAEngine(pkg.ois_curve).compute_cva(
         pkg.expected_exposure(), pkg.time_grid, CreditCurve(cds_spread_bps=300.0, recovery_rate=0.40)
     )

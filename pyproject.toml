@@ -62,6 +62,7 @@ module = [
     "spdt.pricing.pde.crank_nicolson",
     "spdt.hedging.delta_vega",
     "spdt.vol.arbitrage",
+    "integration.exposure_export",
 ]
 disable_error_code = ["assignment", "arg-type"]
 
