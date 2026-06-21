@@ -21,9 +21,11 @@ from integration.all_in_price import solve_coupon_all_in, xva_charge  # noqa: E4
 from integration.ccr_overlays import (  # noqa: E402
     CSA,
     collateralise,
+    initial_margin_profile,
     netting_set_exposure,
     wrong_way_ee,
 )
+from integration.credit import term_structure_credit_curve  # noqa: E402
 from integration.curve_adapter import SpdtCurveAsOIS  # noqa: E402
 from integration.exposure_export import (  # noqa: E402
     autocallable_exposure,
@@ -38,6 +40,12 @@ from integration.governance import (  # noqa: E402
     economic_capital,
     exposure_metrics,
 )
+from integration.xva_risk import (  # noqa: E402
+    cva_cs01,
+    saccr_ead_equity,
+    stress_xva,
+    xva_sensitivities,
+)
 
 # Re-export the one XVA input type callers must construct to cross the seam (the counterparty credit
 # curve), so consumers depend only on `integration` — keeping it the sole cross-world importer.
@@ -51,14 +59,20 @@ __all__ = [
     "SpdtCurveAsOIS",
     "autocallable_exposure",
     "collateralise",
+    "cva_cs01",
     "economic_capital",
     "european_exposure",
     "exposure_metrics",
+    "initial_margin_profile",
     "mark_to_future_european",
     "netting_set_exposure",
     "note_exposure",
+    "saccr_ead_equity",
     "solve_coupon_all_in",
+    "stress_xva",
+    "term_structure_credit_curve",
     "worst_of_exposure",
     "wrong_way_ee",
     "xva_charge",
+    "xva_sensitivities",
 ]
