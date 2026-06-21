@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.DS_Store
+*.egg-info/
+dist/
+build/
+*.db
+data/raw/*
+!data/raw/fallback_cache.json
+*.log
+.env
+.venv/
+
+# Personal Documents
+Nomura_Interview_Prep_Answers.md
+
+# AI Agent & IDE directories
+.agents/
+.claude/
+skills-lock.json
+
+# Temporary scripts
+fix_*.py
