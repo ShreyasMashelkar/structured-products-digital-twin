@@ -33,7 +33,12 @@ from integration.governance import (  # noqa: E402
     exposure_metrics,
 )
 
+# Re-export the one XVA input type callers must construct to cross the seam (the counterparty credit
+# curve), so consumers depend only on `integration` — keeping it the sole cross-world importer.
+from src.xva.cva import CreditCurve  # type: ignore  # noqa: E402  # resolved via the sys.path insert above
+
 __all__ = [
+    "CreditCurve",
     "ExposurePackage",
     "GovernanceGate",
     "SpdtCurveAsOIS",
