@@ -500,6 +500,15 @@ export function Validate({ desk, selectedId }: { desk: Desk; selectedId: string 
 // The integration seam handles single-asset notes; worst-of baskets aren't wired to the tab yet.
 const XVA_PRODUCTS = new Set(["autocallable", "brc", "reverse_convertible", "capital_protected"]);
 
+// Round axis ticks (0, 0.25, 0.5, …) for the exposure profile — the compute grid lands on odd
+// fractions (0.1125, 0.3375, …), so we label by clean intervals rather than one tick per point.
+function timeTicks(maxT: number): number[] {
+  const step = maxT <= 1.6 ? 0.25 : maxT <= 3.2 ? 0.5 : 1.0;
+  const out: number[] = [];
+  for (let t = 0; t <= maxT + 1e-9; t += step) out.push(+t.toFixed(2));
+  return out;
+}
+
 const DECISION_STYLE: Record<Decision, { cls: string; text: string; dot: string; label: string }> = {
   APPROVED: { cls: "border-up/40 bg-up/10", text: "text-up", dot: "bg-up", label: "Approved" },
   REJECTED: { cls: "border-down/40 bg-down/10", text: "text-down", dot: "bg-down", label: "Rejected" },
@@ -613,11 +622,24 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Panel className="p-3">
               <SectionTitle>Expected-exposure profile · EE(t)</SectionTitle>
-              <AreaSpark data={res.profile} x="t" y="ee" color={C.teal} height={280} xLabel="time (years)" yLabel="EE" yTickFormat={(v) => v.toFixed(0)} />
+              <AreaSpark
+                data={res.profile}
+                x="t"
+                y="ee"
+                color={C.teal}
+                height={280}
+                xLabel="time (years)"
+                yLabel="EE"
+                yTickFormat={(v) => v.toFixed(0)}
+                xNumeric
+                xTicks={timeTicks(res.profile.length ? res.profile[res.profile.length - 1].t : trade.maturity)}
+                xTickFormat={(v) => `${v}y`}
+              />
               <div className="px-1 pt-1 text-[12px] text-muted">
                 {trade.product_type === "autocallable"
                   ? "Mark-to-future positive exposure. The step-downs are autocall dates — redeemed paths leave the book, collapsing the exposure."
-                  : "Mark-to-future positive exposure. With no early redemption, it stays elevated across the note's life — no autocall cliff."}
+                  : "Mark-to-future positive exposure. With no early redemption, it stays elevated across the note's life — no autocall cliff."}{" "}
+                Credit-independent: the counterparty sliders rescale the charge, not this profile.
               </div>
             </Panel>
             <Panel className="p-3">
@@ -629,9 +651,11 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
                 yLabel="charge"
                 series={[{ key: "cva", name: "CVA", color: C.down }, { key: "total", name: "CVA + FVA", color: C.accent }]}
                 height={280}
+                refX={cds}
+                refLabel={`${cds}bp`}
               />
               <div className="px-1 pt-1 text-[12px] text-muted">
-                CVA scales with the counterparty's default risk; the gap up to total is FVA — credit-independent funding cost. This is the charge the all-in price carries into the coupon.
+                CVA scales with the counterparty's default risk; the gap up to total is FVA — credit-independent funding cost. The <span className="text-accent">dashed marker</span> is the selected spread — the operating point the all-in price carries into the coupon.
               </div>
             </Panel>
           </div>
