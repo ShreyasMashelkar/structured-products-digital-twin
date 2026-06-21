@@ -16,13 +16,15 @@ import integration  # noqa: F401 — import side-effect: puts xva/ on sys.path
 from integration import (
     ExposurePackage,
     SpdtCurveAsOIS,
+    autocallable_exposure,
     european_exposure,
     mark_to_future_european,
 )
 from spdt.core.types import Curve, year_fraction
-from spdt.pricing import BlackScholes, bs_vanilla
+from spdt.pricing import BlackScholes, bs_vanilla, price_mc
 from spdt.pricing.mc.rng import standard_normals
 from spdt.products import EuropeanOption
+from spdt.products.catalog import Autocallable
 from src.montecarlo.equity_mc import EquityGBM  # type: ignore  # resolved via integration
 from src.xva.cva import CVAEngine, CreditCurve  # type: ignore  # resolved via integration
 
@@ -114,5 +116,48 @@ def test_spdt_european_exposure_flows_through_to_a_cva():
                             counterparty_id="ACME-CORP")
     cva = CVAEngine(pkg.ois_curve).compute_cva(
         pkg.expected_exposure(), pkg.time_grid, CreditCurve(cds_spread_bps=250.0, recovery_rate=0.40)
+    )
+    assert np.isfinite(cva) and cva > 0.0
+
+
+# --- Phase 3b: path-dependent exposure — the autocallable (EE collapses on autocall) ---------
+
+def _autocall_setup():
+    ois = SpdtCurveAsOIS(_spdt_ois_curve(0.06))
+    note = Autocallable(notional=100.0, observation_times=(0.5, 1.0, 1.5, 2.0), coupon_rate=0.04,
+                        autocall_level=1.0, coupon_barrier=0.8, knock_in=0.6, memory=True,
+                        initial_fixing=None)
+    model = BlackScholes(spot=100.0, r=0.06, q=0.0, sigma=0.22)
+    profile = np.linspace(0.0, 1.95, 14)
+    pkg = autocallable_exposure(note, model, ois, ois, time_grid=profile, n_paths=30_000, seed=1)
+    return note, model, pkg
+
+
+def test_autocallable_value_at_zero_reconciles_with_the_spdt_pricer():
+    """The exposure machinery's t=0 mark (regression collapses to the mean when all spots are
+    equal) must match SPDT's own MC price of the note — a non-circular cross-check."""
+    note, model, pkg = _autocall_setup()
+    value_0 = float(pkg.npv_paths[:, 0].mean())
+    price = price_mc(note, model, n_paths=60_000, seed=2).price
+    assert value_0 == pytest.approx(price, abs=0.8)
+
+
+def test_autocallable_ee_rises_then_collapses_on_autocall():
+    """The defining CCR signature: EE builds within each observation window, then drops sharply
+    at each autocall date as redeemed paths leave the book — a structural cliff, not noise."""
+    _, _, pkg = _autocall_setup()
+    ee = pkg.expected_exposure()
+    assert np.all(np.isfinite(ee)) and np.all(ee >= 0.0)
+    assert ee.max() > ee[0]                       # exposure builds above the initial mark
+    assert ee[-1] < 0.5 * ee.max()                # and collapses as the book autocalls away
+    assert ee[-1] > 0.0                            # the never-autocalled tail keeps a residual
+    ratios = ee[1:] / np.maximum(ee[:-1], 1e-9)
+    assert ratios.min() < 0.7                       # at least one ≥30% cliff (an autocall date)
+
+
+def test_autocallable_exposure_flows_through_to_a_cva():
+    _, _, pkg = _autocall_setup()
+    cva = CVAEngine(pkg.ois_curve).compute_cva(
+        pkg.expected_exposure(), pkg.time_grid, CreditCurve(cds_spread_bps=300.0, recovery_rate=0.40)
     )
     assert np.isfinite(cva) and cva > 0.0

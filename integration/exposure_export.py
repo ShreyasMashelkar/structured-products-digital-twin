@@ -22,6 +22,7 @@ from integration.exposure_package import ExposurePackage
 if TYPE_CHECKING:
     from integration.curve_adapter import SpdtCurveAsOIS
     from spdt.pricing.models import BlackScholes
+    from spdt.products.catalog import Autocallable
     from spdt.products.primitives import EuropeanOption
 
 
@@ -71,4 +72,62 @@ def european_exposure(
     return ExposurePackage(
         trade_id=trade_id, counterparty_id=counterparty_id, netting_set=netting_set,
         time_grid=times, npv_paths=npv, ois_curve=ois_curve, funding_curve=funding_curve,
+    )
+
+
+def autocallable_exposure(
+    note: "Autocallable", model: "BlackScholes",
+    ois_curve: "SpdtCurveAsOIS", funding_curve: "SpdtCurveAsOIS", *,
+    time_grid: NDArray[np.float64], n_paths: int = 20_000, seed: int = 0,
+    counterparty_id: str = "CP-0", netting_set: str = "default", trade_id: str = "AC-0",
+) -> ExposurePackage:
+    """Mark-to-future exposure of an autocallable by Longstaff–Schwartz continuation regression.
+
+    A path-dependent note cannot use the simple pathwise-realised value (the ``max`` in EE sits
+    *outside* the conditional expectation, so a single realisation biases it up — Jensen). Instead,
+    at each profile time we regress the realised PV of *future* cashflows on a polynomial of the
+    state to estimate the **continuation value** ``E[V_t | S_t]`` per path. Paths that have already
+    autocalled have no later cashflows and are zeroed — which is exactly why the EE profile **rises
+    then collapses** as observation dates cull the live notes.
+    """
+    from spdt.pricing.mc.rng import standard_normals
+    from spdt.products.graph import PathSet
+
+    obs = np.asarray(note.observation_times, dtype=float)
+    profile = np.asarray(time_grid, dtype=float)
+    grid = np.unique(np.concatenate([[0.0], profile, obs]))
+    spots = model.simulate(grid, standard_normals(n_paths, grid.size - 1, seed=seed))
+    paths = PathSet(times=grid, spots=spots)
+    cfs = note.cashflows(paths)
+    s0 = paths.initial if note.initial_fixing is None else np.full(n_paths, note.initial_fixing)
+
+    # When each path autocalls (∞ ⇒ never): used to zero the mark once the note has redeemed.
+    autocall_t = np.full(n_paths, np.inf)
+    alive = np.ones(n_paths, dtype=bool)
+    for t in obs[:-1]:
+        spot = spots[:, paths.index_of(float(t))]
+        called = alive & (spot >= note.autocall_level * s0)
+        autocall_t[called] = t
+        alive &= ~called
+
+    npv = np.zeros((n_paths, profile.size))
+    for j, ti in enumerate(profile):
+        d_ti = funding_curve.df(float(ti))
+        future = np.zeros(n_paths)  # realised PV (to ti) of cashflows strictly after ti
+        for cf in cfs:
+            if cf.time > ti + 1e-9:
+                future += np.asarray(cf.amount, dtype=float) * (funding_curve.df(cf.time) / d_ti)
+        live = autocall_t > ti + 1e-9
+        m = spots[:, paths.index_of(float(ti))] / s0  # moneyness state
+        basis = np.column_stack([np.ones(n_paths), m, m * m])
+        if live.sum() > 16:
+            coef, *_ = np.linalg.lstsq(basis[live], future[live], rcond=None)
+            cont = basis @ coef
+        else:
+            cont = future
+        npv[:, j] = np.where(live, cont, 0.0)
+
+    return ExposurePackage(
+        trade_id=trade_id, counterparty_id=counterparty_id, netting_set=netting_set,
+        time_grid=profile, npv_paths=npv, ois_curve=ois_curve, funding_curve=funding_curve,
     )

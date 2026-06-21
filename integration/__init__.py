@@ -18,12 +18,17 @@ if _XVA_ROOT.is_dir() and str(_XVA_ROOT) not in sys.path:
     sys.path.insert(0, str(_XVA_ROOT))
 
 from integration.curve_adapter import SpdtCurveAsOIS  # noqa: E402
-from integration.exposure_export import european_exposure, mark_to_future_european  # noqa: E402
+from integration.exposure_export import (  # noqa: E402
+    autocallable_exposure,
+    european_exposure,
+    mark_to_future_european,
+)
 from integration.exposure_package import ExposurePackage  # noqa: E402
 
 __all__ = [
     "ExposurePackage",
     "SpdtCurveAsOIS",
+    "autocallable_exposure",
     "european_exposure",
     "mark_to_future_european",
 ]
