@@ -71,26 +71,37 @@ export interface XvaRequest {
   params: Record<string, any>;
   counterparty?: string;
   cds_spread_bps: number;
+  cds_1y_bps?: number;
   recovery_rate: number;
   funding_spread_bp: number;
   hurdle_rate: number;
   margin?: number;
   ead_limit?: number;
   pfe_limit?: number;
+  own_cds_bps?: number;
+  cost_of_capital: number;
+  include_mva: boolean;
+  wwr_beta: number;
+  collateralised: boolean;
+  single_name: boolean;
 }
 
 export type Decision = "APPROVED" | "REJECTED" | "MANUAL_REVIEW";
 
 export interface XvaResult {
-  charge: { cva: number; fva: number; total: number };
-  metrics: { ead: number; pfe: number; epe: number; ee_peak: number; capital: number; expected_loss: number };
+  charge: { cva: number; fva: number; dva: number; kva: number; mva: number; total: number };
+  metrics: { ead: number; pfe: number; epe: number; ee_peak: number; expected_loss: number };
+  sensitivities: { cs01: number; jtd_gross: number; jtd_net: number };
+  capital: { economic: number; regulatory_bacva: number; saccr_ead: number; bacva_risk_weight_pct: number };
   decision: Decision;
   reasons: string[];
   limit_status: "PASS" | "WARNING" | "FAIL";
   trade_raroc: number;
   margin: number;
+  collateralised: boolean;
   profile: { t: number; ee: number }[];
-  spread_curve: { cds_bp: number; cva: number; fva: number; total: number }[];
+  spread_curve: { cds_bp: number; cva: number; total: number }[];
+  stress_ladder: { shift_bp: number; cva: number; total: number }[];
   inputs: { cds_spread_bps: number; recovery_rate: number; funding_spread_bp: number; hurdle_rate: number };
 }
 
