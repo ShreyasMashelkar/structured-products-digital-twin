@@ -47,3 +47,11 @@ webapp/frontend/.vite/
 # generated desk dashboard cache
 dashboard_data/
 webapp/frontend/tsconfig.tsbuildinfo
+
+# Vendored XVA engine — generated artifacts only (db/*.py is source, kept)
+xva/data/exposure_cube.parquet/
+xva/reports/
+xva/**/*.db
+xva/**/*.sqlite*
+xva/**/__pycache__/
+xva/.pytest_cache/
