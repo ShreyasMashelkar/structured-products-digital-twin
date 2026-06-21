@@ -63,6 +63,47 @@ export interface PriceResult {
   stress: { scenario: string; pnl: number }[];
 }
 
+export interface XvaRequest {
+  product_type: string;
+  notional: number;
+  observation_times?: number[];
+  maturity?: number;
+  params: Record<string, any>;
+  counterparty?: string;
+  cds_spread_bps: number;
+  recovery_rate: number;
+  funding_spread_bp: number;
+  hurdle_rate: number;
+  margin?: number;
+  ead_limit?: number;
+  pfe_limit?: number;
+}
+
+export type Decision = "APPROVED" | "REJECTED" | "MANUAL_REVIEW";
+
+export interface XvaResult {
+  charge: { cva: number; fva: number; total: number };
+  metrics: { ead: number; pfe: number; epe: number; ee_peak: number; capital: number; expected_loss: number };
+  decision: Decision;
+  reasons: string[];
+  limit_status: "PASS" | "WARNING" | "FAIL";
+  trade_raroc: number;
+  margin: number;
+  profile: { t: number; ee: number }[];
+  spread_curve: { cds_bp: number; cva: number; fva: number; total: number }[];
+  inputs: { cds_spread_bps: number; recovery_rate: number; funding_spread_bp: number; hurdle_rate: number };
+}
+
+export async function computeXva(req: XvaRequest): Promise<XvaResult> {
+  const r = await fetch("/api/xva", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) throw new Error("xva failed");
+  return r.json();
+}
+
 export async function priceTrade(req: PriceRequest): Promise<PriceResult> {
   const r = await fetch("/api/price", {
     method: "POST",

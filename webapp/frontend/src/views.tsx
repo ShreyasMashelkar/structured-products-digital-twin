@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Desk, PriceResult, StructureResult, priceTrade, solveStructure } from "./lib/api";
+import { Decision, Desk, PriceResult, StructureResult, XvaResult, computeXva, priceTrade, solveStructure } from "./lib/api";
 import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trades";
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
 import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
@@ -491,6 +491,177 @@ export function Validate({ desk, selectedId }: { desk: Desk; selectedId: string 
           <AreaSpark data={b.series.map((v: number, i: number) => ({ m: i, level: v }))} x="m" y="level" color={C.accent} height={280} xLabel="month" />
         </Panel>
       </div>
+    </div>
+  );
+}
+
+/* ======================= Counterparty & XVA ======================= */
+
+// The integration seam handles single-asset notes; worst-of baskets aren't wired to the tab yet.
+const XVA_PRODUCTS = new Set(["autocallable", "brc", "reverse_convertible", "capital_protected"]);
+
+// Round axis ticks (0, 0.25, 0.5, …) for the exposure profile — the compute grid lands on odd
+// fractions (0.1125, 0.3375, …), so we label by clean intervals rather than one tick per point.
+function timeTicks(maxT: number): number[] {
+  const step = maxT <= 1.6 ? 0.25 : maxT <= 3.2 ? 0.5 : 1.0;
+  const out: number[] = [];
+  for (let t = 0; t <= maxT + 1e-9; t += step) out.push(+t.toFixed(2));
+  return out;
+}
+
+const DECISION_STYLE: Record<Decision, { cls: string; text: string; dot: string; label: string }> = {
+  APPROVED: { cls: "border-up/40 bg-up/10", text: "text-up", dot: "bg-up", label: "Approved" },
+  REJECTED: { cls: "border-down/40 bg-down/10", text: "text-down", dot: "bg-down", label: "Rejected" },
+  MANUAL_REVIEW: { cls: "border-accent/40 bg-accent/10", text: "text-accent", dot: "bg-accent", label: "Manual review" },
+};
+
+export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selectedId: string | null }) {
+  const eligible = trades.filter((t) => XVA_PRODUCTS.has(t.product_type));
+  const [tradeId, setTradeId] = useState<string | null>(null);
+  const [cds, setCds] = useState(200);
+  const [rec, setRec] = useState(0.4);
+  const [fund, setFund] = useState(50);
+  const [hurdle, setHurdle] = useState(0.1);
+  const [margin, setMargin] = useState(1.0);
+  const [eadLimit, setEadLimit] = useState(0); // 0 ⇒ no limit
+  const [res, setRes] = useState<XvaResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Default to the desk-selected note when it's chargeable, else the first eligible one.
+  const activeId =
+    tradeId && eligible.some((t) => t.trade_id === tradeId)
+      ? tradeId
+      : selectedId && eligible.some((t) => t.trade_id === selectedId)
+        ? selectedId
+        : eligible[0]?.trade_id ?? null;
+  const trade = eligible.find((t) => t.trade_id === activeId) ?? null;
+
+  useEffect(() => {
+    if (!trade) { setRes(null); return; }
+    let cancel = false;
+    setLoading(true);
+    setErr(null);
+    const id = setTimeout(() => {
+      computeXva({
+        product_type: trade.product_type, notional: trade.notional,
+        observation_times: trade.observation_times, maturity: trade.maturity, params: trade.params,
+        counterparty: "CP-0", cds_spread_bps: cds, recovery_rate: rec, funding_spread_bp: fund,
+        hurdle_rate: hurdle, margin, ead_limit: eadLimit > 0 ? eadLimit : undefined,
+      })
+        .then((r) => !cancel && setRes(r))
+        .catch((e) => !cancel && setErr(String(e)))
+        .finally(() => !cancel && setLoading(false));
+    }, 250);
+    return () => { cancel = true; clearTimeout(id); };
+  }, [activeId, cds, rec, fund, hurdle, margin, eadLimit]);
+
+  if (eligible.length === 0)
+    return <div className="text-[13px] text-muted">No single-asset notes in the book to charge — worst-of baskets aren't wired to the XVA tab yet.</div>;
+
+  const ds = res ? DECISION_STYLE[res.decision] : null;
+
+  return (
+    <div className="space-y-4">
+      <SectionTitle>Per-trade XVA charge → counterparty limits → RAROC → governance decision</SectionTitle>
+
+      <Panel className="p-4">
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <span className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">Note</span>
+          <select
+            value={activeId ?? ""}
+            onChange={(e) => setTradeId(e.target.value)}
+            className="ring-desk rounded-lg border border-border bg-panel2 px-3 py-1.5 text-[13px] text-ink"
+          >
+            {eligible.map((t) => (
+              <option key={t.trade_id} value={t.trade_id}>
+                {t.trade_id} · {productLabel(t.product_type)} · {t.maturity.toFixed(1)}y
+              </option>
+            ))}
+          </select>
+          {trade?.staged && <Chip hot>staged</Chip>}
+        </div>
+        <div className="grid grid-cols-2 gap-5 md:grid-cols-3 lg:grid-cols-6">
+          <Slider label="Counterparty CDS" value={cds} min={25} max={800} step={25} onChange={setCds} display={`${cds}bp`} />
+          <Slider label="Recovery rate" value={rec} min={0.2} max={0.7} step={0.05} onChange={setRec} display={pct(rec, 0)} />
+          <Slider label="Funding spread" value={fund} min={0} max={150} step={10} onChange={setFund} display={`${fund}bp`} />
+          <Slider label="RAROC hurdle" value={hurdle} min={0.05} max={0.25} step={0.01} onChange={setHurdle} display={pct(hurdle, 0)} />
+          <Slider label="Structuring margin" value={margin} min={0} max={6} step={0.25} onChange={setMargin} display={fmt(margin, 2)} />
+          <Slider label="EAD limit (0=off)" value={eadLimit} min={0} max={400} step={10} onChange={setEadLimit} display={eadLimit > 0 ? fmt(eadLimit, 0) : "off"} />
+        </div>
+      </Panel>
+
+      {err && <div className="rounded-lg border border-down/30 bg-down/5 px-3 py-2 text-[12px] text-down">Charge failed: {err}</div>}
+
+      {res && ds && trade && (
+        <>
+          <Panel className={cn("flex flex-wrap items-center justify-between gap-3 border px-4 py-3", ds.cls)}>
+            <div className="flex items-center gap-3">
+              <span className={cn("h-2.5 w-2.5 rounded-full", ds.dot)} />
+              <div>
+                <div className={cn("text-figure font-bold leading-none", ds.text)}>{ds.label}</div>
+                <div className="mt-1 text-[12px] text-muted">{res.reasons.join(" · ") || "—"}</div>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <Chip hot={res.limit_status !== "PASS"}>limit {res.limit_status.toLowerCase()}</Chip>
+              <Chip>RAROC {pct(res.trade_raroc, 1)} vs {pct(res.inputs.hurdle_rate, 0)} hurdle</Chip>
+              <Chip>margin {fmt(res.margin, 2)}</Chip>
+            </div>
+          </Panel>
+
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+            <Kpi label="CVA" value={fmt(res.charge.cva, 3)} sub="credit charge" tone="neg" flashKey={Math.round(res.charge.cva * 1000)} />
+            <Kpi label="FVA" value={fmt(res.charge.fva, 3)} sub="funding charge" tone="neg" flashKey={Math.round(res.charge.fva * 1000)} />
+            <Kpi label="Total XVA" value={fmt(res.charge.total, 3)} sub={`${pct(res.charge.total / trade.notional, 2)} of notional`} tone="accent" flashKey={Math.round(res.charge.total * 1000)} />
+            <Kpi label="EAD" value={fmt(res.metrics.ead, 2)} sub="α·EEPE" />
+            <Kpi label="Peak PFE" value={fmt(res.metrics.pfe, 2)} sub="95% exposure" />
+            <Kpi label="Economic capital" value={fmt(res.metrics.capital, 2)} sub="ASRF 99.9%" tone="accent" />
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Panel className="p-3">
+              <SectionTitle>Expected-exposure profile · EE(t)</SectionTitle>
+              <AreaSpark
+                data={res.profile}
+                x="t"
+                y="ee"
+                color={C.teal}
+                height={280}
+                xLabel="time (years)"
+                yLabel="EE"
+                yTickFormat={(v) => v.toFixed(0)}
+                xNumeric
+                xTicks={timeTicks(res.profile.length ? res.profile[res.profile.length - 1].t : trade.maturity)}
+                xTickFormat={(v) => `${v}y`}
+              />
+              <div className="px-1 pt-1 text-[12px] text-muted">
+                {trade.product_type === "autocallable"
+                  ? "Mark-to-future positive exposure. The step-downs are autocall dates — redeemed paths leave the book, collapsing the exposure."
+                  : "Mark-to-future positive exposure. With no early redemption, it stays elevated across the note's life — no autocall cliff."}{" "}
+                Credit-independent: the counterparty sliders rescale the charge, not this profile.
+              </div>
+            </Panel>
+            <Panel className="p-3">
+              <SectionTitle>XVA charge vs counterparty spread</SectionTitle>
+              <Lines
+                data={res.spread_curve}
+                x="cds_bp"
+                xLabel="counterparty CDS (bp)"
+                yLabel="charge"
+                series={[{ key: "cva", name: "CVA", color: C.down }, { key: "total", name: "CVA + FVA", color: C.accent }]}
+                height={280}
+                refX={cds}
+                refLabel={`${cds}bp`}
+              />
+              <div className="px-1 pt-1 text-[12px] text-muted">
+                CVA scales with the counterparty's default risk; the gap up to total is FVA — credit-independent funding cost. The <span className="text-accent">dashed marker</span> is the selected spread — the operating point the all-in price carries into the coupon.
+              </div>
+            </Panel>
+          </div>
+        </>
+      )}
+      {loading && !res && <div className="text-[13px] text-muted">Charging…</div>}
     </div>
   );
 }
