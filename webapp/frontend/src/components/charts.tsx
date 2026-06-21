@@ -8,6 +8,7 @@ import {
   Legend,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -55,6 +56,9 @@ export function AreaSpark({
   yLabel,
   logX = false,
   yTickFormat,
+  xNumeric = false,
+  xTicks,
+  xTickFormat,
 }: {
   data: any[];
   x: string;
@@ -66,6 +70,9 @@ export function AreaSpark({
   yLabel?: string;
   logX?: boolean;
   yTickFormat?: (v: number) => string;
+  xNumeric?: boolean; // treat x as a continuous axis so ticks are round, not one-per-datapoint
+  xTicks?: number[];
+  xTickFormat?: (v: number) => string;
 }) {
   const id = `g-${y}-${color.replace("#", "")}`;
   return (
@@ -81,8 +88,11 @@ export function AreaSpark({
         <XAxis
           dataKey={x}
           {...axis}
+          type={xNumeric ? "number" : undefined}
           scale={logX ? "log" : "auto"}
-          domain={logX ? ["auto", "auto"] : undefined}
+          domain={logX ? ["auto", "auto"] : xNumeric ? [0, "dataMax"] : undefined}
+          ticks={xTicks}
+          tickFormatter={xTickFormat}
           label={xLabel ? { value: xLabel, position: "insideBottom", offset: -8, fill: C.muted, fontSize: 11 } : undefined}
         />
         <YAxis
@@ -109,7 +119,7 @@ export function AreaSpark({
 }
 
 export function Lines({
-  data, x, series, height = 300, logX = false, xLabel, yLabel,
+  data, x, series, height = 300, logX = false, xLabel, yLabel, refX, refLabel,
 }: {
   data: any[];
   x: string;
@@ -118,12 +128,16 @@ export function Lines({
   logX?: boolean;
   xLabel?: string;
   yLabel?: string;
+  refX?: number; // a live "you are here" marker; forces a numeric x-axis so it positions by value
+  refLabel?: string;
 }) {
+  const numericX = refX != null;
   return (
     <ResponsiveContainer width="100%" height={height}>
       <LineChart data={data} margin={{ top: 28, right: 18, bottom: 20, left: 8 }}>
         <CartesianGrid stroke={C.grid} strokeDasharray="2 4" vertical={false} />
-        <XAxis dataKey={x} {...axis} scale={logX ? "log" : "auto"} domain={logX ? ["auto", "auto"] : undefined}
+        <XAxis dataKey={x} {...axis} type={numericX ? "number" : undefined}
+          scale={logX ? "log" : "auto"} domain={logX ? ["auto", "auto"] : numericX ? ["dataMin", "dataMax"] : undefined}
           label={xLabel ? { value: xLabel, position: "insideBottom", offset: -10, fill: C.muted, fontSize: 11 } : undefined} />
         <YAxis {...axis} width={44}
           label={yLabel ? { value: yLabel, angle: -90, position: "left", offset: -2, fill: C.muted, fontSize: 11 } : undefined} />
@@ -131,8 +145,12 @@ export function Lines({
         <Legend verticalAlign="top" align="right" height={22} wrapperStyle={{ fontSize: 11, color: C.muted }} />
         {series.map((s) => (
           <Line key={s.key} type="monotone" dataKey={s.key} name={s.name} stroke={s.color}
-            strokeWidth={2.2} dot={{ r: 2, fill: s.color, strokeWidth: 0 }} activeDot={{ r: 4 }} />
+            strokeWidth={2.2} dot={{ r: 2, fill: s.color, strokeWidth: 0 }} activeDot={{ r: 4 }} isAnimationActive={false} />
         ))}
+        {refX != null && (
+          <ReferenceLine x={refX} stroke={C.accent} strokeDasharray="4 3"
+            label={refLabel ? { value: refLabel, position: "top", fill: C.accent, fontSize: 10 } : undefined} />
+        )}
       </LineChart>
     </ResponsiveContainer>
   );
