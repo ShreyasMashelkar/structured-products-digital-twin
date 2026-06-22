@@ -573,6 +573,7 @@ def build_desk_data(
 
     payload = {
         "as_of": as_of.isoformat(),
+        "data_date": raw.date.isoformat(),  # the actual market-data date (e.g. last EOD bhavcopy)
         "data_source": "live" if live else "synthetic",
         "underlying": "NIFTY",
         "spot": spot,
