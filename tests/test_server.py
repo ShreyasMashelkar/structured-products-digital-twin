@@ -122,6 +122,21 @@ def test_xva_full_depth_payload(client):
     assert cvas == sorted(cvas)                          # stress ladder monotone in the shock
 
 
+def test_xva_returns_all_in_coupon_below_base(client):
+    """The headline: the endpoint re-solves the coupon to par and to par − XVA; all-in < base."""
+    r = client.post(
+        "/api/xva",
+        json={"product_type": "autocallable", "notional": 100,
+              "observation_times": [0.5, 1.0, 1.5, 2.0], "maturity": 2.0,
+              "params": {"coupon_rate": 0.04, "knock_in": 0.6, "autocall_level": 1.0,
+                         "coupon_barrier": 0.8, "memory": True}, "cds_spread_bps": 300.0},
+    )
+    a = r.json()["all_in"]
+    assert a is not None and a["infeasible"] is False
+    assert a["coupon_all_in_pa"] < a["coupon_base_pa"]   # XVA eats into the offerable coupon
+    assert a["drop_bp"] > 0.0
+
+
 def test_xva_collateral_cuts_the_charge(client):
     """Turning on a CSA leaves only the close-out gap, so the total charge falls."""
     base = {"product_type": "autocallable", "notional": 100,
