@@ -32,15 +32,13 @@ Then open **http://localhost:5173**.
 
 ### Data source (env-driven)
 
-The backend runs on a reproducible **synthetic** snapshot by default. To build from **live** Indian market data, set env vars on the backend:
+The backend runs on a reproducible **synthetic** snapshot by default. To build from **live** Indian market data (NSE F&O bhavcopy + FBIL rates):
 
 ```bash
-# live NSE options + FBIL rates — choose the option-chain engine:
-SPDT_LIVE=1 SPDT_SOURCE=bhavcopy  uvicorn webapp.server:app --port 8077   # EOD archive (post-close)
-SPDT_LIVE=1 SPDT_SOURCE=nsepython uvicorn webapp.server:app --port 8077   # live intraday via nsepython
+SPDT_LIVE=1 uvicorn webapp.server:app --port 8077
 ```
 
-`nsepython` scrapes NSE's unofficial endpoints, so it works best from a normal machine **during Indian market hours (≈09:15–15:30 IST)** — NSE rate-limits/blocks datacenter & CI IPs. Rates always come from FBIL. Keep synthetic for reproducible runs and tests.
+The bhavcopy source walks back to the latest *published* EOD file, so this works any time of day — mid-session it serves the previous close's full real chain (the masthead shows the data date with an **EOD** badge). Today's file publishes after the close (~6 pm IST). Keep synthetic for reproducible runs and tests.
 
 ## Workflow tabs
 
