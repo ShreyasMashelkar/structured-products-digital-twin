@@ -169,6 +169,31 @@ for mypy). This is the commit that closes the history gap.
 - **`5a0451f` (#12)** — fix a real scenario‑table pricing bug (path struck at `ref=100` vs
   struck‑at‑spot wiped principal) and switch greek displays to cash gamma.
 
+### Wave 8 — XVA / CCR integration & live data (2026‑06‑21→22, PRs #13–#29)
+The second half of the platform: a vendored INR OTC / CCR / XVA engine combined with SPDT as **two
+desks over one seam** ([ADR‑0007](adr/0007-integrate-xva-at-the-exposure-seam.md)). PR‑per‑phase
+throughout — the granular cadence the rest of this audit recommended.
+- **#13** — the integration foundation: vendored engine (`xva/`), the `ExposurePackage` curve‑join
+  seam, and Phases 3–6 (mark‑to‑future exposure via Longstaff–Schwartz; all‑in price folding
+  CVA+FVA into the par‑solve; the governance gate; the React **Counterparty & XVA** tab).
+- **#14–#17** — hardening (CI now gates `integration/`+`webapp/`, repo mypy‑clean), and **CCR depth**:
+  bilateral **DVA**, **KVA** in the price, Basel **EEPE** 1y cap, **CSA/MPoR collateral**,
+  netting‑set aggregation, **wrong‑way risk**, then **MVA**, term‑structure credit, **CS01/JTD/stress**,
+  equity **SA‑CCR** EAD and **BA‑CVA** capital — all surfaced live on the desk tab.
+- **#18–#27** — docs: project walkthrough, XVA case study, README/architecture/interview‑defense
+  brought current; a scope‑discipline fix (re‑export `CreditCurve` so `integration/` stays the sole
+  cross‑world importer).
+- **#20→#25** — the **live‑data pipeline**: NSE EOD **bhavcopy** (walk‑back to the latest published
+  file), a removed‑then‑justified source selector, and an authenticated **Dhan** intraday source
+  (nsepython was tried and dropped — NSE blocks public scraping). Synthetic stays the reproducible
+  default; FBIL supplies rates.
+- **#28–#29** — surface the **all‑in coupon** headline on the desk (base → net‑of‑XVA, live) and
+  correct the documented coupons to annualised figures (7.25% → 1.09% p.a. at 300bp).
+
+The result: `position → exposure → CVA+FVA+KVA+MVA−DVA → all‑in price → economic & regulatory
+capital → RAROC governance → desk tab`, on synthetic / EOD / intraday data. ~280 tests, ruff + mypy
+clean across ~100 files.
+
 ---
 
 ## §2 — The biggest pivot: Streamlit → React/FastAPI (zero commit history explains it)
