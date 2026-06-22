@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import io
 import ssl
+import urllib.error
 import urllib.request
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -59,6 +60,31 @@ def download_fo_bhavcopy(as_of: date, *, timeout: float = 30.0) -> pd.DataFrame:
         name = archive.namelist()[0]
         with archive.open(name) as handle:
             return pd.read_csv(handle)
+
+
+def latest_available_bhavcopy(
+    as_of: date, *, max_lookback: int = 7, timeout: float = 30.0
+) -> tuple[date, pd.DataFrame]:
+    """The most recent published F&O bhavcopy on or before ``as_of`` — walks back over 404s.
+
+    Intraday (before today's EOD file publishes) and on weekends/holidays the exact-date file is a
+    404; this returns the latest *available* one, so a live build mid-session serves the previous
+    close's full chain. Returns ``(actual_date, frame)`` — the actual file date anchors the curve.
+    """
+    last_error: Exception | None = None
+    for back in range(max_lookback + 1):
+        d = as_of - timedelta(days=back)
+        if d.weekday() >= 5:  # skip Sat/Sun
+            continue
+        try:
+            return d, download_fo_bhavcopy(d, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            last_error = e
+    raise FileNotFoundError(
+        f"no F&O bhavcopy published in the {max_lookback} days before {as_of}"
+    ) from last_error
 
 
 def parse_fo_bhavcopy(
@@ -127,19 +153,28 @@ class NseBhavcopySource:
         dividend_yield: float = 0.013,
         rate_instruments: list[RateInstrument] | None = None,
         timeout: float = 30.0,
+        fallback_to_latest: bool = True,
     ) -> None:
         self.risk_free_rate = risk_free_rate
         self.funding_spread = funding_spread
         self.dividend_yield = dividend_yield
         self.rate_instruments = rate_instruments
         self.timeout = timeout
+        self.fallback_to_latest = fallback_to_latest
 
     def fetch(self, as_of: date, underlying: Underlying) -> RawMarketData:
-        """Download the F&O bhavcopy for ``as_of`` and build a snapshot input."""
-        frame = download_fo_bhavcopy(as_of, timeout=self.timeout)
+        """Download the F&O bhavcopy and build a snapshot input.
+
+        With ``fallback_to_latest`` (the default) the most recent *published* file on or before
+        ``as_of`` is used — so a live build runs intraday/weekends off the previous close.
+        """
+        if self.fallback_to_latest:
+            actual, frame = latest_available_bhavcopy(as_of, timeout=self.timeout)
+        else:
+            actual, frame = as_of, download_fo_bhavcopy(as_of, timeout=self.timeout)
         return parse_fo_bhavcopy(
             frame,
-            as_of,
+            actual,
             underlying,
             risk_free_rate=self.risk_free_rate,
             funding_spread=self.funding_spread,
