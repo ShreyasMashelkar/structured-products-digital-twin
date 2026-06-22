@@ -75,3 +75,23 @@ to rehearse from first principles. Build a one-page derivation card for each.
 - Why scenarios must be coherent (crash + vol-up + corr-up together), not independent single-factor bumps.
 - Why correlation-up is the killer scenario for a worst-of book.
 - Why an autocallable book's worst day is a sharp drop through the KI with no autocall relief.
+
+## XVA / CCR (the exposure seam)
+- Why couple the two desks at **exposure** (path × time NPV), not the product model — the one thing XVA needs from SPDT and the narrowest sufficient interface (ADR-0007).
+- Why **mark-to-future** EE uses Longstaff–Schwartz continuation value, not realised pathwise cashflows — the latter biases EE up (Jensen, `max` outside the conditional expectation).
+- Why an **autocallable's EE collapses** at each autocall date (redeemed paths leave the book) while a non-callable note's stays elevated.
+- **CVA** = LGD · Σ EE·ΔPD·DF; why it's unilateral by default and what DVA adds (own-default benefit on the *negative* exposure); the FVA/DVA overlap debate.
+- **FVA** = funding the EPE at the issuer spread; **KVA** = cost of capital over the life; **MVA** = funding initial margin (99%/10-day close-out). Why the all-in charge is `CVA+FVA+KVA+MVA−DVA`.
+- **EEPE** is the time-average of *effective* EE (running max) over `[0, min(1y, T)]` — why Basel caps the window at one year, and how EAD = α·EEPE (α = 1.4).
+- **EAD two ways**: cube-based economic α·EEPE vs supervisory **SA-CCR** (RC + PFE add-on, equity SF 32%/20%) — why SA-CCR ignores your MC and uses supervisory factors.
+- **Capital two ways**: ASRF economic capital (unexpected loss, 99.9%) vs **BA-CVA** regulatory capital — and why they differ.
+- **Collateral**: how a CSA (threshold/MTA/**MPoR**) reduces residual exposure to the close-out gap; why a coarse grid needs a variance-corrected close-out.
+- **Wrong-way risk**: why correlation of exposure with the counterparty's default raises CVA; parametric (Esscher tilt) vs jointly-simulated intensity.
+- **CS01 / JTD**: the CVA desk's two first-order credit risks and how each is hedged.
+- The **all-in price**: why fairness becomes `PV = par − fee − XVA`, so the offerable coupon falls as the counterparty's spread widens (3.62% → 0.55% at 300bp).
+- **Governance**: limit check on EAD/PFE + RAROC vs hurdle → APPROVED / REJECTED / MANUAL_REVIEW.
+
+## Market-data sourcing (L1, live)
+- Why NSE blocks public *scraping* (anti-bot on the option-chain API) but the bhavcopy **archive** is reachable — so the reliable free live path is **EOD bhavcopy** (walk back to the latest published file).
+- EOD settlement marks vs **intraday** LTPs: why bhavcopy is the better default (official marks, full chain in one file, reproducible) and Dhan only when real-time matters.
+- Why a keyed **broker API** (Dhan) beats scraping for intraday — authenticated, not IP-blocked — and the trade-off (account + expiring token, not reproducible).
