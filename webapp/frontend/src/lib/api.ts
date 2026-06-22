@@ -1,5 +1,6 @@
 export interface Desk {
   as_of: string;
+  data_date?: string;
   data_source: string;
   underlying: string;
   spot: number;
