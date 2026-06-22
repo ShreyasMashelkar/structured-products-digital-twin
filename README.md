@@ -62,6 +62,18 @@ Everything is **snapshot-in, report-out**: every layer consumes an immutable, ve
 | L13 | `spdt/reporting` | Term sheet / factsheet / scenario-table generation |
 | L14 | `spdt/dashboard` | Executive desk blotter (Streamlit) + React desk (`webapp/`) |
 
+### Market-data sources (L1)
+
+Three interchangeable sources behind one `fetch() → RawMarketData` seam, so the whole stack is source-agnostic:
+
+```
+ Synthetic  (default) ─┐  generated smile · deterministic (tests/CI/case study)
+ NSE bhavcopy (LIVE)  ─┼─► RawMarketData ─► MarketSnapshot ─► arb-free SSVI surface ─► everything above
+ Dhan API   (LIVE)    ─┘  real EOD (walk-back) / intraday (broker token)   ▲ FBIL OIS rates
+```
+
+Synthetic is the reproducible default; `SPDT_LIVE=1` uses NSE's public **EOD bhavcopy** (walks back to the latest published file); `SPDT_SOURCE=dhan` uses DhanHQ's authenticated **intraday** API. Rates always come from **FBIL**. See [`webapp/README.md`](webapp/README.md#data-source-env-driven).
+
 ---
 
 ## XVA & Counterparty Credit Risk
