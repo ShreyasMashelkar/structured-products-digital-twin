@@ -75,3 +75,23 @@ def test_parser_raises_when_underlying_absent():
             _sample_bhavcopy(), AS_OF, "BANKNIFTY",
             risk_free_rate=0.065, funding_spread=0.012, dividend_yield=0.013,
         )
+
+
+def test_latest_available_bhavcopy_walks_back_over_404(monkeypatch):
+    """Intraday/weekend, the exact-date file 404s; the walk-back returns the most recent published
+    one (and skips weekends), anchoring on that actual date."""
+    import urllib.error
+
+    from spdt.data.ingest import nse_bhavcopy as mod
+
+    published = date(2026, 6, 19)  # Friday; Mon 22nd / Sun 21st / Sat 20th have no file
+
+    def fake_download(d, *, timeout=30.0):
+        if d == published:
+            return _sample_bhavcopy()
+        raise urllib.error.HTTPError(mod.fo_bhavcopy_url(d), 404, "Not Found", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mod, "download_fo_bhavcopy", fake_download)
+    actual, frame = mod.latest_available_bhavcopy(date(2026, 6, 22), timeout=5.0)
+    assert actual == published
+    assert not frame.empty
