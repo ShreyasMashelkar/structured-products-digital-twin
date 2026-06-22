@@ -42,10 +42,15 @@ function Masthead({
       <div className="tnum text-right text-[12px] leading-relaxed text-muted">
         {desk.underlying} · spot{" "}
         <b className={cn(sim ? (up ? "text-up" : "text-down") : "text-ink")}>{compact(spot)}</b>
-        {sim && <span className={cn("ml-1", up ? "text-up" : "text-down")}>{up ? "▲" : "▼"}{Math.abs(spotChgBp).toFixed(0)}bp</span>} · {desk.as_of}
+        {sim && <span className={cn("ml-1", up ? "text-up" : "text-down")}>{up ? "▲" : "▼"}{Math.abs(spotChgBp).toFixed(0)}bp</span>} · {desk.data_date ?? desk.as_of}
         <span className="ml-1.5 rounded border border-border px-1 py-px text-[9px] font-bold uppercase tracking-[0.1em] text-faint">
           {desk.data_source}
         </span>
+        {desk.data_source === "live" && desk.data_date && desk.data_date !== desk.as_of && (
+          <span className="ml-1 rounded border border-teal/50 bg-teal/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.1em] text-teal" title="latest published EOD bhavcopy — not intraday">
+            EOD
+          </span>
+        )}
         <br />
         ATM vol <b className={cn(sim ? "text-teal" : "text-ink")}>{(vol * 100).toFixed(1)}%</b> · r{" "}
         <b className="text-ink">{(m.r * 100).toFixed(2)}%</b> · q <b className="text-ink">{(m.q * 100).toFixed(2)}%</b> · funding{" "}
