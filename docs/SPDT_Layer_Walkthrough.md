@@ -1155,6 +1155,36 @@ concentrations**. Your dashboard surfaces exactly that.
 
 ---
 
+# L15 — XVA / CCR integration (the exposure seam)
+
+The second desk. A vendored INR OTC / CCR / XVA engine is combined with SPDT as **two desks over one
+core**, coupled at exactly one artefact — the exposure cube — and nowhere else
+([ADR‑0007](adr/0007-integrate-xva-at-the-exposure-seam.md)).
+
+## How it works
+- SPDT *produces* an **`ExposurePackage`**: a path × time NPV cube + curves + counterparty, marked to
+  future (exact BSM for Europeans; **Longstaff–Schwartz** continuation value for path‑dependent notes,
+  so EE isn't Jensen‑biased). An autocallable's EE **builds then collapses on each autocall date**.
+- The `integration/` package (the only cross‑world importer) *reuses* the engine's
+  `CVAEngine`/`KVAEngine`/`MVAEngine`/`CSAEngine`/`BACVAEngine` to compute the charge and gate the trade.
+- The chain: `exposure → [netting · CSA/MPoR collateral · wrong‑way tilt] → CVA + FVA + KVA + MVA − DVA
+  → all‑in price (PV = par − fee − XVA) → EAD/PFE · economic (ASRF) + regulatory (SA‑CCR EAD, BA‑CVA)
+  capital · CS01/JTD/stress → RAROC governance gate (APPROVED/REJECTED/MANUAL_REVIEW) → React desk tab`.
+
+## The one real point
+The hard new quant is bounded to **structured‑note mark‑to‑future** (path‑dependent EE). Everything
+else is assembly over code that already exists on both sides — which is *why* coupling at the exposure
+seam (not the product model or the UI) is the right architecture.
+
+## Defend it
+- Why exposure is the narrowest sufficient interface; why mark‑to‑future EE uses LSM not realised
+  cashflows; the full `CVA+FVA+KVA+MVA−DVA` charge; EEPE's 1‑year Basel cap; economic vs regulatory
+  capital; CSA/MPoR; wrong‑way risk; CS01/JTD; and the all‑in price (7.25% → 1.09% p.a. at 300bp).
+  Full set in [`interview_defense.md`](interview_defense.md); worked numbers in
+  [`xva_case_study.md`](xva_case_study.md).
+
+---
+
 # Appendix A — Do you need live data?
 
 **No. The entire project runs on end-of-day (EOD) historical data, by design.** The system is
@@ -1165,11 +1195,18 @@ What you use (all free, all EOD/historical): **NSE F&O bhavcopy** (backbone), **
 **yfinance** (backup), **FBIL/RBI** rates, **NSE corporate actions**. Even the volatility surface is
 *reconstructed* from downloaded EOD settlement prices.
 
-"Live" appears in only two places, both deliberately downgraded:
-1. The **NSE option-chain JSON endpoint** (today's live IVs) — fragile, rate-limited, format-changing.
-   *Optional demo garnish only — never depend on it.*
-2. **Real-time market connectivity** — explicitly in the **SKIPPED (declared)** bucket. You name it
-   as out-of-scope so an interviewer knows you *chose* not to build it.
+A real, opt-in **live pipeline** exists behind one source seam (default stays synthetic for
+reproducibility), with three engines:
+1. **Synthetic** (default) — generated smile, deterministic; what tests/CI/the case study run on.
+2. **NSE EOD bhavcopy** (`SPDT_LIVE=1`) — the public F&O file; walks back to the latest *published*
+   file, so it works any time of day (mid-session it serves the previous close). The reliable free
+   live route.
+3. **Dhan** (`SPDT_SOURCE=dhan`) — an authenticated broker option-chain API for true **intraday** data;
+   not IP-blocked like the public NSE endpoints. (Public NSE *scraping* via `nsepython` was tried and
+   removed — NSE hard-blocks it, returning empty payloads even from a residential IP.)
+
+Rates always bootstrap from **FBIL**. Real-time *streaming* connectivity remains in the **SKIPPED
+(declared)** bucket — named as out-of-scope on purpose.
 
 Why this is correct, not a compromise: a bank's "official close" marks are also EOD snapshots; EOD is
 what makes deterministic replay and reproducible P&L possible; and live feeds are costly, brittle
