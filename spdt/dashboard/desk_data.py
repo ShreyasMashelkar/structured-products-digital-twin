@@ -55,12 +55,16 @@ DEFAULT_SYNTHETIC_AS_OF = date(2024, 6, 17)
 _DT = 1.0 / 252.0
 
 
-def _fetch_raw(as_of: date, *, live: bool):
-    """Raw market data for ``as_of`` — live NSE/FBIL when ``live``, else the synthetic source."""
+def _fetch_raw(as_of: date, *, live: bool, source: str = "bhavcopy"):
+    """Raw market data for ``as_of`` — live NSE/FBIL when ``live``, else the synthetic source.
+
+    ``source`` selects the live option-chain engine (``"bhavcopy"`` EOD or ``"dhan"`` intraday);
+    ignored when ``live`` is False.
+    """
     if live:
         from spdt.data import fetch_live_raw
 
-        return fetch_live_raw(as_of, "NIFTY")
+        return fetch_live_raw(as_of, "NIFTY", source=source)
     return SyntheticSource().fetch(as_of, "NIFTY")
 
 
@@ -414,17 +418,18 @@ def build_desk_data(
     n_paths: int = 20_000,
     as_of: date | None = None,
     live: bool = False,
+    source: str = "bhavcopy",
 ) -> DeskData:
     """Compute the full desk snapshot for the dashboard.
 
     ``as_of`` defaults to today (synthetic data is date-agnostic, so this only labels the
     snapshot — but it stops the dashboard from showing one frozen historical date forever).
-    Pass ``live=True`` to build from live NSE options + FBIL rates (network; not for CI); the
-    bhavcopy source walks back to the latest published EOD file.
+    Pass ``live=True`` to build from live options + FBIL rates (network; not for CI); ``source``
+    picks the engine — ``"bhavcopy"`` (EOD, walks back to the latest file) or ``"dhan"`` (intraday).
     """
     as_of = as_of or date.today()
     # L1/L2 — market and arbitrage-free surface.
-    raw = _fetch_raw(as_of, live=live)
+    raw = _fetch_raw(as_of, live=live, source=source)
     snap = build_snapshot(raw)
     surface = VolSurface.calibrate(invert_chain(raw, snap.ois_curve), "NIFTY")
     spot = snap.spots["NIFTY"]
