@@ -29,7 +29,7 @@ def test_synthetic_source_is_deterministic(raw):
 
 def test_synthetic_data_is_tagged_synthetic(raw):
     assert raw.source is SourceTag.SYNTHETIC
-    assert raw.spot == 22000.0
+    assert raw.spot == 24100.0
     assert len(raw.option_chain) == 3 * 5 * 2  # 3 expiries × 5 strikes × {call, put}
 
 

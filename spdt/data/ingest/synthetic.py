@@ -37,7 +37,7 @@ class SyntheticSource:
     def __init__(
         self,
         *,
-        spot: float = 22000.0,
+        spot: float = 24100.0,  # anchored near a realistic current NIFTY level (still synthetic)
         dividend_yield: float = 0.013,
         funding_spread: float = 0.012,
     ) -> None:
