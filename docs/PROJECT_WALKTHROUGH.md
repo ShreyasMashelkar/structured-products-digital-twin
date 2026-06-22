@@ -7,13 +7,13 @@ How to explain this project to someone — from a client's need to the end of th
 ## Part A — The talk track (rehearse these)
 
 ### 🎯 30-second elevator
-> "I built a digital twin of an equity structured-products desk **and** its counterparty-risk function. On real Indian market data, it takes a client brief, structures and prices an exotic autocallable, then runs it through the full XVA stack — CVA, FVA, KVA, MVA — to produce an *all-in* price and an automated trade-approval decision. The headline: the same note's coupon drops from **3.6% to 0.5%** just from the counterparty's credit quality, and the platform shows you exactly why."
+> "I built a digital twin of an equity structured-products desk **and** its counterparty-risk function. On real Indian market data, it takes a client brief, structures and prices an exotic autocallable, then runs it through the full XVA stack — CVA, FVA, KVA, MVA — to produce an *all-in* price and an automated trade-approval decision. The headline: the same note's coupon drops from **7.3% to 1.1% p.a.** just from the counterparty's credit quality, and the platform shows you exactly why."
 
 ### 🎯 2-minute version
 Three beats:
 1. **The thesis** — two desks (structuring + XVA/CCR) over one shared core, coupled at a single seam (the exposure cube), so the two product models never have to merge.
 2. **The journey** — client need → propose structure → price → solve coupon to par → **mark-to-future exposure** → CVA/FVA/KVA/MVA → **all-in price** → economic & regulatory capital → governance decision.
-3. **The killer number** — coupon 3.62% → 0.55% under a 300bp counterparty; widen the spread and it falls further. The platform makes "who you trade with changes the price" explicit.
+3. **The killer number** — coupon 7.25% → 1.09% p.a. under a 300bp counterparty; widen the spread and it falls further. The platform makes "who you trade with changes the price" explicit.
 
 ### 🎯 Deep-dive (technical interview)
 Walk Part B, but spend your time on the three things that signal seniority:
@@ -24,10 +24,10 @@ Walk Part B, but spend your time on the three things that signal seniority:
 ### Slide / whiteboard outline (7 panels)
 1. Two desks, one seam (the diagram in the README).
 2. Client brief → proposed Phoenix autocallable.
-3. MC price → solve coupon to par (3.62%).
+3. MC price → solve coupon to par (7.25% p.a.).
 4. The exposure cube → EE profile (the autocall-collapse chart).
 5. The XVA waterfall: CVA + FVA + KVA + MVA − DVA = 5.06.
-6. All-in coupon 3.62% → 0.55%; capital economic vs regulatory.
+6. All-in coupon 7.25% → 1.09% p.a.; capital economic vs regulatory.
 7. Governance gate → APPROVED / REJECTED / MANUAL_REVIEW.
 
 ### Two reflexes that win interviews
@@ -69,7 +69,7 @@ The **structurer** maps the brief to a **Phoenix autocallable** — memory coupo
 **Monte Carlo** under the desk model (BS here; also Heston / local vol / LSV). Path-dependent features (autocall, memory, knock-in) evaluated path by path; **two-curve discounting** (OIS for the option leg, OIS+funding for the issuer leg).
 
 ### Stage 4 — Solve to par
-"Fair" means model PV = issue price − fee. Hold every client term fixed and **solve the coupon** (1-D Brent root find) so `PV = 100 − fee`. → **3.62% p.a.** — the naïve quote.
+"Fair" means model PV = issue price − fee. Hold every client term fixed and **solve the coupon** (1-D Brent root find) so `PV = 100 − fee`. → **7.25% p.a.** — the naïve quote.
 
 ### Stage 5 — Greeks & risk
 Sensitivities by **bump, pathwise, and AAD** (cross-checked), bucketed vega, model reserves (LSV−LV), stress, hedging simulation. The mature structuring half — one line in a pitch, not the differentiator.
@@ -96,7 +96,7 @@ From the cube: **EE / EPE / EEPE** (Basel 1y-capped) / peak **PFE** (95%) / **EA
 - **Wrong-way risk** — exposure tilted to be high *when the counterparty defaults*.
 
 ### Stage 10 — The all-in price (the punchline)
-Fairness becomes **`PV = par − fee − XVA`**, and the coupon is re-solved against the lower target → **3.62% → 0.55% p.a.** for our 300bp counterparty (and lower still as the spread widens). *The same note pays a different coupon depending on who you trade it with — and the platform makes that explicit.*
+Fairness becomes **`PV = par − fee − XVA`**, and the coupon is re-solved against the lower target → **7.25% → 1.09% p.a.** (−615bp) for our 300bp counterparty (and lower still as the spread widens). *The same note pays a different coupon depending on who you trade it with — and the platform makes that explicit.*
 
 ### Stage 11 — Capital, two ways
 **Economic** (ASRF unexpected loss, 99.9% ≈ 22) and **regulatory** (**BA-CVA** capital ≈ 3.1, **equity SA-CCR EAD** ≈ 184). Economic *and* regulatory side by side is how a real CCR desk thinks.
