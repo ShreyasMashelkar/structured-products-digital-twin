@@ -7,7 +7,7 @@ How to explain this project to someone — from a client's need to the end of th
 ## Part A — The talk track (rehearse these)
 
 ### 🎯 30-second elevator
-> "I built a digital twin of an equity structured-products desk **and** its counterparty-risk function. It takes a client brief, structures and prices an exotic autocallable, then runs it through the full XVA stack — CVA, FVA, KVA, MVA — to produce an *all-in* price and an automated trade-approval decision. The headline: the same note's coupon drops from **3.6% to 0.5%** just from the counterparty's credit quality, and the platform shows you exactly why."
+> "I built a digital twin of an equity structured-products desk **and** its counterparty-risk function. On real Indian market data, it takes a client brief, structures and prices an exotic autocallable, then runs it through the full XVA stack — CVA, FVA, KVA, MVA — to produce an *all-in* price and an automated trade-approval decision. The headline: the same note's coupon drops from **3.6% to 0.5%** just from the counterparty's credit quality, and the platform shows you exactly why."
 
 ### 🎯 2-minute version
 Three beats:
@@ -41,8 +41,23 @@ Walk Part B, but spend your time on the three things that signal seniority:
 ### The thesis: two desks, one seam
 A bank has two groups that both touch the same trade — the **structuring desk** (prices & hedges the note) and the **XVA/CCR desk** (charges it for default, funding and capital cost). In the project these are two codebases (SPDT + a vendored XVA engine) that talk through **exactly one object — the exposure cube** — and nothing else (ADR-0007). The structuring desk *produces* it; the XVA desk *consumes* it. That seam is the whole story.
 
-### Stage 0 — Market data foundation
-Everything starts from a versioned `MarketSnapshot` from free Indian market data (NSE/FBIL/RBI): spot, an OIS discount curve, and an **arbitrage-free implied-vol surface** (SVI/SSVI + arbitrage repair). *Snapshot in, report out* — every layer consumes an immutable snapshot, which is what makes reproducible pricing and historical replay possible.
+### Stage 0 — Market data foundation (a real, 3-way pipeline)
+Everything starts from a versioned `MarketSnapshot`: spot, an OIS discount curve, and an **arbitrage-free implied-vol surface** (SVI/SSVI + arbitrage repair). The data behind it comes from three interchangeable sources, all behind one `fetch() → RawMarketData` seam:
+
+```
+                       ┌──────────── option chain + spot ────────────┐
+ Synthetic  (default) ─┤ generated smile (~24,100)  ·  reproducible   │
+ NSE bhavcopy (LIVE)  ─┤ real EOD chain (~1,800 legs, walks back to   │ ──► RawMarketData ──► MarketSnapshot
+ Dhan API   (LIVE)    ─┤ latest published) · intraday via broker token│        (+ FBIL OIS rates)        │
+                       └──────────────────────────────────────────────┘                                  ▼
+                                                                              arb-free SSVI surface · two-curve discounting
+```
+
+- **Synthetic** (default) — a generated spot + smile; **deterministic**, so tests, the case study and CI are reproducible.
+- **NSE bhavcopy** (`SPDT_LIVE=1`) — the real public **EOD** F&O file; walks back to the latest *published* file, so it works any time of day (mid-session it serves the previous close — settlement marks).
+- **Dhan** (`SPDT_SOURCE=dhan`) — DhanHQ's authenticated **intraday** option-chain API; a broker feed, so it isn't IP-blocked like the public NSE endpoints.
+
+Rates always bootstrap from **FBIL** (India's OIS benchmark). *Snapshot in, report out* — every layer consumes an immutable snapshot, which is what makes reproducible pricing and historical replay possible. (Engineering note worth telling: NSE blocks public *scraping*, so the reliable free live path is EOD bhavcopy; Dhan is the keyed route for true intraday — bhavcopy is the better default, Dhan only when real-time matters.)
 
 ### Stage 1 — The client need
 A private-bank client: *"~12% annual income, can stomach a 30% drop, 2-year horizon."* That's a **client brief**.
@@ -93,7 +108,7 @@ Fairness becomes **`PV = par − fee − XVA`**, and the coupon is re-solved aga
 Mirrors a bank's trade-approval workflow: check **EAD/PFE vs limits** and **RAROC vs hurdle** → **APPROVED / REJECTED / MANUAL_REVIEW** with reasons. Our example: a thin 1.0 margin can't cover the 5.06 charge → **MANUAL_REVIEW**. Widen margin → APPROVED; breach a limit → REJECTED.
 
 ### Stage 14 — The desk UI
-A React trading desk with a "Counterparty & XVA" tab: pick a note, dial counterparty CDS / funding / cost-of-capital / collateral, and watch the charge breakdown, capital, CS01/JTD, exposure profile and CVA-vs-spread curve update live, ending in the governance verdict.
+A React trading desk with a "Counterparty & XVA" tab: pick a note, dial counterparty CDS / funding / cost-of-capital / collateral, and watch the charge breakdown, capital, CS01/JTD, exposure profile and CVA-vs-spread curve update live, ending in the governance verdict — running against synthetic, EOD (bhavcopy), or live intraday (Dhan) data (the masthead shows the data date with an **EOD** badge when it lags).
 
 ---
 
