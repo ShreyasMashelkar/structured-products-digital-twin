@@ -99,6 +99,13 @@ export interface XvaResult {
   limit_status: "PASS" | "WARNING" | "FAIL";
   trade_raroc: number;
   margin: number;
+  all_in?: {
+    coupon_base_pa?: number;
+    coupon_all_in_pa?: number;
+    drop_bp?: number;
+    periods_per_year?: number;
+    infeasible: boolean;
+  } | null;
   collateralised: boolean;
   profile: { t: number; ee: number }[];
   spread_curve: { cds_bp: number; cva: number; total: number }[];
