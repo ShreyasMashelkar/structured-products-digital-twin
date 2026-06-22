@@ -14,7 +14,6 @@ from spdt.core.snapshot import MarketSnapshot
 from spdt.data.ingest import RawMarketData
 from spdt.data.ingest.fbil import fetch_fbil_ois_instruments
 from spdt.data.ingest.nse_bhavcopy import NseBhavcopySource
-from spdt.data.ingest.nse_python import NsePythonSource
 from spdt.data.snapshot_builder import build_snapshot
 
 
@@ -25,28 +24,19 @@ def fetch_live_raw(
     dividend_yield: float = 0.013,
     funding_spread: float = 0.012,
     timeout: float = 30.0,
-    source: str = "bhavcopy",
 ) -> RawMarketData:
     """Fetch the raw live market data (NSE option chain + FBIL-bootstrapped rates) for ``as_of``.
 
-    Hits the network. ``source`` picks the option-chain engine: ``"bhavcopy"`` (EOD archive, the
-    default) or ``"nsepython"`` (live intraday chain via the ``nsepython`` library). Both pair with
-    FBIL-bootstrapped rates. Exposed separately from :func:`build_live_snapshot` so callers that also
-    need the raw option chain (e.g. surface calibration) don't have to fetch it twice.
+    Hits the network. The NSE F&O bhavcopy source walks back to the latest *published* EOD file, so
+    this works any time of day (mid-session it serves the previous close). Exposed separately from
+    :func:`build_live_snapshot` so callers that also need the raw option chain (e.g. surface
+    calibration) don't have to fetch it twice.
     """
     _, rate_instruments = fetch_fbil_ois_instruments(anchor=as_of, timeout=timeout)
-    if source == "nsepython":
-        engine: NseBhavcopySource | NsePythonSource = NsePythonSource(
-            dividend_yield=dividend_yield, funding_spread=funding_spread,
-            rate_instruments=rate_instruments,
-        )
-    elif source == "bhavcopy":
-        engine = NseBhavcopySource(
-            dividend_yield=dividend_yield, funding_spread=funding_spread,
-            rate_instruments=rate_instruments, timeout=timeout,
-        )
-    else:
-        raise ValueError(f"unknown live source {source!r} (use 'bhavcopy' or 'nsepython')")
+    engine = NseBhavcopySource(
+        dividend_yield=dividend_yield, funding_spread=funding_spread,
+        rate_instruments=rate_instruments, timeout=timeout,
+    )
     return engine.fetch(as_of, underlying)
 
 
