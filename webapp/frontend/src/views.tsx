@@ -643,6 +643,35 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
             </div>
           </Panel>
 
+          {/* All-in coupon — the punchline: base (no XVA) → net of XVA */}
+          {res.all_in && !res.all_in.infeasible && (
+            <Panel className="p-4">
+              <SectionTitle>All-in coupon · what the desk can offer this counterparty</SectionTitle>
+              <div className="flex flex-wrap items-baseline gap-x-5 gap-y-2">
+                <div>
+                  <div className="text-label uppercase tracking-[0.12em] text-muted">Base · no XVA</div>
+                  <div className="tnum text-hero font-bold leading-none text-ink">{pct(res.all_in.coupon_base_pa ?? 0, 2)}<span className="ml-1 text-figure font-medium text-muted">p.a.</span></div>
+                </div>
+                <div className="text-figure text-muted">→</div>
+                <div>
+                  <div className="text-label uppercase tracking-[0.12em] text-muted">All-in · net of XVA</div>
+                  <div className="tnum text-hero font-bold leading-none text-accent">{pct(res.all_in.coupon_all_in_pa ?? 0, 2)}<span className="ml-1 text-figure font-medium text-muted">p.a.</span></div>
+                </div>
+                <div className="self-center rounded-lg border border-down/30 bg-down/5 px-3 py-1.5 text-[12px] font-semibold text-down">
+                  −{Math.round(res.all_in.drop_bp ?? 0)}bp from XVA
+                </div>
+              </div>
+              <div className="px-1 pt-2 text-[12px] text-muted">
+                The coupon re-solved to <span className="tnum text-ink">par − fee − XVA</span>: carrying the {res.inputs.cds_spread_bps}bp counterparty's CVA + FVA + KVA + MVA cuts what the desk can fairly offer. Widen the spread and it falls further.
+              </div>
+            </Panel>
+          )}
+          {res.all_in?.infeasible && (
+            <Panel className="border border-down/30 bg-down/5 p-3 text-[12px] text-down">
+              XVA exceeds the note's value — no positive coupon prices this fairly at this counterparty. The trade can't be done without charging above par or tightening the counterparty.
+            </Panel>
+          )}
+
           {/* Charge breakdown: CVA + FVA + KVA + MVA − DVA = Total */}
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
             <Kpi label="CVA" value={fmt(res.charge.cva, 3)} sub="credit" tone="neg" flashKey={Math.round(res.charge.cva * 1000)} />
