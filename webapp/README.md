@@ -30,6 +30,18 @@ npm run dev
 
 Then open **http://localhost:5173**.
 
+### Data source (env-driven)
+
+The backend runs on a reproducible **synthetic** snapshot by default. To build from **live** Indian market data, set env vars on the backend:
+
+```bash
+# live NSE options + FBIL rates — choose the option-chain engine:
+SPDT_LIVE=1 SPDT_SOURCE=bhavcopy  uvicorn webapp.server:app --port 8077   # EOD archive (post-close)
+SPDT_LIVE=1 SPDT_SOURCE=nsepython uvicorn webapp.server:app --port 8077   # live intraday via nsepython
+```
+
+`nsepython` scrapes NSE's unofficial endpoints, so it works best from a normal machine **during Indian market hours (≈09:15–15:30 IST)** — NSE rate-limits/blocks datacenter & CI IPs. Rates always come from FBIL. Keep synthetic for reproducible runs and tests.
+
 ## Workflow tabs
 
 `Structuring` (interactive client brief → solve-to-par → catalog + 3-D vol surface) ·
