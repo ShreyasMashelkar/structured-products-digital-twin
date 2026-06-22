@@ -58,12 +58,12 @@ The note is simulated and repriced on every path at every observation; the path-
 
 The structurer solves the coupon to `par − fee`, then to `par − fee − XVA`:
 
-| Coupon | Value | |
+| Coupon (annualised) | Value | |
 |---|---|---|
-| To par (no XVA) | **3.62% p.a.** | the naïve quote |
-| All-in (net of XVA) | **0.55% p.a.** | what the desk can honestly offer to a 300bp counterparty |
+| To par (no XVA) | **7.25% p.a.** | the naïve quote |
+| All-in (net of XVA) | **1.09% p.a.** | what the desk can honestly offer to a 300bp counterparty |
 
-Carrying the lifetime counterparty, funding, capital and margin cost cuts the offerable coupon by ~3 points — and it falls further as the counterparty's spread widens. *This is the headline of the combined platform.*
+Carrying the lifetime counterparty, funding, capital and margin cost cuts the offerable coupon by **~6 points (615bp)** — and it falls further as the counterparty's spread widens. *This is the headline of the combined platform.* (Figures are annualised; `coupon_rate` is per-observation × 2 obs/year. Numbers reflect the full `CVA+FVA+KVA+MVA` charge above — the desk's default tab shows CVA+FVA only, a milder drop, until you switch KVA/MVA on.)
 
 ## 5 — The governance decision
 
