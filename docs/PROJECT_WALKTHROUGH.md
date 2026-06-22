@@ -116,7 +116,7 @@ A React trading desk with a "Counterparty & XVA" tab: pick a note, dial counterp
 - **One seam, enforced.** `integration/` is the *only* package allowed to import both worlds; the boundary is real, not aspirational.
 - **Reuse over rebuild.** The integration layer wires the vendored engine's `CVAEngine` / `KVAEngine` / `MVAEngine` / `CSAEngine` / `BACVAEngine` rather than reimplementing them — it owns the *seam*, not the analytics.
 - **Honest scope.** A `REAL / FAITHFUL / STUBBED / SKIPPED` contract names exactly what's production-shaped vs simplified vs out of scope.
-- **Quality gates.** ~270 tests, ~88% coverage, ruff + mypy clean across 100+ files, CI on Python *and* the frontend.
+- **Quality gates.** ~280 tests, ~88% coverage, ruff + mypy clean across 100+ files, CI on Python *and* the frontend.
 
 ## What's deliberately out of scope (have these ready)
 Jointly-simulated (vs parametric) wrong-way risk, full **FRTB-CVA** regulatory capital, term-structure funding curves everywhere, and the entire **rates/swap** asset class (Hull-White, swaptions) — all served by the vendored engine directly, not forced through the equity seam.
