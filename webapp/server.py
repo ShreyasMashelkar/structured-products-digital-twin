@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import date, timedelta
 from math import exp
+from typing import cast
 
 import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -35,6 +36,7 @@ from integration import (
     exposure_metrics,
     note_exposure,
     saccr_ead_equity,
+    solve_coupon_all_in,
     stress_xva,
     term_structure_credit_curve,
     xva_charge,
@@ -261,6 +263,7 @@ def price(req: PriceRequest) -> dict:
 # isn't in the cached payload); year-fraction tenors make the anchor date immaterial.
 _CURVE_TAUS = (0.5, 1.0, 2.0, 3.0, 5.0)
 _SPREAD_SWEEP_BPS = (0.0, 50.0, 100.0, 150.0, 200.0, 300.0, 400.0, 600.0, 800.0)
+_COUPON_PRODUCTS = {"autocallable", "brc", "reverse_convertible"}  # notes the coupon can be solved for
 
 
 def _flat_curve(rate: float) -> SpdtCurveAsOIS:
@@ -382,6 +385,41 @@ def xva(req: XvaRequest) -> dict:
         for row in stress_xva(pkg, credit)
     ]
 
+    # The all-in coupon (the punchline): re-solve the coupon to par, then to par − XVA, and report
+    # both annualised. Only for coupon-bearing notes; uses the full charge knobs.
+    all_in = None
+    if req.product_type in _COUPON_PRODUCTS:
+        def _make(c: float) -> Product:
+            return _build_product(
+                PriceRequest(product_type=req.product_type, notional=req.notional,
+                             observation_times=req.observation_times, maturity=req.maturity,
+                             params={**req.params, "coupon_rate": c}),
+                spot,
+            )
+
+        def _price(c: float) -> float:
+            return price_mc(_make(c), model, n_paths=12_000, seed=7).price
+
+        def _expo(c: float):
+            p = note_exposure(_make(c), model, ois, funding, time_grid=grid,
+                              n_paths=8_000, seed=7, counterparty_id=req.counterparty)
+            return collateralise(p, CSA(threshold=req.csa_threshold, mpor_days=req.mpor_days)) \
+                if req.collateralised else p
+
+        try:
+            res = solve_coupon_all_in(
+                _price, _expo, credit, par=req.notional, fee=margin, bracket=(0.0, 0.30),
+                funding_spread_bp=req.funding_spread_bp, own_credit_curve=own_credit,
+                cost_of_capital=req.cost_of_capital, include_mva=req.include_mva, wwr_beta=req.wwr_beta,
+            )
+            ppy = max(round(len(req.observation_times) / mat) if req.observation_times and mat else 1, 1)
+            cb = cast(float, res["coupon_base"]) * ppy
+            ca = cast(float, res["coupon_all_in"]) * ppy
+            all_in = {"coupon_base_pa": cb, "coupon_all_in_pa": ca,
+                      "drop_bp": (cb - ca) * 1e4, "periods_per_year": ppy, "infeasible": False}
+        except Exception:  # XVA too large to price with a non-negative coupon
+            all_in = {"infeasible": True}
+
     return {
         "charge": {k: charge[k] for k in ("cva", "fva", "dva", "kva", "mva", "total")},
         "metrics": {"ead": metrics["EAD"], "pfe": metrics["PFE"], "epe": metrics["EPE"],
@@ -394,6 +432,7 @@ def xva(req: XvaRequest) -> dict:
         "limit_status": decision["Limit_Status"],
         "trade_raroc": decision["Trade_RAROC"],
         "margin": margin,
+        "all_in": all_in,
         "collateralised": req.collateralised,
         "profile": profile,
         "spread_curve": spread_curve,
