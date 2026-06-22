@@ -1033,6 +1033,59 @@ any single pricer.
 
 ---
 
+# Part XIII — XVA / Counterparty Credit Risk
+
+## XIII.1 "Why couple the two desks at exposure, not the product model?"
+Exposure (a path × time NPV cube) is the **one thing XVA needs from SPDT and the narrowest sufficient
+interface**. Coupling there — and nowhere else (ADR-0007) — lets each desk's product modelling evolve
+freely. `integration/` is the only package allowed to import both worlds; it *reuses* the engine's
+`CVAEngine`/`KVAEngine`/`MVAEngine`/`CSAEngine`/`BACVAEngine` rather than rebuilding analytics.
+
+## XIII.2 "How do you compute the exposure of a path-dependent note?"
+**Mark-to-future**: the note's NPV on every path at every future date. European is exact BSM;
+path-dependent notes use **Longstaff–Schwartz** continuation-value regression — because EE puts a
+`max(·,0)` *outside* the conditional expectation, so using a single pathwise realisation biases it up
+(Jensen). An autocallable's EE **builds then collapses at each autocall date** as redeemed paths leave
+the book — the signature you should be able to draw.
+
+## XIII.3 "Walk through the full charge."
+`total = CVA + FVA + KVA + MVA − DVA`. **CVA** = LGD·Σ EE·ΔPD·DF (unilateral by default). **FVA** =
+funding the EPE at the issuer spread. **KVA** = cost of capital over the life. **MVA** = funding the
+99%/10-day initial margin. **DVA** = the mirror benefit on the *negative* exposure — zero for a long
+note (one-sided exposure), non-zero for a two-sided instrument like a swap.
+
+## XIII.4 "EAD — economic vs regulatory?"
+Economic **EAD = α·EEPE** off the cube, where EEPE is the time-average of *effective* EE (running max)
+over `[0, min(1y, maturity)]` (Basel caps the window at a year). Regulatory **SA-CCR EAD** = α·(RC +
+PFE add-on) with **equity** supervisory factors (32% single-name / 20% index) — supervisory-factor
+driven, deliberately *ignoring* your MC. Capital likewise two ways: **ASRF** economic capital vs
+**BA-CVA** regulatory capital.
+
+## XIII.5 "Collateral and wrong-way risk?"
+A **CSA** (threshold / MTA / **MPoR**) reduces residual exposure to the close-out gap over the margin
+period of risk; on a coarse grid the close-out is variance-corrected. **Wrong-way risk** = exposure
+correlated with the counterparty's default; here a parametric exponential (Esscher) tilt raises CVA,
+vs the engine's fuller jointly-simulated copula version for its swap book.
+
+## XIII.6 "What's CS01? JTD?"
+**CS01** = ΔCVA per +1bp of the counterparty curve (the CVA desk's hedge ratio), by bump-and-revalue.
+**JTD** = the loss if the counterparty defaults *now*, `LGD·current exposure`, net of the CVA reserve.
+
+## XIII.7 "The all-in price — the punchline."
+Fairness becomes `PV = par − fee − XVA`, so the offerable coupon is re-solved against the lower target
+and **falls as the counterparty's spread widens** — e.g. 7.25% → 1.09% p.a. at 300bp (full
+CVA+FVA+KVA+MVA). At an extreme spread no positive coupon prices the note fairly — an honest "this
+trade can't be done." Then the **governance gate** (limit check on EAD/PFE + RAROC vs hurdle) returns
+APPROVED / REJECTED / MANUAL_REVIEW.
+
+## XIII.8 "Where does live data come from?" (CCR-relevant: counterparty CDS)
+Default is a reproducible **synthetic** snapshot; opt-in live is NSE **EOD bhavcopy** (walks back to
+the latest published file) or an authenticated **Dhan** intraday API. Public NSE *scraping* (nsepython)
+was tried and removed — NSE hard-blocks it. Rates from FBIL. Counterparty CDS is an input you set on
+the XVA tab — it's the *credit* of the party, separate from the client's investment brief.
+
+---
+
 ## Final advice (from the spec)
 
 > Build a **one-page derivation card** for each item above and rehearse them **out loud**. The honest
