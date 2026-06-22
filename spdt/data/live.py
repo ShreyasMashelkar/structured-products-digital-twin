@@ -12,6 +12,7 @@ from datetime import date
 
 from spdt.core.snapshot import MarketSnapshot
 from spdt.data.ingest import RawMarketData
+from spdt.data.ingest.dhan import DhanSource
 from spdt.data.ingest.fbil import fetch_fbil_ois_instruments
 from spdt.data.ingest.nse_bhavcopy import NseBhavcopySource
 from spdt.data.snapshot_builder import build_snapshot
@@ -24,19 +25,34 @@ def fetch_live_raw(
     dividend_yield: float = 0.013,
     funding_spread: float = 0.012,
     timeout: float = 30.0,
+    source: str = "bhavcopy",
 ) -> RawMarketData:
     """Fetch the raw live market data (NSE option chain + FBIL-bootstrapped rates) for ``as_of``.
 
-    Hits the network. The NSE F&O bhavcopy source walks back to the latest *published* EOD file, so
-    this works any time of day (mid-session it serves the previous close). Exposed separately from
-    :func:`build_live_snapshot` so callers that also need the raw option chain (e.g. surface
-    calibration) don't have to fetch it twice.
+    Hits the network. ``source`` picks the option-chain engine:
+
+    * ``"bhavcopy"`` (default) — NSE's public EOD F&O bhavcopy; walks back to the latest *published*
+      file, so it works any time of day (mid-session it serves the previous close).
+    * ``"dhan"`` — DhanHQ's live intraday option-chain API (needs ``DHAN_CLIENT_ID`` /
+      ``DHAN_ACCESS_TOKEN``); an authenticated broker feed, so it isn't IP-blocked like the public
+      NSE endpoints.
+
+    Both pair with FBIL-bootstrapped rates. Exposed separately from :func:`build_live_snapshot` so
+    callers that also need the raw option chain (e.g. surface calibration) don't have to refetch.
     """
     _, rate_instruments = fetch_fbil_ois_instruments(anchor=as_of, timeout=timeout)
-    engine = NseBhavcopySource(
-        dividend_yield=dividend_yield, funding_spread=funding_spread,
-        rate_instruments=rate_instruments, timeout=timeout,
-    )
+    if source == "dhan":
+        engine: NseBhavcopySource | DhanSource = DhanSource(
+            dividend_yield=dividend_yield, funding_spread=funding_spread,
+            rate_instruments=rate_instruments, timeout=timeout,
+        )
+    elif source == "bhavcopy":
+        engine = NseBhavcopySource(
+            dividend_yield=dividend_yield, funding_spread=funding_spread,
+            rate_instruments=rate_instruments, timeout=timeout,
+        )
+    else:
+        raise ValueError(f"unknown live source {source!r} (use 'bhavcopy' or 'dhan')")
     return engine.fetch(as_of, underlying)
 
 
