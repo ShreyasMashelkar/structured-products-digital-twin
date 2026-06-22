@@ -88,7 +88,7 @@ to rehearse from first principles. Build a one-page derivation card for each.
 - **Collateral**: how a CSA (threshold/MTA/**MPoR**) reduces residual exposure to the close-out gap; why a coarse grid needs a variance-corrected close-out.
 - **Wrong-way risk**: why correlation of exposure with the counterparty's default raises CVA; parametric (Esscher tilt) vs jointly-simulated intensity.
 - **CS01 / JTD**: the CVA desk's two first-order credit risks and how each is hedged.
-- The **all-in price**: why fairness becomes `PV = par − fee − XVA`, so the offerable coupon falls as the counterparty's spread widens (3.62% → 0.55% at 300bp).
+- The **all-in price**: why fairness becomes `PV = par − fee − XVA`, so the offerable coupon falls as the counterparty's spread widens (7.25% → 1.09% p.a. at 300bp, full CVA+FVA+KVA+MVA).
 - **Governance**: limit check on EAD/PFE + RAROC vs hurdle → APPROVED / REJECTED / MANUAL_REVIEW.
 
 ## Market-data sourcing (L1, live)
