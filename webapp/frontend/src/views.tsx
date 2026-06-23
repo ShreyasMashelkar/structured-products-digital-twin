@@ -133,7 +133,7 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
       <Panel className="p-4">
         <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
           <Slider label="Target annual coupon" value={tc} min={0.04} max={0.2} step={0.01} onChange={setTc} display={pct(tc, 0)} />
-          <Slider label="Downside they can stomach" value={dd} min={0.1} max={0.5} step={0.05} onChange={setDd} display={pct(dd, 0)} />
+          <Slider label="Protection buffer" value={dd} min={0.1} max={0.5} step={0.05} onChange={setDd} display={`${pct(dd, 0)} → KI ${pct(1 - dd, 0)}`} />
           <Slider label="Maturity (years)" value={mat} min={1} max={3} step={1} onChange={setMat} display={`${mat}y`} />
           <Slider label="Observations / year" value={obs} min={2} max={12} step={2} onChange={setObs} display={`${obs}`} />
           <Slider label="Placement fee" value={fee} min={0} max={3} step={0.25} onChange={setFee} display={`${fee.toFixed(2)}`} />
@@ -153,7 +153,7 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
               <div className="tnum mt-1 text-hero font-bold leading-none text-ink">{pct(res.solved_annual_coupon, 2)}<span className="ml-1.5 text-figure font-medium text-muted">p.a.</span></div>
               <div className="mt-1.5 text-[12px] text-muted">vs indicative {pct(res.indicative_annual_coupon, 2)} · model PV <span className="tnum text-ink">{fmt(res.achieved_pv ?? 0, 2)}</span></div>
               <div className={cn("mt-3 rounded-lg border px-3 py-2 text-[12px]", res.achievable ? "border-up/30 bg-up/5 text-up" : "border-down/30 bg-down/5 text-down")}>
-                {res.achievable ? `The client's ${pct(tc, 0)} ask is achievable at this knock-in.` : `The client's ${pct(tc, 0)} ask needs a lower knock-in or more downside sold.`}
+                {res.achievable ? `The client's ${pct(tc, 0)} ask is achievable at this knock-in.` : `The client's ${pct(tc, 0)} ask needs a higher knock-in (a smaller protection buffer) — the client must take on more downside risk to fund it.`}
               </div>
               <button onClick={addToBook}
                 className="ring-desk mt-3 w-full rounded-lg border border-accent/60 bg-accent/15 px-3 py-2 text-body font-semibold text-accent transition-colors hover:bg-accent/25">
