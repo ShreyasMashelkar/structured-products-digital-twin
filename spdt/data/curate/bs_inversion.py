@@ -125,12 +125,28 @@ class IVPoint:
     implied_vol: float
 
 
-def invert_chain(raw: RawMarketData, ois_curve: Curve) -> list[IVPoint]:
+def invert_chain(
+    raw: RawMarketData,
+    ois_curve: Curve,
+    *,
+    moneyness_band: float | None = None,
+    iv_bounds: tuple[float, float] | None = None,
+) -> list[IVPoint]:
     """Invert every option settlement print in ``raw`` to an :class:`IVPoint`.
 
     The forward and discount come from the snapshot's OIS curve and the raw dividend yield:
     ``F = S·exp((r−q)·T)`` with ``r`` the OIS zero to expiry. Quotes that fail the
     no-arbitrage bounds (stale/crossed settlements) are skipped rather than aborting the day.
+
+    Two optional **liquidity filters** keep noisy deep-wing settlement quotes out of the surface
+    calibration (real EOD chains are dense with stale far strikes that inject static arbitrage):
+
+    * ``moneyness_band`` — keep only ``|log(K/F)| ≤ band·√τ`` (a √time-scaled band, so it is wider
+      for longer expiries where the smile genuinely spans more); ``None`` keeps every strike.
+    * ``iv_bounds`` — drop inverted vols outside ``(lo, hi)`` (clearly bad prints); ``None`` keeps all.
+
+    Defaults are ``None`` (no filtering) so synthetic/offline runs are unchanged; the live desk path
+    passes both.
     """
     points: list[IVPoint] = []
     for q in raw.option_chain:
@@ -140,12 +156,15 @@ def invert_chain(raw: RawMarketData, ois_curve: Curve) -> list[IVPoint]:
         rate = ois_curve.zero_rate(q.expiry)
         forward = raw.spot * exp((rate - raw.dividend_yield) * tau)
         discount = ois_curve.discount_factor(q.expiry)
+        log_moneyness = log(q.strike / forward)
+        if moneyness_band is not None and abs(log_moneyness) > moneyness_band * sqrt(tau):
+            continue  # deep wing — illiquid/stale settlement, drop before it pollutes the surface
         try:
             iv = implied_vol(q.settlement_price, forward, q.strike, tau, discount, q.is_call)
         except ValueError:
             continue
-        points.append(
-            IVPoint(q.expiry, q.strike, q.is_call, log(q.strike / forward), tau, iv)
-        )
+        if iv_bounds is not None and not (iv_bounds[0] <= iv <= iv_bounds[1]):
+            continue  # implausible inverted vol from a crossed/stale print
+        points.append(IVPoint(q.expiry, q.strike, q.is_call, log_moneyness, tau, iv))
     return points
 

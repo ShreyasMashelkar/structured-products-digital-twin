@@ -27,7 +27,7 @@ from spdt.data.ingest.synthetic import SyntheticSource
 from spdt.hedging import simulate_delta_hedge
 from spdt.modelrisk import model_gap_reserve, vol_bid_offer_reserve
 from spdt.pnl import attribute
-from spdt.core.types import Curve
+from spdt.core.types import Curve, year_fraction
 from spdt.pricing import (
     BlackScholes,
     Discounter,
@@ -53,6 +53,28 @@ from spdt.vol import VolSurface
 # wants determinism (the synthetic source is date-agnostic; this only labels the snapshot).
 DEFAULT_SYNTHETIC_AS_OF = date(2024, 6, 17)
 _DT = 1.0 / 252.0
+
+
+# Live-surface liquidity filter: real EOD chains carry ~18 expiries (many thin, far-dated) and deep
+# wings whose stale settlement IVs inject large static arbitrage. We calibrate only on liquid quotes.
+_LIVE_BAND = 0.8                  # keep |log(K/F)| ≤ band·√τ
+_LIVE_IV_BOUNDS = (0.03, 1.5)     # drop implausibly inverted vols
+_LIVE_MIN_STRIKES = 40            # an expiry needs this many liquid strikes to be calibrated on
+_LIVE_MAX_EXPIRIES = 6            # nearest N liquid expiries
+_LIVE_MIN_TENOR = 10.0 / 365.0    # skip ~same-day expiries (numerically unstable)
+
+
+def _liquid_iv_points(raw, ois_curve: Curve):
+    """IV points for a *live* surface — liquid moneyness band, sane IV bounds, and only the nearest
+    well-populated expiries (drops thin far-dated/weekly slices that wreck the SSVI fit)."""
+    pts = invert_chain(raw, ois_curve, moneyness_band=_LIVE_BAND, iv_bounds=_LIVE_IV_BOUNDS)
+    by_expiry: dict = {}
+    for p in pts:
+        if year_fraction(raw.date, p.expiry) >= _LIVE_MIN_TENOR:
+            by_expiry.setdefault(p.expiry, []).append(p)
+    liquid = {e: v for e, v in by_expiry.items() if len(v) >= _LIVE_MIN_STRIKES}
+    keep = sorted(liquid)[:_LIVE_MAX_EXPIRIES]
+    return [p for e in keep for p in liquid[e]]
 
 
 def _fetch_raw(as_of: date, *, live: bool, source: str = "bhavcopy"):
@@ -428,10 +450,13 @@ def build_desk_data(
     picks the engine — ``"bhavcopy"`` (EOD, walks back to the latest file) or ``"dhan"`` (intraday).
     """
     as_of = as_of or date.today()
-    # L1/L2 — market and arbitrage-free surface.
+    # L1/L2 — market and arbitrage-free surface. Live EOD chains carry noisy deep-wing settlement
+    # quotes that inject static arbitrage, so the live path filters to a liquid moneyness band with
+    # sane IV bounds; synthetic data is clean by construction and needs no filter.
     raw = _fetch_raw(as_of, live=live, source=source)
     snap = build_snapshot(raw)
-    surface = VolSurface.calibrate(invert_chain(raw, snap.ois_curve), "NIFTY")
+    iv_points = _liquid_iv_points(raw, snap.ois_curve) if live else invert_chain(raw, snap.ois_curve)
+    surface = VolSurface.calibrate(iv_points, "NIFTY")
     spot = snap.spots["NIFTY"]
     longest = max(surface.taus, key=lambda e: surface.taus[e])
     atm_vol = surface.implied_vol_kt(0.0, surface.taus[longest])
