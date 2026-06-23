@@ -79,23 +79,38 @@ class VolSurface:
         """Calibrate one SVI slice per expiry from inverted IV points.
 
         The forward per expiry is recovered from the points themselves
-        (``F = K·exp(−k)``), so no separate forward input is needed.
+        (``F = K·exp(−k)``), so no separate forward input is needed. ``param_model="SVI"`` fits one
+        independent SVI slice per expiry; ``"SSVI"`` fits a single Gatheral–Jacquier surface
+        (calendar-free by construction, butterfly-constrained) and emits its exact per-slice SVI
+        form — the arbitrage-free route for noisy real-market surfaces.
         """
-        if param_model != "SVI":
-            raise NotImplementedError(f"param_model {param_model!r} not supported yet (SSVI next)")
+        if param_model not in ("SVI", "SSVI"):
+            raise NotImplementedError(f"param_model {param_model!r} not supported")
 
         by_expiry: dict[date, list[IVPoint]] = {}
         for p in iv_points:
             by_expiry.setdefault(p.expiry, []).append(p)
 
+        ssvi_slices: dict[float, SVIParams] = {}
+        if param_model == "SSVI":
+            from spdt.vol.ssvi import SSVISurface
+
+            ssvi_slices = SSVISurface.calibrate(iv_points).to_svi_slices()
+
         slices: dict[date, SVIParams] = {}
         taus: dict[date, float] = {}
         forwards: dict[date, float] = {}
         for expiry, pts in by_expiry.items():
-            k = np.array([p.log_moneyness for p in pts])
-            w = total_variance_from_iv(np.array([p.implied_vol for p in pts]), pts[0].tau)
-            slices[expiry] = calibrate_svi(k, np.asarray(w))
-            taus[expiry] = pts[0].tau
+            tau = pts[0].tau
+            if param_model == "SSVI":
+                if tau not in ssvi_slices:
+                    continue  # expiry with non-positive ATM variance — skip
+                slices[expiry] = ssvi_slices[tau]
+            else:
+                k = np.array([p.log_moneyness for p in pts])
+                w = total_variance_from_iv(np.array([p.implied_vol for p in pts]), tau)
+                slices[expiry] = calibrate_svi(k, np.asarray(w))
+            taus[expiry] = tau
             forwards[expiry] = float(np.median([p.strike * exp(-p.log_moneyness) for p in pts]))
 
         ordered = sorted(slices, key=lambda e: taus[e])
