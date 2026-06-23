@@ -77,3 +77,23 @@ def test_dupire_rejects_butterfly_arbitrage():
 
     with pytest.raises(ValueError):
         dupire_local_variance(bad_w, 0.3, 0.5)
+
+
+def test_ssvi_calibration_is_arbitrage_free(iv_points):
+    """The desk's live route: calibrating a VolSurface as SSVI yields a butterfly- and
+    calendar-arbitrage-free surface (GJ conditions enforced + non-decreasing θ)."""
+    from spdt.vol import VolSurface
+
+    surf = VolSurface.calibrate(iv_points, "NIFTY", param_model="SSVI")
+    assert surf.param_model == "SSVI"
+    assert surf.arb_status.butterfly_ok and surf.arb_status.calendar_ok
+    assert surf.arb_status.is_clean
+    assert surf.arb_status.min_g >= 0.0
+
+
+def test_ssvi_to_svi_slices_round_trip_atm(iv_points):
+    """The SSVI→SVI per-slice conversion is exact: each slice's ATM total variance w(0) = θ(T)."""
+    ssvi = SSVISurface.calibrate(iv_points)
+    assert ssvi.is_butterfly_free()  # GJ enforcement held
+    for tau, svi in ssvi.to_svi_slices().items():
+        assert svi.total_variance(0.0) == pytest.approx(ssvi.theta_pillars[tau], rel=1e-9)
