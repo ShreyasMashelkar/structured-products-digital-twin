@@ -15,6 +15,7 @@ has its own closed-form parameter conditions, checked below.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -22,9 +23,36 @@ from scipy.optimize import least_squares
 
 from spdt.data.curate.bs_inversion import IVPoint
 
+if TYPE_CHECKING:
+    from spdt.vol.svi import SVIParams
+
 
 def _phi(theta: NDArray | float, eta: float, gamma: float) -> NDArray | float:
     return eta / np.power(theta, gamma)
+
+
+def _no_arb_eta(
+    rho: float, eta: float, gamma: float, theta_pillars: dict[float, float], *, margin: float = 0.02
+) -> float:
+    """Largest ``η' ≤ η`` for which the Gatheral–Jacquier butterfly conditions hold at all pillars.
+
+    With ``φ = η·θ^(−γ)`` the two conditions ``θφ(1+|ρ|) < 4`` and ``θφ²(1+|ρ|) ≤ 4`` scale as ``η``
+    and ``η²`` respectively, so a single closed-form down-scale (the tighter of the two) makes both
+    hold with a small margin. Returns ``η`` unchanged when already satisfied.
+    """
+    thetas = np.array([t for t in theta_pillars.values() if t > 0.0])
+    if thetas.size == 0:
+        return eta
+    s = 1.0 + abs(rho)
+    target = 4.0 * (1.0 - margin)
+    c1 = eta * s * float(np.max(thetas ** (1.0 - gamma)))           # θφ(1+|ρ|) at the binding pillar
+    c2 = eta * eta * s * float(np.max(thetas ** (1.0 - 2.0 * gamma)))  # θφ²(1+|ρ|)
+    factor = 1.0
+    if c1 > target:
+        factor = min(factor, target / c1)
+    if c2 > target:
+        factor = min(factor, (target / c2) ** 0.5)
+    return eta * factor
 
 
 @dataclass(frozen=True)
@@ -112,4 +140,30 @@ class SSVISurface:
             max_nfev=2000,
         )
         rho, eta, gamma = sol.x
+        # Enforce the Gatheral–Jacquier butterfly conditions: scale η down (which shrinks φ) until
+        # both θφ(1+|ρ|) < 4 and θφ²(1+|ρ|) ≤ 4 hold at every pillar. A no-op when the unconstrained
+        # fit is already arb-free (clean/synthetic data), so it only bites on noisy real surfaces.
+        eta = _no_arb_eta(rho, float(eta), gamma, theta_pillars)
         return cls(rho=rho, eta=eta, gamma=gamma, theta_pillars=theta_pillars)
+
+    def to_svi_slices(self) -> dict[float, "SVIParams"]:
+        """Convert each expiry to its exact raw-SVI form — SSVI is SVI per slice with
+        ``b = θφ/2``, ``m = −ρ/φ``, ``σ = √(1−ρ²)/φ``, ``a = (θ/2)(1−ρ²)``. Because the SSVI is
+        GJ-constrained (butterfly-free) and θ non-decreasing (calendar-free), these slices pass the
+        Durrleman/calendar checks — the route to an arbitrage-free desk surface from real data."""
+        from spdt.vol.svi import SVIParams
+
+        out: dict[float, SVIParams] = {}
+        for tau, theta in self.theta_pillars.items():
+            if theta <= 0.0:
+                continue
+            p = float(_phi(theta, self.eta, self.gamma))
+            root = float(np.sqrt(max(1.0 - self.rho**2, 0.0)))
+            out[tau] = SVIParams(
+                a=0.5 * theta * (1.0 - self.rho**2),
+                b=0.5 * theta * p,
+                rho=self.rho,
+                m=-self.rho / p,
+                sigma=root / p,
+            )
+        return out

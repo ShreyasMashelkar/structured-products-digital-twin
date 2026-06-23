@@ -455,8 +455,12 @@ def build_desk_data(
     # sane IV bounds; synthetic data is clean by construction and needs no filter.
     raw = _fetch_raw(as_of, live=live, source=source)
     snap = build_snapshot(raw)
-    iv_points = _liquid_iv_points(raw, snap.ois_curve) if live else invert_chain(raw, snap.ois_curve)
-    surface = VolSurface.calibrate(iv_points, "NIFTY")
+    # Live: liquid quotes + the arbitrage-free SSVI calibration (real settlement data needs both).
+    # Synthetic: per-slice SVI on the clean generated smile (already arb-free, keeps the fast path).
+    if live:
+        surface = VolSurface.calibrate(_liquid_iv_points(raw, snap.ois_curve), "NIFTY", param_model="SSVI")
+    else:
+        surface = VolSurface.calibrate(invert_chain(raw, snap.ois_curve), "NIFTY")
     spot = snap.spots["NIFTY"]
     longest = max(surface.taus, key=lambda e: surface.taus[e])
     atm_vol = surface.implied_vol_kt(0.0, surface.taus[longest])
