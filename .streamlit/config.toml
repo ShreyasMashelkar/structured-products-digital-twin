@@ -1,0 +1,16 @@
+# Streamlit Community Cloud picks up this config automatically.
+# Theme matches the desk's dark terminal palette (spdt/dashboard/theme.py).
+[theme]
+base = "dark"
+backgroundColor = "#090B10"
+secondaryBackgroundColor = "#12161F"
+textColor = "#EAEEF5"
+primaryColor = "#F2C14E"
+
+[server]
+headless = true
+enableXsrfProtection = true
+enableCORS = false
+
+[browser]
+gatherUsageStats = false
