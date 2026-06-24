@@ -1,0 +1,18 @@
+# Build artifacts and local cruft that must not enter the image build context.
+.git
+**/node_modules
+webapp/frontend/dist
+**/__pycache__
+**/*.pyc
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+.venv
+venv
+**/.DS_Store
+tests
+notebooks
+dashboard_data
+*.parquet
+xva/data/exposure_cube.parquet
