@@ -1,0 +1,15 @@
+# Runtime dependencies for hosting the Streamlit desk (spdt/dashboard/app.py)
+# on Streamlit Community Cloud. This is the lean closure the synthetic dashboard
+# path actually loads; pip resolves transitive deps (dateutil, pytz, markupsafe…).
+# The heavier engine extras (numba, duckdb, jax, fastapi) are intentionally omitted
+# because the dashboard does not import them.
+streamlit>=1.32
+plotly>=5.20
+numpy>=1.26
+scipy>=1.12
+pandas>=2.2
+pyarrow>=15.0
+pydantic>=2.6
+jinja2>=3.1
+requests>=2.31
+certifi>=2024.2
