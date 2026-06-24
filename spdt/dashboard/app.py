@@ -11,6 +11,14 @@ only. Run with::
 from __future__ import annotations
 
 import dataclasses
+import sys
+from pathlib import Path
+
+# When launched as `streamlit run spdt/dashboard/app.py` (e.g. on Streamlit
+# Community Cloud), only this script's folder is on sys.path, not the repo root,
+# so `import spdt` would fail. Put the repo root first so the package — and the
+# sibling `integration`/`xva` trees — resolve exactly as in a local checkout.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
 import plotly.graph_objects as go
