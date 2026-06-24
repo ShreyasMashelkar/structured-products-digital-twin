@@ -440,3 +440,17 @@ def xva(req: XvaRequest) -> dict:
         "inputs": {"cds_spread_bps": req.cds_spread_bps, "recovery_rate": req.recovery_rate,
                    "funding_spread_bp": req.funding_spread_bp, "hurdle_rate": req.hurdle_rate},
     }
+
+
+# --- static front end -----------------------------------------------------------------------
+# In production a single process serves the built React app (webapp/frontend/dist) at "/", so
+# the SPA and its relative /api/* calls are same-origin (no CORS, no token needed). Mounted
+# LAST so every /api/* route declared above still takes precedence over this catch-all. A no-op
+# in dev, where there is no dist and Vite serves the UI on :5173 and proxies /api back here.
+from pathlib import Path  # noqa: E402
+
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
+if _DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="spa")
