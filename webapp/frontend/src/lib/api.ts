@@ -38,14 +38,32 @@ export interface Desk {
   };
 }
 
+export interface StructureCandidate {
+  product_type: string;
+  label: string;
+  rationale: string;
+  fit_score: number;
+}
+
 export interface StructureResult {
-  knock_in: number;
-  indicative_annual_coupon: number;
+  product_type: string;
+  label: string;
+  rationale: string;
+  solve_for: string; // "coupon" | "participation"
   solved_annual_coupon: number | null;
+  solved_participation: number | null;
+  solved_display: string | null;
+  indicative_annual_coupon: number | null;
   achieved_pv: number | null;
   target_pv: number;
-  pv_curve: { annual_coupon: number; pv: number }[];
   achievable: boolean;
+  knock_in: number | null;
+  book_params: Record<string, any>;
+  book_observation_times: number[];
+  book_maturity: number;
+  x_label: string;
+  pv_curve: { x: number; pv: number }[];
+  alternatives: StructureCandidate[];
 }
 
 export interface PriceRequest {
@@ -145,6 +163,9 @@ export async function solveStructure(body: {
   maturity: number;
   obs_per_year: number;
   fee?: number;
+  objective?: string;
+  prefer_basket?: boolean;
+  product?: string | null;
 }): Promise<StructureResult> {
   const r = await fetch("/api/structure", {
     method: "POST",

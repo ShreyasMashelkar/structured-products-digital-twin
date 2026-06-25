@@ -4,7 +4,15 @@ import pytest
 
 from spdt.pricing import BlackScholes, price_mc
 from spdt.products import Autocallable
-from spdt.structurer import ClientBrief, par_target, propose_autocallable, solve_to_par
+from spdt.structurer import (
+    ClientBrief,
+    ClientObjective,
+    SolveFor,
+    par_target,
+    propose_autocallable,
+    recommend,
+    solve_to_par,
+)
 
 MODEL = BlackScholes(spot=100.0, r=0.03, q=0.0, sigma=0.25)
 OBS = (0.25, 0.5, 0.75, 1.0)
@@ -56,3 +64,26 @@ def test_proposer_maps_brief_to_phoenix():
     assert ts.params["coupon_rate"] == pytest.approx(0.02)  # 8% annual / 4 obs
     # The proposed structure is priceable end to end.
     assert price_mc(Autocallable.from_termsheet(ts), MODEL, n_paths=20_000, seed=6).price > 0.0
+
+
+def test_recommender_matches_objective_to_product():
+    # Each client objective should surface the product family a desk would actually pitch.
+    income = recommend(ClientBrief(0.10, 0.30, objective=ClientObjective.INCOME))
+    assert income[0].proposal.product_type == "autocallable"
+    protection = recommend(ClientBrief(0.05, 0.10, objective=ClientObjective.PROTECTION))
+    assert protection[0].proposal.product_type == "capital_protected"
+    assert protection[0].proposal.solve_for == SolveFor.PARTICIPATION
+    yield_basket = recommend(
+        ClientBrief(0.14, 0.35, objective=ClientObjective.YIELD_ENHANCED, prefer_basket=True)
+    )
+    assert yield_basket[0].proposal.product_type == "worst_of"
+
+
+def test_recommender_covers_all_families_with_rationale():
+    ranked = recommend(ClientBrief(0.12, 0.30))
+    kinds = {r.proposal.product_type for r in ranked}
+    assert kinds == {"autocallable", "brc", "worst_of", "capital_protected"}
+    # Ranked best-first, every candidate carries a non-empty rationale and a 0–1 fit score.
+    scores = [r.fit_score for r in ranked]
+    assert scores == sorted(scores, reverse=True)
+    assert all(r.rationale and 0.0 <= r.fit_score <= 1.0 for r in ranked)
