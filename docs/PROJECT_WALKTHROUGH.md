@@ -63,7 +63,7 @@ Rates always bootstrap from **FBIL** (India's OIS benchmark). *Snapshot in, repo
 A private-bank client: *"~12% annual income, can stomach a 30% drop, 2-year horizon."* That's a **client brief**.
 
 ### Stage 2 — Propose a structure
-The **structurer** maps the brief to a **Phoenix autocallable** — memory coupon above a barrier, early redemption ("autocall") above 100%, capital at risk only if a 60% knock-in breaks. The client is effectively *selling a deep down-and-in put*, and that premium funds the coupon.
+The **Originate recommender** scores every product family against the brief and ranks them best-first, each with a plain-English rationale (the desk shows the winner *and* the runners-up). For this income-with-downside-buffer brief the best fit is a **Phoenix autocallable** — memory coupon above a barrier, early redemption ("autocall") above 100%, capital at risk only if a 60% knock-in breaks. The client is effectively *selling a deep down-and-in put*, and that premium funds the coupon.
 
 ### Stage 3 — Price it
 **Monte Carlo** under the desk model (BS here; also Heston / local vol / LSV). Path-dependent features (autocall, memory, knock-in) evaluated path by path; **two-curve discounting** (OIS for the option leg, OIS+funding for the issuer leg).

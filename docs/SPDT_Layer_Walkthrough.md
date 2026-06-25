@@ -872,9 +872,14 @@ A single free parameter → **1-D root find (Brent)**. Multiple → constrained 
 client fixes all-but-one ("I want 12% — what KI does that imply?"). The solver is well-posed because
 **PV is monotone in the coupon** (more coupon → higher PV), so there's a unique root.
 
-## The proposer (objective → structure)
+## The Originate recommender (objective → best-fit structure)
 
-| Client says | Likely structure |
+The desk doesn't start from a product name — it starts from what the client *wants*. `recommend()`
+scores **every** product family against the brief (objective + downside tolerance + horizon),
+returns them **best-first** with a `fit_score` and a plain-English rationale, and solves the winner
+to par. The front office sees the recommended structure *and* the ranked alternatives it could pitch:
+
+| Client says | Best-fit structure |
 |---|---|
 | "12% coupon, can stomach 30% down" | Phoenix / autocallable with KI ≈ 70 |
 | "capital protection + some upside" | capital-protected note = zero-coupon bond + call participation |
@@ -1140,9 +1145,11 @@ reserves, top risk concentrations and contributors, latest stress results. *(Bui
 
 ## How it works
 
-**Streamlit** (MVP) reading the marks/positions/attribution stores; **FastAPI + a small React front
-end** if you go advanced. Design it to look like a **desk blotter**, not a homework plot: dark,
-dense, tabular, with a "drill into trade" path.
+**FastAPI + a React front end** is the primary desk now (the Streamlit MVP still reads the
+marks/positions/attribution stores). It ships as a **single Docker image** — the React build and
+the FastAPI engine served from one uvicorn process (same-origin `/api`) on port 7860, deployable to
+**Hugging Face Spaces** or anywhere Docker runs. Designed to look like a **desk blotter**, not a
+homework plot: dark, dense, tabular, with a "drill into trade" path.
 
 ## What it should surface first
 
