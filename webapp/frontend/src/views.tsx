@@ -88,12 +88,21 @@ export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: 
 
 /* ======================= Originate ======================= */
 
+const OBJECTIVES: { key: string; label: string; hint: string }[] = [
+  { key: "income", label: "Income", hint: "a coupon, range-bound view, can take some downside" },
+  { key: "yield_enhanced", label: "Yield +", hint: "the highest coupon, willing to sell more risk" },
+  { key: "protection", label: "Protection", hint: "preserve capital first, upside second" },
+];
+
 export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onStage: (t: Trade) => void; volShiftPct?: number }) {
   const [tc, setTc] = useState(0.12);
   const [dd, setDd] = useState(0.3);
   const [mat, setMat] = useState(1);
   const [obs, setObs] = useState(4);
   const [fee, setFee] = useState(1);
+  const [objective, setObjective] = useState("income");
+  const [preferBasket, setPreferBasket] = useState(false);
+  const [activeProduct, setActiveProduct] = useState<string | null>(null); // null ⇒ use the recommendation
   const [res, setRes] = useState<StructureResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [staged, setStaged] = useState(false);
@@ -102,22 +111,23 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
     let cancel = false;
     setLoading(true);
     const id = setTimeout(() => {
-      solveStructure({ target_coupon: tc, max_downside: dd, maturity: mat, obs_per_year: obs, fee })
+      solveStructure({ target_coupon: tc, max_downside: dd, maturity: mat, obs_per_year: obs, fee, objective, prefer_basket: preferBasket, product: activeProduct })
         .then((r) => !cancel && setRes(r)).finally(() => !cancel && setLoading(false));
     }, 250);
     return () => { cancel = true; clearTimeout(id); };
-  }, [tc, dd, mat, obs, fee]);
+  }, [tc, dd, mat, obs, fee, objective, preferBasket, activeProduct]);
+
+  // Changing the objective or basket appetite re-opens the recommendation (drops any manual override).
+  function pickObjective(k: string) { setObjective(k); setActiveProduct(null); }
+  function toggleBasket() { setPreferBasket((b) => !b); setActiveProduct(null); }
 
   function addToBook() {
-    if (!res?.solved_annual_coupon) return;
-    const n = Math.round(mat * obs);
-    const step = 1 / obs;
-    const observation_times = Array.from({ length: n }, (_, i) => +(((i + 1) * step).toFixed(10)));
+    if (!res || (res.solved_annual_coupon == null && res.solved_participation == null)) return;
     const id = `STG-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
     onStage({
-      trade_id: id, product_type: "autocallable", label: productLabel("autocallable"),
-      notional: 100, observation_times, maturity: mat, staged: true,
-      params: { coupon_rate: res.solved_annual_coupon / obs, autocall_level: 1.0, coupon_barrier: res.knock_in, knock_in: res.knock_in, memory: true },
+      trade_id: id, product_type: res.product_type, label: productLabel(res.product_type),
+      notional: 100, observation_times: res.book_observation_times, maturity: res.book_maturity,
+      staged: true, pv: res.achieved_pv ?? undefined, params: res.book_params,
     });
     setStaged(true);
     setTimeout(() => setStaged(false), 2200);
@@ -126,11 +136,31 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
   const curve = res?.pv_curve ?? [];
   const lo = curve.length ? Math.floor(Math.min(...curve.map((c) => c.pv))) : 90;
   const hi = curve.length ? Math.ceil(Math.max(...curve.map((c) => c.pv))) : 110;
+  const isCoupon = res?.solve_for === "coupon";
+  const solved = isCoupon ? res?.solved_annual_coupon : res?.solved_participation;
+  const isRecommended = res != null && activeProduct == null;
 
   return (
     <div className="space-y-4">
-      <SectionTitle>Client brief → proposed structure → solve to par → book</SectionTitle>
-      <Panel className="p-4">
+      <SectionTitle>Client brief → recommended structure → solve to par → book</SectionTitle>
+      <Panel className="space-y-4 p-4">
+        <div className="flex flex-wrap items-end gap-4">
+          <div>
+            <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">Client objective</div>
+            <div className="flex gap-1 rounded-lg border border-border bg-panel2/50 p-1">
+              {OBJECTIVES.map((o) => (
+                <button key={o.key} onClick={() => pickObjective(o.key)} title={`Wants ${o.hint}`}
+                  className={cn("ring-desk rounded-md px-3 py-1.5 text-[12px] font-semibold transition-colors", objective === o.key ? "bg-accent/20 text-accent" : "text-muted hover:text-ink")}>
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <button onClick={toggleBasket} title="Pitch a worst-of basket to fund a higher coupon"
+            className={cn("ring-desk rounded-lg border px-3 py-2 text-[12px] font-semibold transition-colors", preferBasket ? "border-accent/60 bg-accent/15 text-accent" : "border-border text-muted hover:text-ink")}>
+            {preferBasket ? "✓ " : ""}Open to a basket (worst-of)
+          </button>
+        </div>
         <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
           <Slider label="Target annual coupon" value={tc} min={0.04} max={0.2} step={0.01} onChange={setTc} display={pct(tc, 0)} />
           <Slider label="Protection buffer" value={dd} min={0.1} max={0.5} step={0.05} onChange={setDd} display={`${pct(dd, 0)} → KI ${pct(1 - dd, 0)}`} />
@@ -142,29 +172,56 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         <Panel className="p-4 lg:col-span-2">
-          <div className="mb-3 flex flex-wrap gap-1.5">
-            <Chip hot>Phoenix autocallable</Chip>
-            <Chip>knock-in {res ? pct(res.knock_in, 0) : "—"}</Chip>
-            <Chip>memory coupon</Chip>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="text-[15px] font-bold text-ink">{res?.label ?? "—"}</span>
+            {isRecommended && <span className="rounded border border-accent/50 bg-accent/10 px-1.5 py-0.5 text-micro font-bold uppercase tracking-wide text-accent">recommended</span>}
+            {res != null && !isRecommended && <button onClick={() => setActiveProduct(null)} className="ring-desk text-micro text-muted hover:text-accent">↺ back to recommended</button>}
           </div>
-          {res?.solved_annual_coupon != null ? (
+          {res && <div className="mb-3 text-[12px] leading-relaxed text-muted">{res.rationale}</div>}
+          {res && solved != null ? (
             <>
-              <div className="text-small uppercase tracking-[0.1em] text-muted">Solved coupon to par ({fee.toFixed(2)} fee)</div>
-              <div className="tnum mt-1 text-hero font-bold leading-none text-ink">{pct(res.solved_annual_coupon, 2)}<span className="ml-1.5 text-figure font-medium text-muted">p.a.</span></div>
-              <div className="mt-1.5 text-[12px] text-muted">vs indicative {pct(res.indicative_annual_coupon, 2)} · model PV <span className="tnum text-ink">{fmt(res.achieved_pv ?? 0, 2)}</span></div>
+              <div className="text-small uppercase tracking-[0.1em] text-muted">Solved to par ({fee.toFixed(2)} fee)</div>
+              <div className="tnum mt-1 text-hero font-bold leading-none text-ink">{res.solved_display}</div>
+              <div className="mt-1.5 text-[12px] text-muted">
+                {isCoupon && res.indicative_annual_coupon != null && <>vs indicative {pct(res.indicative_annual_coupon, 2)} · </>}
+                model PV <span className="tnum text-ink">{fmt(res.achieved_pv ?? 0, 2)}</span>
+                {res.knock_in != null && <> · KI {pct(res.knock_in, 0)}</>}
+              </div>
               <div className={cn("mt-3 rounded-lg border px-3 py-2 text-[12px]", res.achievable ? "border-up/30 bg-up/5 text-up" : "border-down/30 bg-down/5 text-down")}>
-                {res.achievable ? `The client's ${pct(tc, 0)} ask is achievable at this knock-in.` : `The client's ${pct(tc, 0)} ask needs a higher knock-in (a smaller protection buffer) — the client must take on more downside risk to fund it.`}
+                {isCoupon
+                  ? (res.achievable ? `The client's ${pct(tc, 0)} ask is achievable at this structure.` : `The solved coupon is below the client's ${pct(tc, 0)} ask — they must sell more downside (a higher knock-in) or take a basket to fund it.`)
+                  : `Priced to par at ${res.solved_display} on a ${pct(res.book_params.protection ?? 1, 0)} protected floor.`}
               </div>
               <button onClick={addToBook}
                 className="ring-desk mt-3 w-full rounded-lg border border-accent/60 bg-accent/15 px-3 py-2 text-body font-semibold text-accent transition-colors hover:bg-accent/25">
                 {staged ? "✓ Added to book" : "Add to book →"}
               </button>
             </>
-          ) : (<div className="text-[13px] text-muted">{loading ? "Solving…" : "No coupon prices this to par."}</div>)}
+          ) : (<div className="text-[13px] text-muted">{loading ? "Solving…" : "No parameter prices this to par."}</div>)}
         </Panel>
         <Panel className="p-3 lg:col-span-3">
-          <AreaSpark data={curve} x="annual_coupon" y="pv" color={C.teal} height={300} yDomain={[lo, hi]} xLabel="annual coupon (%)" yLabel="model PV" yTickFormat={(v) => v.toFixed(0)} />
+          <AreaSpark data={curve} x="x" y="pv" color={C.teal} height={300} yDomain={[lo, hi]} xLabel={res?.x_label ?? ""} yLabel="model PV" yTickFormat={(v) => v.toFixed(0)} />
         </Panel>
+      </div>
+
+      <SectionTitle>Alternatives the desk could pitch · ranked by fit</SectionTitle>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {(res?.alternatives ?? []).map((c) => {
+          const active = c.product_type === res?.product_type;
+          return (
+            <button key={c.product_type} onClick={() => setActiveProduct(c.product_type)}
+              className={cn("ring-desk rounded-xl border p-3 text-left transition-colors", active ? "border-accent/60 bg-accent/10" : "border-border bg-panel2/40 hover:border-accent/40")}>
+              <div className="flex items-center justify-between">
+                <span className={cn("text-[12.5px] font-semibold", active ? "text-accent" : "text-ink")}>{c.label}</span>
+                <span className="tnum text-[11px] text-muted">fit {pct(c.fit_score, 0)}</span>
+              </div>
+              <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-border">
+                <div className="h-full rounded-full" style={{ width: `${Math.round(c.fit_score * 100)}%`, background: active ? C.accent : C.muted }} />
+              </div>
+              <div className="mt-2 line-clamp-3 text-[11px] leading-snug text-muted">{c.rationale}</div>
+            </button>
+          );
+        })}
       </div>
 
       <SectionTitle>Income / protection catalog · two-curve discounting</SectionTitle>
