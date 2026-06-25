@@ -45,17 +45,26 @@ from integration import (
 from spdt.core.types import Curve, year_fraction
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
-from spdt.pricing import BlackScholes, price_mc
+from spdt.pricing import BlackScholes, price_mc, price_worst_of
 from spdt.products import (
     Autocallable,
     BarrierReverseConvertible,
     CapitalProtectedNote,
     Product,
     ReverseConvertible,
+    WorstOfAutocallable,
 )
 from spdt.reporting import terminal_scenarios
 from spdt.stress import STANDARD_SCENARIOS
-from spdt.structurer import ClientBrief, par_target, propose_autocallable, solve_to_par
+from spdt.structurer import (
+    ClientBrief,
+    ClientObjective,
+    Proposal,
+    SolveFor,
+    par_target,
+    recommend,
+    solve_to_par,
+)
 
 # --- configuration (all env-driven so the same image runs locally and deployed) -----------
 _CORS = os.environ.get("SPDT_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
@@ -128,54 +137,182 @@ class StructureRequest(BaseModel):
     maturity: float = 1.0
     obs_per_year: int = 4
     fee: float = 1.0
+    objective: str = "income"  # income | yield_enhanced | protection
+    prefer_basket: bool = False
+    product: str | None = None  # override: solve this family instead of the recommended one
+
+
+class StructureCandidate(BaseModel):
+    product_type: str
+    label: str
+    rationale: str
+    fit_score: float
 
 
 class StructureResponse(BaseModel):
-    knock_in: float
-    indicative_annual_coupon: float
-    solved_annual_coupon: float | None
+    # The active structure — the recommended best fit, or the requested override — fully solved.
+    product_type: str
+    label: str
+    rationale: str
+    solve_for: str  # "coupon" | "participation"
+    solved_annual_coupon: float | None  # for coupon notes
+    solved_participation: float | None  # for capital-protected notes
+    solved_display: str | None  # human headline, e.g. "6.21% p.a." or "1.85× upside"
+    indicative_annual_coupon: float | None
     achieved_pv: float | None
     target_pv: float
-    pv_curve: list[dict]
     achievable: bool
+    knock_in: float | None
+    book_params: dict  # params (with the solved value filled in) to stage the trade
+    book_observation_times: list[float]
+    book_maturity: float
+    x_label: str  # pv_curve x-axis label
+    pv_curve: list[dict]  # [{"x": ..., "pv": ...}]
+    alternatives: list[StructureCandidate]  # every family, ranked best-first (incl. the active one)
+
+
+_OBJECTIVES = {
+    "income": ClientObjective.INCOME,
+    "yield_enhanced": ClientObjective.YIELD_ENHANCED,
+    "protection": ClientObjective.PROTECTION,
+}
+# n_paths kept modest so the live solve stays responsive; worst-of pays for 3 correlated assets.
+_SOLVE_PATHS = {"worst_of": 6_000}
+_DEFAULT_SOLVE_PATHS = 12_000
+_CURVE_POINTS = 12
+
+
+def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_paths: int) -> float:
+    """Model PV of a proposal with its single free parameter set to ``free``."""
+    p = dict(prop.params)
+    p[prop.free_param_key] = free
+    obs = prop.observation_times
+    if prop.product_type == "worst_of":
+        names = tuple(p["underlyings"])
+        vols = np.array([m["atm_vol"] * vm for vm in p["vol_mult"]])
+        spots0 = np.full(len(names), spot)
+        corr = np.full((len(names), len(names)), p["correlation"])
+        np.fill_diagonal(corr, 1.0)
+        wo = WorstOfAutocallable(
+            notional=100.0, observation_times=obs, coupon_rate=p["coupon_rate"],
+            autocall_level=p["autocall_level"], coupon_barrier=p["coupon_barrier"],
+            knock_in=p["knock_in"], memory=p["memory"], underlyings=names,
+            initial_fixings=tuple(float(s) for s in spots0),
+        )
+        return price_worst_of(
+            wo, spots0, vols, corr, r=m["r"], q=m["q"], n_paths=n_paths, seed=7
+        ).price
+    # single-underlying notes price under Black–Scholes on the desk's ATM vol
+    model = BlackScholes(spot=spot, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    if prop.product_type == "autocallable":
+        note: Product = Autocallable(
+            100.0, obs, p["coupon_rate"], p["autocall_level"], p["coupon_barrier"],
+            p["knock_in"], p["memory"], initial_fixing=spot,
+        )
+    elif prop.product_type == "brc":
+        note = BarrierReverseConvertible(
+            100.0, obs, p["coupon_rate"], p["strike"], p["knock_in"], initial_fixing=spot,
+        )
+    elif prop.product_type == "capital_protected":
+        note = CapitalProtectedNote(
+            100.0, prop.maturity, p["protection"], p["participation"], p["strike"], p.get("cap"),
+        )
+    else:
+        raise ValueError(f"unknown product_type {prop.product_type!r}")
+    return price_mc(note, model, n_paths=n_paths, seed=7).price
+
+
+def _solve_and_curve(
+    prop: Proposal, spot: float, m: dict, obs_per_year: int, fee: float
+) -> tuple[float | None, float | None, list[dict], float]:
+    """Solve the proposal's free parameter to par and build a PV-vs-parameter curve."""
+    n_paths = _SOLVE_PATHS.get(prop.product_type, _DEFAULT_SOLVE_PATHS)
+    target = par_target(100.0, fee=fee)
+    is_coupon = prop.solve_for == SolveFor.COUPON
+
+    def pv_of(x: float) -> float:
+        return _price_proposal(prop, x, spot, m, n_paths=n_paths)
+
+    lo, hi = prop.bracket
+    sweep_lo = hi / _CURVE_POINTS if is_coupon else 0.25
+    curve = []
+    for i in range(_CURVE_POINTS):
+        x = sweep_lo + (hi - sweep_lo) * i / (_CURVE_POINTS - 1)
+        xv = round(x * obs_per_year * 100, 3) if is_coupon else round(x, 3)
+        curve.append({"x": xv, "pv": round(pv_of(x), 4)})
+
+    try:
+        solved = solve_to_par(pv_of, target, prop.bracket)
+        return solved.param, solved.achieved_pv, curve, target
+    except ValueError:
+        return None, None, curve, target
 
 
 @app.post("/api/structure", response_model=StructureResponse, dependencies=[Depends(require_token)])
 def structure(req: StructureRequest) -> StructureResponse:
-    """Client brief → proposed Phoenix → solve the coupon to par (live L6 origination)."""
+    """Client brief → recommended structure (best fit) → solve its free param to par (L6).
+
+    Mirrors a real desk: the brief's *objective* + risk appetite pick the product family; the
+    chosen note's coupon (income notes) or participation (capital-protected) is then solved to
+    par. ``product`` overrides the recommendation so the desk can price an alternative family.
+    """
     d = _desk()
     spot, m = d["spot"], d["model"]
-    brief = ClientBrief(req.target_coupon, req.max_downside, req.maturity, req.obs_per_year)
-    ts = propose_autocallable(brief)
-    model = BlackScholes(spot=spot, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    brief = ClientBrief(
+        req.target_coupon, req.max_downside, req.maturity, req.obs_per_year,
+        objective=_OBJECTIVES.get(req.objective, ClientObjective.INCOME),
+        prefer_basket=req.prefer_basket,
+    )
+    ranked = recommend(brief)
+    active = next((r for r in ranked if r.proposal.product_type == req.product), ranked[0])
+    prop = active.proposal
 
-    def pv_of_coupon(c: float) -> float:
-        note = dataclasses.replace(
-            Autocallable.from_termsheet(ts, initial_fixing=spot), coupon_rate=c
-        )
-        return price_mc(note, model, n_paths=15_000, seed=7).price
+    free, achieved, curve, target = _solve_and_curve(prop, spot, m, req.obs_per_year, req.fee)
+    is_coupon = prop.solve_for == SolveFor.COUPON
 
-    curve = [
-        {"annual_coupon": round(c * req.obs_per_year * 100, 3), "pv": round(pv_of_coupon(c), 4)}
-        for c in [0.0025 * i for i in range(1, 19)]
-    ]
-    target = par_target(100.0, fee=req.fee)
-    try:
-        solved = solve_to_par(pv_of_coupon, target, (0.0, 0.06))
-        solved_annual: float | None = solved.param * req.obs_per_year
-        achieved_pv: float | None = solved.achieved_pv
-    except ValueError:
-        solved_annual, achieved_pv = None, None
+    solved_annual = free * req.obs_per_year if (is_coupon and free is not None) else None
+    solved_part = free if (not is_coupon and free is not None) else None
+    indic_annual = prop.params["coupon_rate"] * req.obs_per_year if is_coupon else None
+    if free is None:
+        display: str | None = None
+    elif is_coupon:
+        display = f"{free * req.obs_per_year * 100:.2f}% p.a."
+    else:
+        display = f"{free:.2f}× upside"
+    # Achievable = the client's coupon ask is met (income), or it priced to par at all (protection).
+    achievable = bool(
+        free is not None and (not is_coupon or (solved_annual or 0.0) >= req.target_coupon)
+    )
 
-    indic = ts.params["coupon_rate"] * req.obs_per_year
+    book_params = dict(prop.params)
+    if free is not None:
+        book_params[prop.free_param_key] = free
+
     return StructureResponse(
-        knock_in=ts.params["knock_in"],
-        indicative_annual_coupon=indic,
-        solved_annual_coupon=solved_annual,
-        achieved_pv=achieved_pv,
+        product_type=prop.product_type,
+        label=active.label,
+        rationale=active.rationale,
+        solve_for=prop.solve_for.value,
+        solved_annual_coupon=round(solved_annual, 6) if solved_annual is not None else None,
+        solved_participation=round(solved_part, 6) if solved_part is not None else None,
+        solved_display=display,
+        indicative_annual_coupon=round(indic_annual, 6) if indic_annual is not None else None,
+        achieved_pv=round(achieved, 4) if achieved is not None else None,
         target_pv=target,
+        achievable=achievable,
+        knock_in=prop.params.get("knock_in"),
+        book_params=book_params,
+        book_observation_times=list(prop.observation_times),
+        book_maturity=prop.maturity,
+        x_label="annual coupon (%)" if is_coupon else "participation (×)",
         pv_curve=curve,
-        achievable=bool(solved_annual is not None and solved_annual >= req.target_coupon),
+        alternatives=[
+            StructureCandidate(
+                product_type=r.proposal.product_type, label=r.label,
+                rationale=r.rationale, fit_score=r.fit_score,
+            )
+            for r in ranked
+        ],
     )
 
 
