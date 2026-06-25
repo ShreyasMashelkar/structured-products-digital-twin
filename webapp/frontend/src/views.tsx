@@ -225,6 +225,9 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
       </div>
 
       <SectionTitle>Income / protection catalog · two-curve discounting</SectionTitle>
+      <p className="mb-2 max-w-3xl text-[11.5px] leading-snug text-muted">
+        A structured note is the issuer's unsecured funding, so its bond-like legs discount on the funding curve (OIS + spread), not OIS. <span className="text-ink">PV (OIS + funding)</span> is the correct all-in price; <span className="text-ink">PV (OIS only)</span> is the naïve price ignoring funding; <span className="text-ink">Funding impact</span> is the difference — the (negative) dent the issuer's funding cost puts in the note's value.
+      </p>
       <Panel className="p-0">
         <DataTable rows={desk.catalog} max={260} cols={[
           { key: "name", label: "Structure" },
