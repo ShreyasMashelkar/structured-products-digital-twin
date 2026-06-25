@@ -52,7 +52,7 @@ Everything is **snapshot-in, report-out**: every layer consumes an immutable, ve
 | L3 | `spdt/products` | Payoff DSL — products as DAGs of primitives |
 | L4 | `spdt/pricing` | Closed-form / PDE / MC pricing under BS, LV, Heston, LSV |
 | L5 | `spdt/greeks` | Bump, pathwise, likelihood-ratio, AAD |
-| L6 | `spdt/structurer` | Price-to-par solver, objective → structure proposer |
+| L6 | `spdt/structurer` | Price-to-par solver; **Originate recommender** — ranks the best-fit family across all four, then solves it to par |
 | L7 | `spdt/backtest` | Rolling historical issuance, outcome statistics |
 | L8 | `spdt/book` | Virtual trading book, daily marks & Greeks |
 | L9 | `spdt/hedging` | Dynamic delta/vega hedge simulation, residual P&L |
@@ -130,6 +130,14 @@ pytest
 Optional extras: `pip install -e ".[ad,dashboard]"` for JAX-based AAD and the Streamlit dashboard.
 
 To run the **React desk** (incl. the live *Counterparty & XVA* tab), see [`webapp/README.md`](webapp/README.md): `uvicorn webapp.server:app --port 8077` then `npm run dev` in `webapp/frontend`.
+
+### Deploy (single image)
+
+The whole desk ships as **one Docker image** ([`Dockerfile`](Dockerfile)): stage 1 builds the Vite/React frontend, stage 2 serves the built SPA *and* the FastAPI engine from one uvicorn process (same-origin `/api`) on port `7860`. This targets **Hugging Face Spaces** (Docker SDK) but runs anywhere Docker does:
+
+```bash
+docker build -t spdt . && docker run -p 7860:7860 spdt   # → http://localhost:7860
+```
 
 ---
 
