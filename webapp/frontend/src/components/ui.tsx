@@ -110,7 +110,7 @@ export function Tabs({
   onChange: (t: string) => void;
 }) {
   return (
-    <div className="flex gap-1 border-b border-border">
+    <div className="flex flex-wrap gap-1 border-b border-border">
       {tabs.map((t) => (
         <button
           key={t}
