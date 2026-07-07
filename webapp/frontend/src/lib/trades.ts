@@ -9,6 +9,11 @@ export interface Trade {
   maturity: number;
   params: Record<string, any>;
   staged?: boolean;
+  direction?: number;
+  initial_fixing?: number;
+  barrier_breached?: boolean | null;
+  unwound_fraction?: number;
+  elapsed_years?: number;
   // book-only precomputed marks
   pv?: number;
   delta?: number;
@@ -49,6 +54,11 @@ export function bookTrades(desk: Desk): Trade[] {
     observation_times: p.observation_times ?? undefined,
     maturity: p.maturity,
     params: p.params ?? {},
+    direction: p.direction ?? 1,
+    initial_fixing: p.initial_fixing ?? desk.spot,
+    barrier_breached: p.barrier_breached ?? false,
+    unwound_fraction: p.unwound_fraction ?? 0,
+    elapsed_years: p.elapsed_years ?? 0,
     pv: p.pv,
     delta: p.delta,
     gamma: p.gamma,

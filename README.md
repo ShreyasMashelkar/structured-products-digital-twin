@@ -1,8 +1,8 @@
 # Structured Products Digital Twin (SPDT)
 
-> A complete simulation of an equity structured-products desk **plus its counterparty-risk twin**: `structuring → pricing → hedging → risk → P&L attribution`, then `exposure → CVA/FVA → all-in price → governance`, built on free Indian market data.
+> A production-shaped educational simulation of an equity structured-products desk **plus its counterparty-risk twin**: `structuring → pricing → hedging → risk → P&L attribution`, then `exposure → CVA/FVA → all-in price → governance`, built on free Indian market data.
 
-SPDT is a modular platform that structures, prices (BS / Local Vol / Heston / LSV), risk-manages, hedges, and attributes P&L for equity exotics (autocallables, Phoenix, barrier reverse convertibles, worst-of baskets) on NSE data — with AAD Greeks, model-reserve computation, historical backtesting, and a desk dashboard.
+SPDT is a modular platform that structures, prices (BS / Local Vol / Heston / LSV), risk-manages, hedges, and attributes P&L for equity exotics (autocallables, Phoenix, barrier reverse convertibles, worst-of baskets) on NSE data — with AAD Greeks, typed payoff decomposition, semi-static vanilla-strip replication, model-reserve computation, historical backtesting, and a desk dashboard.
 
 It then couples to a vendored **INR OTC / CCR / XVA engine** at a single seam (the exposure cube), so a note can be priced *all-in* — coupon net of its lifetime CVA + FVA — and gated by counterparty limits, economic capital and RAROC. See [**XVA & Counterparty Credit Risk**](#xva--counterparty-credit-risk) below and [`docs/adr/0007`](docs/adr/0007-integrate-xva-at-the-exposure-seam.md).
 
@@ -20,7 +20,7 @@ Two rules govern everything here:
 | Bucket | Meaning | Examples in SPDT |
 |---|---|---|
 | **REAL** | Mathematically correct, production-shaped, owned end to end | SVI/SSVI calibration, autocallable MC pricing, bump/pathwise/**AAD** Greeks (cross-checked on the autocallable), P&L attribution with **bucketed vega**, **two-curve discounting**, autocallable/Phoenix/**BRC/reverse-convertible/capital-protected** catalog, **mark-to-future exposure (LSM) → CVA + FVA + KVA + MVA − DVA → all-in coupon**, **netting / CSA-MPoR collateral / dynamic IM / wrong-way-risk overlays**, **term-structure credit curves**, **CS01 / JTD / credit-stress**, **EAD/PFE/EEPE + ASRF economic capital + equity SA-CCR EAD + RAROC governance gate** |
-| **FAITHFUL** | Correct method, scoped scale; real version differs only in size/optimisation | LSV calibration, the payoff DSL (composable leg primitives), Heston QE + Carr–Madan FFT, BGK barrier correction, historical replay, **C++ MC kernel** (one product ported, measured speedup; rest "same pattern"), the vendored **XVA/CCR engine** (CVA/FVA/KVA/MVA, SA-CCR, SIMM, WWR — surfaced by SPDT only through the exposure seam); parametric (exponential-tilt) WWR vs the engine's jointly-simulated copula version |
+| **FAITHFUL** | Correct method, scoped scale; a bank implementation differs in calibration depth, liquidity treatment and operational controls | LSV calibration, the payoff DSL (composable leg primitives), Heston QE + Carr–Madan FFT, BGK barrier correction, historical replay, **semi-static barrier replication** (model-calibrated liquid vanilla strip + tracking/residual-risk lifecycle), **C++ MC kernel** (one product ported, measured speedup; rest "same pattern"), the vendored **XVA/CCR engine** (CVA/FVA/KVA/MVA, SA-CCR, SIMM, WWR — surfaced by SPDT only through the exposure seam); parametric (exponential-tilt) WWR vs the engine's jointly-simulated copula version |
 | **STUBBED** | Architecturally present with a clean interface; placeholder implementation | GPU pricing kernels (designed-for; CPU C++ path implemented), message queue (in-process bus that *could* be Kafka) |
 | **SKIPPED (declared)** | Out of scope, named explicitly | Real-time market connectivity, **regulatory CVA capital** (BA-CVA / FRTB-CVA — in the vendored engine, not the equity seam), a **jointly-simulated** WWR intensity (the seam uses a parametric tilt), the **rates/swap** asset class (Hull-White, swaptions, CCIL data — served by the engine directly), multi-currency/quanto at scale |
 
@@ -62,6 +62,44 @@ Everything is **snapshot-in, report-out**: every layer consumes an immutable, ve
 | L13 | `spdt/reporting` | Term sheet / factsheet / scenario-table generation |
 | L14 | `spdt/dashboard` | Executive desk blotter (Streamlit) + React desk (`webapp/`) |
 
+### Decomposition and semi-static hedge lifecycle
+
+The risk layer now turns each supported note into typed components (`funding`, `coupon`,
+`vanilla`, `digital`, `barrier`, `autocall`, `correlation`) before selecting an executable hedge.
+Relative contractual levels remain tied to the trade's immutable inception fixing; option hedge
+weights are quantities in absolute-price units, avoiding the notional/spot scaling ambiguity that
+often appears in educational implementations.
+
+For discretely monitored down barriers, the replication engine projects the path-dependent payoff
+onto a deterministic strip of European puts snapped to a listed-style strike grid, with a 5×-face
+gross inventory constraint. It reports the remaining tracking error and residual cash Greeks. The
+lifecycle uses the contractual observation schedule and explicit persisted barrier/unwind state—it
+does not infer a historical knock-in from today's spot. Knock-outs are eligible for progressive
+pre-unwind; knock-ins transition to vanilla exposure only after an observed activation event. The
+React **Semi-Static Hedging** workspace consumes the same signed live book, selected trade and
+simulated spot/vol as **Book & Risk**. The displayed strip is explicitly a BS indicative hedge for
+the barrier component, not a claim that the entire callable note is exactly replicated.
+
+### Outcome Lab
+
+The React **Outcome Lab** selects an actual 2Y NIFTY autocallable from the current 15-trade
+blotter (and exposes its `NOTE-*` identifier and source terms), then carries that booked payoff
+through three decision-focused studies behind one `GET /api/outcomes` payload:
+
+- a five-path synthetic regime ensemble with monthly rolling issuance, autocall, holding-period,
+  loss-frequency, tail-return and cross-seed robustness ranges;
+- an out-of-sample comparison of unhedged, exact terminal-KI delta, constrained semi-static and
+  inventory-budgeted hybrid hedges, including P&L dispersion, expected shortfall, turnover,
+  execution cost and a documented eligibility/selection rule; and
+- one client re-offer case showing the 12% target, booked coupon, model-fair coupon, XVA-adjusted
+  offerable coupon, target shortfall and restructuring menu alongside hedge selection,
+  EAD/economic capital, RAROC and governance decision. The
+  CCR exposure is explicitly to the dealer's OTC hedge counterparty, not the funded note investor.
+
+The bundled issuance study is explicitly labelled a **synthetic regime replay**, not observed
+NIFTY performance. Its series seam is replaceable with point-in-time closes; the disclosure is
+shown in the UI so an illustrative student result cannot be mistaken for client performance.
+
 ### Market-data sources (L1)
 
 Three interchangeable sources behind one `fetch() → RawMarketData` seam, so the whole stack is source-agnostic:
@@ -79,6 +117,11 @@ Synthetic is the reproducible default; `SPDT_LIVE=1` uses NSE's public **EOD bha
 ## XVA & Counterparty Credit Risk
 
 SPDT (the structuring desk) and a vendored **INR OTC / CCR / XVA engine** (`xva/`, ~12.5k LOC: CVA/FVA/KVA/MVA, SA-CCR, SIMM, wrong-way risk, economic capital) are combined as **two desks over one shared core**, coupled at exactly one place — the **exposure/position seam** — so the two product models never have to be unified ([ADR-0007](docs/adr/0007-integrate-xva-at-the-exposure-seam.md)).
+
+> **Ownership boundary.** The `spdt/` equity structured-products platform, the `integration/`
+> exposure/curve/governance seam, and the React/FastAPI desk integration are developed in this
+> repository. The standalone `xva/` platform is vendored and deliberately kept behind that seam;
+> its engines are reused rather than presented as newly authored SPDT code.
 
 ```
    SPDT (equity structuring)                 vendored XVA / CCR engine
@@ -125,6 +168,16 @@ pip install -e ".[dev]"
 
 # run the tests
 pytest
+
+# run the vendored XVA engine's own suite
+pytest xva/tests
+
+# the same quality gates used by CI
+ruff check spdt integration webapp tests
+mypy spdt integration webapp
+
+# frontend type-check + production build
+cd webapp/frontend && npm ci && npm run build
 ```
 
 Optional extras: `pip install -e ".[ad,dashboard]"` for JAX-based AAD and the Streamlit dashboard.

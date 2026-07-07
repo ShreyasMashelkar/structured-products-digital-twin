@@ -97,7 +97,7 @@ def generate_mixed_book(
             note = CapitalProtectedNote(
                 100.0, maturity=float(rng.choice([1.0, 2.0, 3.0])),
                 protection=1.0, participation=round(float(rng.uniform(0.6, 1.2)), 4),
-                strike=1.0, cap=None,
+                strike=1.0, cap=None, initial_fixing=initial_fixing,
             )
         trades.append(Trade(f"NOTE-{i:03d}", note, underlying=underlying))
     return trades

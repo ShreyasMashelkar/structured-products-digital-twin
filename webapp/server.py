@@ -43,6 +43,7 @@ from integration import (
     xva_sensitivities,
 )
 from spdt.core.types import Curve, year_fraction
+from spdt.book.book import Trade as BookTrade
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
 from spdt.pricing import BlackScholes, price_mc, price_worst_of
@@ -55,6 +56,7 @@ from spdt.products import (
     WorstOfAutocallable,
 )
 from spdt.reporting import terminal_scenarios
+from spdt.outcomes import OutcomeTerms, hedge_comparison, issuance_study
 from spdt.stress import STANDARD_SCENARIOS
 from spdt.structurer import (
     ClientBrief,
@@ -326,6 +328,25 @@ class PriceRequest(BaseModel):
     params: dict = {}
 
 
+class SemiStaticTradeRequest(PriceRequest):
+    trade_id: str
+    underlying: str = "NIFTY"
+    direction: int = 1
+    initial_fixing: float | None = None
+    barrier_breached: bool | None = None
+    unwound_fraction: float = 0.0
+    elapsed_years: float = 0.0
+
+
+class SemiStaticRequest(BaseModel):
+    trades: list[SemiStaticTradeRequest]
+    spot: float
+    sigma: float
+    r: float
+    q: float
+    selected_trade_id: str | None = None
+
+
 def _build_product(req: PriceRequest, spot: float) -> Product:
     """Reconstruct any catalog product from a term-sheet-shaped request (struck at spot)."""
     p = req.params
@@ -338,9 +359,12 @@ def _build_product(req: PriceRequest, spot: float) -> Product:
             initial_fixing=spot,
         )
     if kind == "brc":
+        monitoring = p.get("barrier_monitoring")
         return BarrierReverseConvertible(
             req.notional, obs, p.get("coupon_rate", 0.06), p.get("strike", 1.0),
-            p.get("knock_in", 0.7), initial_fixing=spot,
+            p.get("knock_in", 0.7),
+            barrier_monitoring=tuple(monitoring) if monitoring else None,
+            initial_fixing=spot,
         )
     if kind == "reverse_convertible":
         return ReverseConvertible(
@@ -351,9 +375,203 @@ def _build_product(req: PriceRequest, spot: float) -> Product:
         return CapitalProtectedNote(
             req.notional, req.maturity or (obs[-1] if obs else 1.0),
             p.get("protection", 1.0), p.get("participation", 1.0), p.get("strike", 1.0),
-            p.get("cap"),
+            p.get("cap"), initial_fixing=spot,
         )
     raise ValueError(f"unknown product_type {kind!r}")
+
+
+def _build_semistatic(req: SemiStaticRequest) -> dict:
+    from spdt.dashboard.analytics_data import build_semistatic_payload
+
+    trades: list[BookTrade] = []
+    states: dict[str, dict] = {}
+    for item in req.trades:
+        try:
+            fixing = item.initial_fixing or req.spot
+            product = _build_product(item, fixing)
+        except ValueError:
+            continue
+        trades.append(BookTrade(item.trade_id, product, item.underlying, item.direction))
+        states[item.trade_id] = {
+            "barrier_breached": item.barrier_breached,
+            "unwound_fraction": item.unwound_fraction,
+            "elapsed_years": item.elapsed_years,
+        }
+    model = BlackScholes(spot=req.spot, sigma=req.sigma, r=req.r, q=req.q)
+    return build_semistatic_payload(
+        trades, model, selected_trade_id=req.selected_trade_id, lifecycle_states=states
+    )
+
+
+@app.post("/api/semistatic", dependencies=[Depends(require_token)])
+def semistatic(req: SemiStaticRequest) -> dict:
+    """Rebuild semi-static analytics from the live blotter and current market state."""
+    return _build_semistatic(req)
+
+
+@app.get("/api/semistatic")
+def semistatic_book() -> dict:
+    """Backward-compatible server-book view of the same live analytics."""
+    desk = _desk()
+    market = desk["model"]
+    trades = [
+        SemiStaticTradeRequest(
+            trade_id=p["trade_id"],
+            underlying=p.get("underlying", desk["underlying"]),
+            product_type=p["product_type"],
+            notional=p["notional"],
+            observation_times=p.get("observation_times"),
+            maturity=p.get("maturity"),
+            params=p.get("params", {}),
+            initial_fixing=p.get("initial_fixing", desk["spot"]),
+            barrier_breached=p.get("barrier_breached", False),
+            unwound_fraction=p.get("unwound_fraction", 0.0),
+        )
+        for p in desk["positions"]
+    ]
+    return _build_semistatic(SemiStaticRequest(
+        trades=trades,
+        spot=desk["spot"],
+        sigma=market["atm_vol"],
+        r=market["r"],
+        q=market["q"],
+    ))
+
+
+# --- Outcome Lab: issuance evidence → hedge economics → one end-to-end client decision ------
+
+_outcome_cache: tuple[float, dict] | None = None
+_outcome_lock = threading.Lock()
+
+
+@app.get("/api/outcomes", dependencies=[Depends(require_token)])
+def outcomes() -> dict:
+    """Return studies for one actual 2Y autocallable in the current desk blotter."""
+    global _outcome_cache
+    d = _desk()
+    cache_key = _cache.built_at
+    if _outcome_cache is not None and _outcome_cache[0] == cache_key:
+        return _outcome_cache[1]
+    with _outcome_lock:
+        if _outcome_cache is not None and _outcome_cache[0] == cache_key:
+            return _outcome_cache[1]
+        spot, m = d["spot"], d["model"]
+        candidates = [
+            p for p in d["positions"]
+            if p["product_type"] == "autocallable" and p["maturity"] == 2.0
+            and p["underlying"] == d["underlying"]
+        ]
+        if not candidates:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "desk snapshot has no 2Y single-index autocallable")
+        source_trade = candidates[0]
+        contract_id = source_trade["trade_id"]
+        observations = source_trade["observation_times"]
+        maturity = float(source_trade["maturity"])
+        periods_per_year = max(round(len(observations) / maturity), 1)
+        target_coupon_pa = 0.12
+        xva_result = xva(XvaRequest(
+            product_type=source_trade["product_type"],
+            notional=float(source_trade["notional"]),
+            observation_times=observations,
+            maturity=maturity,
+            params=source_trade["params"],
+            counterparty="HEDGE-CP-01",
+            cds_spread_bps=180.0,
+            recovery_rate=0.40,
+            funding_spread_bp=50.0,
+            hurdle_rate=0.10,
+            margin=1.0,
+            cost_of_capital=0.12,
+            collateralised=True,
+            csa_threshold=0.0,
+            n_paths=6_000,
+        ))
+        all_in = xva_result.get("all_in") or {}
+        fair_coupon = all_in.get("coupon_base_pa")
+        offered = all_in.get("coupon_all_in_pa")
+        if fair_coupon is None or offered is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "book-trade coupon could not be solved before and after XVA")
+        fair_coupon, offered = float(fair_coupon), float(offered)
+        terms = OutcomeTerms(
+            maturity=maturity,
+            observations_per_year=periods_per_year,
+            coupon_rate=offered / periods_per_year,
+            knock_in=float(source_trade["params"]["knock_in"]),
+            coupon_barrier=float(source_trade["params"]["coupon_barrier"]),
+            autocall_level=float(source_trade["params"]["autocall_level"]),
+        )
+        issuance = issuance_study(spot, m["atm_vol"], terms)
+        hedge = hedge_comparison(spot, m["atm_vol"], m["r"], m["q"], terms)
+        coupon_gap = target_coupon_pa - offered
+        target_met = coupon_gap <= 0.0
+        proceed = target_met and xva_result["decision"] == "APPROVED"
+        case = {
+            "title": f"Book trade {contract_id} · client re-offer decision",
+            "brief": {
+                "objective": "Income mandate with defined conditional protection",
+                "target_coupon_pa_pct": 100.0 * target_coupon_pa,
+                "tenor_years": maturity,
+                "max_downside": f"{100.0 * (1.0 - terms.knock_in):.1f}% distance to knock-in",
+                "counterparty_cds_bp": 180,
+                "counterparty_role": "OTC hedge counterparty (not the funded note investor)",
+            },
+            "structure": {
+                "product": "Phoenix autocallable",
+                "booked_coupon_pa_pct": round(100.0 * float(source_trade["coupon"]) * periods_per_year, 2),
+                "fair_coupon_before_xva_pct": round(100.0 * fair_coupon, 2),
+                "offered_coupon_after_xva_pct": round(100.0 * offered, 2),
+                "target_shortfall_pct_pt": round(max(100.0 * coupon_gap, 0.0), 2),
+                "knock_in_pct": round(100.0 * terms.knock_in, 1),
+                "target_met": target_met,
+            },
+            "investor_outcome": {
+                "ensemble_autocall_rate_pct": issuance["autocall_rate_pct"],
+                "ensemble_loss_rate_pct": issuance["loss_rate_pct"],
+                "tail_return_pct": issuance["tail_return_pct"],
+            },
+            "desk_outcome": {
+                "selected_hedge": hedge["best_strategy"],
+                "pnl_risk_reduction_pct": hedge["best_risk_reduction_pct"],
+                "hedge_cost": next(
+                    row["transaction_cost"] for row in hedge["strategies"]
+                    if row["strategy"] == hedge["best_strategy"]
+                ),
+                "selection_rule": hedge["selection_rule"],
+            },
+            "ccr_outcome": {
+                "xva_total": round(float(xva_result["charge"]["total"]), 4),
+                "ead": round(float(xva_result["metrics"]["ead"]), 4),
+                "economic_capital": round(float(xva_result["capital"]["economic"]), 4),
+                "raroc_pct": round(float(xva_result["trade_raroc"] * 100.0), 2),
+                "decision": xva_result["decision"],
+            },
+            "recommendation": "Proceed to term sheet" if proceed else "Restructure or reset client target",
+            "restructuring_actions": [
+                "Lower the target coupon to the XVA-adjusted offer",
+                "Move the knock-in barrier higher within the client's loss budget",
+                "Extend tenor or reduce issuer margin, subject to governance approval",
+            ],
+            "decision_reasons": xva_result["reasons"],
+            "disclosure": "Illustrative, model-generated case study; not investment advice or realised client performance.",
+            "contract_id": contract_id,
+        }
+        payload = {
+            "as_of": d["as_of"], "contract_id": contract_id,
+            "source_trade": {
+                "trade_id": contract_id, "underlying": source_trade["underlying"],
+                "notional": source_trade["notional"], "maturity": maturity,
+                "booked_coupon_pa_pct": round(100.0 * float(source_trade["coupon"]) * periods_per_year, 2),
+                "knock_in_pct": round(100.0 * terms.knock_in, 1),
+                "coupon_barrier_pct": round(100.0 * terms.coupon_barrier, 1),
+                "observation_frequency": f"{periods_per_year} per year",
+            },
+            "run_metadata": {"model": "BS + contractual payoff MC", "currency": "INR", "seed_policy": "fixed documented ensemble"},
+            "issuance": issuance, "hedge": hedge, "case_study": case,
+        }
+        _outcome_cache = (cache_key, payload)
+        return payload
 
 
 @app.post("/api/price", dependencies=[Depends(require_token)])
@@ -465,7 +683,13 @@ def xva(req: XvaRequest) -> dict:
     ois = _flat_curve(m["r"])
     funding = _flat_curve(m["r"] + req.funding_spread_bp * 1e-4)
     mat = req.maturity or (req.observation_times[-1] if req.observation_times else 1.0)
-    grid = np.linspace(0.0, mat * 0.975, 14, dtype=np.float64)  # stop just shy of maturity
+    grid: np.ndarray
+    if req.collateralised or req.include_mva:
+        # MPoR-aware grid: do not approximate a 10-day close-out gap on two-month exposure steps.
+        step = max(req.mpor_days / 365.0, 1.0 / 365.0)
+        grid = np.arange(0.0, mat, step, dtype=np.float64)
+    else:
+        grid = np.linspace(0.0, mat * 0.975, 14, dtype=np.float64)
     try:
         raw_pkg = note_exposure(product, model, ois, funding, time_grid=grid,
                                 n_paths=req.n_paths, seed=7, counterparty_id=req.counterparty)

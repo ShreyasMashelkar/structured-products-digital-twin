@@ -247,12 +247,13 @@ class CapitalProtectedNote(Product):
     participation: float = 1.0  # upside participation rate
     strike: float = 1.0  # call strike, as a fraction of S₀
     cap: float | None = None  # max underlying return participated in (fraction of S₀); None ⇒ uncapped
+    initial_fixing: float | None = None
 
     def monitoring_times(self) -> tuple[float, ...]:
         return (self.maturity,)
 
     def cashflows(self, paths: PathSet) -> list[Cashflow]:
-        s0 = paths.initial
+        s0 = paths.initial if self.initial_fixing is None else self.initial_fixing
         n = self.notional
         ret = paths.spots[:, paths.index_of(self.maturity)] / s0
         upside = np.maximum(ret - self.strike, 0.0)
@@ -266,7 +267,9 @@ class CapitalProtectedNote(Product):
         ]
 
     @classmethod
-    def from_termsheet(cls, ts: TermSheet) -> CapitalProtectedNote:
+    def from_termsheet(
+        cls, ts: TermSheet, *, initial_fixing: float | None = None
+    ) -> CapitalProtectedNote:
         p = ts.params
         return cls(
             notional=ts.notional,
@@ -275,6 +278,7 @@ class CapitalProtectedNote(Product):
             participation=p.get("participation", 1.0),
             strike=p.get("strike", 1.0),
             cap=p.get("cap"),
+            initial_fixing=initial_fixing,
         )
 
 

@@ -501,6 +501,13 @@ def build_desk_data(
             "observation_times": rec["observation_times"],
             "maturity": rec["maturity"],
             "params": p,
+            "direction": trade.direction,
+            "initial_fixing": getattr(note, "initial_fixing", spot),
+            # Synthetic book starts at inception with an explicit clean lifecycle state. A live
+            # loader replaces these fields from the observation/event store.
+            "barrier_breached": False,
+            "unwound_fraction": 0.0,
+            "elapsed_years": 0.0,
             # back-compat autocallable-ish columns (None where not applicable)
             "coupon": p.get("coupon_rate", 0.0),
             "autocall": p.get("autocall_level"),

@@ -157,6 +157,87 @@ export async function getDesk(): Promise<Desk> {
   return r.json();
 }
 
+export interface SemiStaticResult {
+  selected_trade_id: string | null;
+  message: string | null;
+  pre_unwind: {
+    trade_id: string; underlying: string; barrier_type: "KI" | "KO"; barrier: number; spot: number;
+    distance_pct: number; p_hit: number; lifecycle_action: string;
+    target_action_pct: number | null; executed_action_pct: number;
+    incremental_action_pct: number; monitoring: string; status: string;
+  }[];
+  portfolio: {
+    instrument: string; maturity: string; strike: number; weight: number; notional: number;
+    delta: number; gamma: number; vega: number; purpose: string;
+  }[];
+  risk_ladder: {
+    bucket: string; delta_target: number; delta_hedge: number;
+    gamma_target: number; gamma_hedge: number;
+    cash_delta_target_1pct: number; cash_delta_hedge_1pct: number;
+    cash_gamma_target_1pct: number; cash_gamma_hedge_1pct: number;
+  }[];
+  tracking: {
+    scenario: string; spot: number; target_pv: number; hedge_pv: number; error: number;
+  }[];
+  summary: {
+    total_static_notional: number; residual_delta: number;
+    residual_gamma: number; residual_cash_delta_1pct: number;
+    residual_cash_gamma_1pct: number; tracking_error: number;
+    gross_limit: number; perspective: string; position_label: string;
+  };
+  methodology?: { model: string; probability: string; strike_grid: string; position_perspective: string };
+}
+
+export async function getSemiStatic(body: {
+  trades: any[]; spot: number; sigma: number; r: number; q: number;
+  selected_trade_id: string | null;
+}): Promise<SemiStaticResult> {
+  const response = await fetch("/api/semistatic", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error("semi-static analytics failed");
+  return response.json();
+}
+
+export interface OutcomeResult {
+  as_of: string;
+  contract_id: string;
+  source_trade: { trade_id: string; underlying: string; notional: number; maturity: number;
+    booked_coupon_pa_pct: number; knock_in_pct: number; coupon_barrier_pct: number; observation_frequency: string };
+  run_metadata: { model: string; currency: string; seed_policy: string };
+  issuance: {
+    source: string; source_note: string; terms: string; n_issuances: number;
+    autocall_rate_pct: number; loss_rate_pct: number; mean_return_pa_pct: number;
+    median_life_years: number; tail_return_pct: number; worst_return_pct: number;
+    robustness: { autocall_rate_range_pct: number[]; loss_rate_range_pct: number[]; n_paths: number };
+    cohorts: { cohort: number; year: number; return_pct: number; life_years: number; outcome: string }[];
+    index_path: { month: number; level: number }[];
+  };
+  hedge: {
+    target: string; method: string; best_strategy: string; best_risk_reduction_pct: number; static_instruments: number;
+    selection_rule: string; hybrid_static_scale_pct: number;
+    strategies: { strategy: string; pnl_std: number; expected_shortfall_95: number; mean_pnl: number;
+      turnover: number; transaction_cost: number; risk_reduction_pct: number; eligible: boolean; selection_score: number }[];
+  };
+  case_study: {
+    title: string; brief: { objective: string; target_coupon_pa_pct: number; tenor_years: number; max_downside: string; counterparty_cds_bp: number; counterparty_role: string };
+    structure: { product: string; booked_coupon_pa_pct: number; fair_coupon_before_xva_pct: number;
+      offered_coupon_after_xva_pct: number; target_shortfall_pct_pt: number; knock_in_pct: number; target_met: boolean };
+    investor_outcome: { ensemble_autocall_rate_pct: number; ensemble_loss_rate_pct: number; tail_return_pct: number };
+    desk_outcome: { selected_hedge: string; pnl_risk_reduction_pct: number; hedge_cost: number; selection_rule: string };
+    ccr_outcome: { xva_total: number; ead: number; economic_capital: number; raroc_pct: number; decision: Decision };
+    recommendation: string; restructuring_actions: string[]; decision_reasons: string[]; disclosure: string; contract_id: string;
+  };
+}
+
+export async function getOutcomes(): Promise<OutcomeResult> {
+  const r = await fetch("/api/outcomes");
+  if (!r.ok) throw new Error("outcome study failed");
+  return r.json();
+}
+
 export async function solveStructure(body: {
   target_coupon: number;
   max_downside: number;
@@ -173,5 +254,31 @@ export async function solveStructure(body: {
     body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error("structure solve failed");
+  return r.json();
+}
+
+export interface AnalyticsResult {
+  health: {
+    overall_score: number;
+    surface_stability: number;
+    smile_regime: string;
+    barrier_proximity: string;
+  };
+  history: {
+    ytd_error: number;
+    volatility: number;
+    chart: { date: string; unexplained: number; cumulative: number }[];
+    attribution: { driver: string; pct: number }[];
+  };
+  netting: {
+    delta_pct: number;
+    gamma_pct: number;
+    vega_pct: number;
+  };
+}
+
+export async function getAnalytics(): Promise<AnalyticsResult> {
+  const r = await fetch("/api/analytics");
+  if (!r.ok) throw new Error("analytics fetch failed");
   return r.json();
 }

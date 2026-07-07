@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { Decision, Desk, PriceResult, StructureResult, XvaResult, computeXva, priceTrade, solveStructure } from "./lib/api";
+import { Decision, Desk, OutcomeResult, PriceResult, SemiStaticResult, StructureResult, XvaResult, computeXva, getOutcomes, getSemiStatic, priceTrade, solveStructure } from "./lib/api";
 import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trades";
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
 import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
 import { cn } from "./lib/cn";
 import { fmt, pct, signed } from "./lib/format";
 import { C } from "./lib/theme";
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, LineChart, Line } from "recharts";
 
 /* ======================= shared bits ======================= */
 
@@ -805,6 +806,284 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
         </>
       )}
       {loading && !res && <div className="text-[13px] text-muted">Charging…</div>}
+    </div>
+  );
+}
+
+/* ======================= Outcome Lab ======================= */
+
+export function OutcomeLab() {
+  const [data, setData] = useState<OutcomeResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getOutcomes().then(setData).catch((reason) => setError(String(reason)));
+  }, []);
+
+  if (error) return <Panel className="p-5 text-down">Unable to build outcome studies: {error}</Panel>;
+  if (!data) return <div className="mt-8 animate-pulse text-muted">Running issuance, hedge and CCR studies…</div>;
+
+  const { issuance, hedge, case_study: cs } = data;
+  const decisionTone = cs.ccr_outcome.decision === "APPROVED" ? "text-up border-up/40 bg-up/10" : cs.ccr_outcome.decision === "REJECTED" ? "text-down border-down/40 bg-down/10" : "text-accent border-accent/40 bg-accent/10";
+  const sampledCohorts = issuance.cohorts.filter((_, i) => i % 3 === 0);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 border-b border-border-soft pb-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <div className="text-label font-bold uppercase tracking-[0.16em] text-accent">Evidence, not another feature</div>
+          <h2 className="mt-1 text-[1.65rem] font-extrabold tracking-tight text-ink">Outcome Lab</h2>
+          <p className="mt-1 max-w-3xl text-body text-muted">Book trade <span className="tnum text-ink">{data.contract_id}</span> from the 15-trade blotter, carried through issuance evidence, hedge implementation and hedge-counterparty approval.</p>
+        </div>
+        <div className="text-right text-small text-muted"><Chip hot>{data.as_of}</Chip><br className="hidden lg:block" />Reproducible fixed-seed studies</div>
+      </div>
+
+      <section>
+        <div className="mb-3 flex items-start justify-between gap-4">
+          <div><SectionTitle>01 · Rolling issuance backtest</SectionTitle><div className="text-body text-muted">{issuance.terms}</div></div>
+          <span className="rounded-md border border-violet/30 bg-violet/10 px-2 py-1 text-small text-violet">{issuance.source}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+          <Kpi label="Issuances" value={String(issuance.n_issuances)} sub="monthly cohorts" />
+          <Kpi label="Autocalled" value={`${issuance.autocall_rate_pct.toFixed(1)}%`} sub={`median life ${issuance.median_life_years.toFixed(2)}y`} tone="pos" />
+          <Kpi label="Mean return" value={`${issuance.mean_return_pa_pct.toFixed(1)}%`} sub="annualised" tone="accent" />
+          <Kpi label="Capital loss" value={`${issuance.loss_rate_pct.toFixed(1)}%`} sub="cohort frequency" tone="neg" />
+          <Kpi label="5% tail" value={`${signed(issuance.tail_return_pct, 1)}%`} sub={`worst ${signed(issuance.worst_return_pct, 1)}%`} tone="neg" />
+        </div>
+        <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-5">
+          <Panel className="p-3 lg:col-span-3">
+            <SectionTitle>Cohort total return · every third issuance</SectionTitle>
+            <Bars data={sampledCohorts} x="cohort" y="return_pct" color={C.accent} colorBySign height={260} yLabel="return %" />
+          </Panel>
+          <Panel className="p-3 lg:col-span-2">
+            <SectionTitle>Underlying regime path</SectionTitle>
+            <AreaSpark data={issuance.index_path} x="month" y="level" color={C.violet} height={260} xNumeric xLabel="month" yLabel="index" />
+          </Panel>
+        </div>
+        <div className="mt-2 rounded-lg border border-violet/20 bg-violet/[0.06] px-3 py-2 text-small text-muted"><span className="font-semibold text-violet">Data boundary · </span>{issuance.source_note} Autocall range {issuance.robustness.autocall_rate_range_pct[0].toFixed(1)}–{issuance.robustness.autocall_rate_range_pct[1].toFixed(1)}%; loss range {issuance.robustness.loss_rate_range_pct[0].toFixed(1)}–{issuance.robustness.loss_rate_range_pct[1].toFixed(1)}%.</div>
+      </section>
+
+      <section>
+        <SectionTitle>02 · Hedge comparison</SectionTitle>
+        <div className="mb-3 text-body text-muted">{hedge.target}<br /><span className="text-small text-faint">{hedge.method}</span></div>
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
+          <Panel className="overflow-hidden lg:col-span-3">
+            <table className="w-full text-body">
+              <thead className="bg-panel2 text-micro font-bold uppercase tracking-[0.08em] text-muted"><tr>
+                <th className="px-3 py-3 text-left">Strategy</th><th className="px-3 py-3 text-right">P&amp;L σ</th><th className="px-3 py-3 text-right">ES 95</th><th className="px-3 py-3 text-right">Risk cut</th><th className="px-3 py-3 text-right">Turnover /100</th><th className="px-3 py-3 text-right">Cost /100</th><th className="px-3 py-3 text-right">Policy</th>
+              </tr></thead>
+              <tbody>{hedge.strategies.map((row) => <tr key={row.strategy} className={cn("border-t border-border-soft tnum", row.strategy === hedge.best_strategy && "bg-up/[0.06]")}>
+                <td className="px-3 py-3 font-sans font-semibold text-ink">{row.strategy}{row.strategy === hedge.best_strategy && <span className="ml-2 text-micro uppercase text-up">recommended</span>}</td>
+                <td className="px-3 py-3 text-right">{row.pnl_std.toFixed(2)}</td><td className="px-3 py-3 text-right text-down">{row.expected_shortfall_95.toFixed(2)}</td><td className="px-3 py-3 text-right text-up">{row.risk_reduction_pct.toFixed(1)}%</td><td className="px-3 py-3 text-right">{row.turnover.toFixed(1)}</td><td className="px-3 py-3 text-right">{row.transaction_cost.toFixed(3)}</td><td className={cn("px-3 py-3 text-right", row.strategy === "Unhedged" ? "text-muted" : row.eligible ? "text-up" : "text-down")}>{row.strategy === "Unhedged" ? "BASE" : row.eligible ? "PASS" : "FAIL"}</td>
+              </tr>)}</tbody>
+            </table>
+          </Panel>
+          <Panel className="p-3 lg:col-span-2">
+            <SectionTitle>Variance reduction vs unhedged</SectionTitle>
+            <Bars data={hedge.strategies} x="strategy" y="risk_reduction_pct" color={C.teal} height={255} yLabel="risk cut %" />
+          </Panel>
+        </div>
+        <div className="mt-2 text-small text-muted">Policy: {hedge.selection_rule}. The {hedge.static_instruments}-line strip is constrained to listed-style strikes and 5× face gross; hybrid static allocation is {hedge.hybrid_static_scale_pct.toFixed(1)}%.</div>
+      </section>
+
+      <section>
+        <SectionTitle>03 · Client-to-desk case study</SectionTitle>
+        <Panel className="overflow-hidden">
+          <div className="flex flex-col gap-3 border-b border-border bg-gradient-to-r from-panel2 to-panel px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+            <div><div className="text-figure font-bold text-ink">{cs.title}</div><div className="mt-1 text-body text-muted">Client target <span className="tnum text-accent">{cs.brief.target_coupon_pa_pct.toFixed(2)}% p.a.</span> · {cs.brief.tenor_years}Y · hedge CP CDS {cs.brief.counterparty_cds_bp}bp</div><div className="mt-1 text-small text-faint">Source: live blotter terms for {data.source_trade.trade_id} · {data.source_trade.underlying} · {data.source_trade.observation_frequency} observations · {cs.brief.counterparty_role}</div></div>
+            <div className={cn("rounded-lg border px-4 py-2 text-right", decisionTone)}><div className="text-micro font-bold uppercase tracking-[0.12em]">{cs.ccr_outcome.decision}</div><div className="mt-0.5 font-semibold">{cs.recommendation}</div></div>
+          </div>
+          <div className="grid grid-cols-1 divide-y divide-border lg:grid-cols-3 lg:divide-x lg:divide-y-0">
+            <div className="p-5"><div className="text-label font-bold uppercase tracking-[0.12em] text-accent">Investor</div><div className="mt-3 text-figure font-semibold">{cs.structure.product}</div><div className="mt-4 grid grid-cols-2 gap-3"><GreekStat label="Booked coupon" value={`${cs.structure.booked_coupon_pa_pct.toFixed(2)}%`} /><GreekStat label="Fair coupon · pre-XVA" value={`${cs.structure.fair_coupon_before_xva_pct.toFixed(2)}%`} /><GreekStat label="Offerable · post-XVA" value={`${cs.structure.offered_coupon_after_xva_pct.toFixed(2)}%`} tone={cs.structure.target_met ? "pos" : "neg"} /><GreekStat label="Target shortfall" value={`${cs.structure.target_shortfall_pct_pt.toFixed(2)}pt`} tone={cs.structure.target_met ? "pos" : "neg"} /></div><div className="mt-4 rounded-md border border-accent/20 bg-accent/[0.05] px-3 py-2 text-small text-muted"><span className="font-semibold text-accent">Restructuring menu · </span>{cs.restructuring_actions.join(" · ")}</div></div>
+            <div className="p-5"><div className="text-label font-bold uppercase tracking-[0.12em] text-teal">Trading desk</div><div className="mt-3 text-figure font-semibold">{cs.desk_outcome.selected_hedge}</div><div className="mt-4 grid grid-cols-2 gap-3"><GreekStat label="P&L risk cut" value={`${cs.desk_outcome.pnl_risk_reduction_pct.toFixed(1)}%`} tone="pos" /><GreekStat label="Hedge cost /100" value={fmt(cs.desk_outcome.hedge_cost, 3)} /></div><p className="mt-4 text-body text-muted">{cs.desk_outcome.selection_rule}</p></div>
+            <div className="p-5"><div className="text-label font-bold uppercase tracking-[0.12em] text-violet">CCR / capital</div><div className="mt-3 text-figure font-semibold">RAROC {cs.ccr_outcome.raroc_pct.toFixed(2)}%</div><div className="mt-4 grid grid-cols-2 gap-3"><GreekStat label="Total XVA" value={cs.ccr_outcome.xva_total.toFixed(3)} /><GreekStat label="EAD" value={cs.ccr_outcome.ead.toFixed(1)} /><GreekStat label="Economic capital" value={cs.ccr_outcome.economic_capital.toFixed(1)} /></div><p className="mt-4 text-body text-muted">{cs.decision_reasons.join(" ") || "All governance checks passed."}</p></div>
+          </div>
+          <div className="border-t border-border px-5 py-3 text-small text-faint">{cs.disclosure}</div>
+        </Panel>
+      </section>
+    </div>
+  );
+}
+
+/* ======================= Semi-Static Hedging ======================= */
+
+export function SemiStaticHedging({
+  trades, selectedId, setSelectedId, market,
+}: {
+  trades: Trade[];
+  selectedId: string | null;
+  setSelectedId: (id: string) => void;
+  market: { spot: number; sigma: number; r: number; q: number };
+}) {
+  const [data, setData] = useState<SemiStaticResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setError(null);
+    getSemiStatic({
+      trades: trades.map((trade) => ({
+        ...priceReq(trade),
+        trade_id: trade.trade_id,
+        underlying: trade.params.underlying ?? "NIFTY",
+        direction: trade.direction ?? 1,
+        initial_fixing: trade.initial_fixing ?? market.spot,
+        barrier_breached: trade.barrier_breached,
+        unwound_fraction: trade.unwound_fraction ?? 0,
+        elapsed_years: trade.elapsed_years ?? 0,
+      })),
+      ...market,
+      selected_trade_id: selectedId,
+    })
+      .then((result) => { if (active) setData(result); })
+      .catch((reason) => { if (active) setError(String(reason)); });
+    return () => { active = false; };
+  }, [trades, selectedId, market.spot, market.sigma, market.r, market.q]);
+
+  if (error) return <Panel className="p-5 text-down">Unable to build semi-static analytics: {error}</Panel>;
+  if (!data) return <div className="mt-8 animate-pulse text-muted">Building live replication portfolios…</div>;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-end justify-between">
+        <div>
+          <SectionTitle>Barrier Lifecycle Monitor · Live Book</SectionTitle>
+          <div className="mt-1 text-[12px] text-muted">
+            The same {trades.length} signed positions shown in Book &amp; Risk, re-marked on the live simulated spot and volatility. Select a barrier trade to inspect its constrained listed-grid strip.
+          </div>
+        </div>
+        {data.selected_trade_id && <Chip>{data.selected_trade_id}</Chip>}
+      </div>
+      {data.message && <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-[12px] text-accent">{data.message}</div>}
+      <div className="overflow-hidden rounded-md border border-border-soft bg-surface">
+        <table className="w-full text-sm text-left">
+          <thead className="bg-border-soft/30 text-muted uppercase text-[10px] tracking-wider">
+            <tr>
+              <th className="px-4 py-2">Trade ID</th>
+              <th className="px-4 py-2">Underlying</th>
+              <th className="px-4 py-2">Type</th>
+              <th className="px-4 py-2">Barrier</th>
+              <th className="px-4 py-2 text-right">Spot</th>
+              <th className="px-4 py-2 text-right">Dist %</th>
+              <th className="px-4 py-2 text-right">RN P(hit)</th>
+              <th className="px-4 py-2">Monitoring</th>
+              <th className="px-4 py-2">Lifecycle action</th>
+              <th className="px-4 py-2 text-right">Target</th>
+              <th className="px-4 py-2 text-right">Executed</th>
+              <th className="px-4 py-2">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border-soft font-mono">
+            {data.pre_unwind.map((row) => (
+              <tr
+                key={row.trade_id}
+                onClick={() => setSelectedId(row.trade_id)}
+                className={cn("cursor-pointer transition-colors hover:bg-border-soft/30", data.selected_trade_id === row.trade_id && "bg-teal/10")}
+              >
+                <td className="px-4 py-2 text-ink">{row.trade_id}</td>
+                <td className="px-4 py-2 text-teal">{row.underlying}</td>
+                <td className="px-4 py-2">
+                  <span className={cn("rounded border px-1.5 py-0.5 text-[9px] font-bold tracking-[0.08em]", row.barrier_type === "KI" ? "border-accent/40 bg-accent/10 text-accent" : "border-teal/40 bg-teal/10 text-teal")}>{row.barrier_type}</span>
+                </td>
+                <td className="px-4 py-2">{row.barrier.toFixed(2)}</td>
+                <td className="px-4 py-2 text-right">{row.spot.toFixed(2)}</td>
+                <td className={cn("px-4 py-2 text-right", row.distance_pct < 5 ? "text-down" : "text-up")}>{signed(row.distance_pct, 2)}%</td>
+                <td className="px-4 py-2 text-right text-accent">{row.p_hit.toFixed(1)}%</td>
+                <td className="px-4 py-2 font-sans text-[11px] text-muted">{row.monitoring}</td>
+                <td className="px-4 py-2 font-sans text-[11px] text-ink">{row.lifecycle_action}</td>
+                <td className="px-4 py-2 text-right">{row.target_action_pct === null ? <span className="text-faint">—</span> : `${row.target_action_pct.toFixed(1)}%`}</td>
+                <td className="px-4 py-2 text-right">{row.executed_action_pct.toFixed(1)}%</td>
+                <td className="px-4 py-2">
+                  <span className={cn("rounded px-2 py-0.5 text-[10px]", row.status === "ACTION_REQD" || row.status === "KNOCKED_IN" || row.status === "KNOCKED_OUT" ? "bg-down/20 text-down" : row.status === "WATCH" || row.status === "STATE_UNKNOWN" ? "bg-accent/15 text-accent" : "bg-border-soft text-muted")}>{row.status}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div>
+          <SectionTitle>Barrier Hedge Strip · {data.selected_trade_id ?? "—"}</SectionTitle>
+          <div className="overflow-hidden rounded-md border border-border-soft bg-surface h-[300px] overflow-y-auto">
+            <table className="w-full text-xs text-left">
+              <thead className="bg-border-soft/30 text-muted uppercase text-[9px] tracking-wider sticky top-0">
+                <tr>
+                  <th className="px-3 py-2">Instrument</th>
+                  <th className="px-3 py-2">Mat</th>
+                  <th className="px-3 py-2 text-right">Wgt</th>
+                  <th className="px-3 py-2 text-right">Δ-eq notional</th>
+                  <th className="px-3 py-2 text-right">Δ</th>
+                  <th className="px-3 py-2 text-right">Γ</th>
+                  <th className="px-3 py-2 text-right">ν</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border-soft font-mono">
+                {data.portfolio.map((row) => (
+                  <tr key={`${row.instrument}-${row.purpose}`} className="hover:bg-border-soft/20">
+                    <td className="px-3 py-2 text-ink">{row.instrument}</td>
+                    <td className="px-3 py-2">{row.maturity}</td>
+                    <td className="px-3 py-2 text-right">{row.weight.toFixed(4)}</td>
+                    <td className="px-3 py-2 text-right">{fmt(row.notional, 0)}</td>
+                    <td className="px-3 py-2 text-right">{fmt(row.delta, 4)}</td>
+                    <td className="px-3 py-2 text-right">{fmt(row.gamma, 7)}</td>
+                    <td className="px-3 py-2 text-right">{fmt(row.vega, 1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-2 text-small text-muted"><span className="mr-2 rounded border border-teal/30 bg-teal/10 px-1.5 py-0.5 text-micro font-bold text-teal">{data.summary.position_label}</span> Gross Δ-equivalent <span className="tnum text-ink">{fmt(data.summary.total_static_notional, 1)}</span> / policy limit <span className="tnum text-ink">{fmt(data.summary.gross_limit, 1)}</span>. Indicative BS component hedge; execution still requires live chain liquidity.</div>
+        </div>
+
+        <div>
+          <SectionTitle>Barrier-Component Tracking · Fixed Inception Barrier</SectionTitle>
+          <Panel className="p-4 h-[300px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={data.tracking} margin={{ top: 5, right: 5, left: 20, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1a202b" />
+                <XAxis dataKey="scenario" tick={{ fill: "#97a2b4", fontSize: 10 }} minTickGap={20} axisLine={false} tickLine={false} />
+                <YAxis domain={['auto', 'auto']} tick={{ fill: "#97a2b4", fontSize: 10 }} axisLine={false} tickLine={false} tickFormatter={(val) => Number(val).toFixed(2)} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: "#12161f", borderColor: "#232a37", fontSize: 12, color: "#eaeef5" }}
+                  itemStyle={{ color: "#e6b34a" }}
+                  formatter={(value) => fmt(Number(value ?? 0), 2)}
+                />
+                <Line type="monotone" dataKey="target_pv" name="Barrier component PV" stroke={C.up} strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="hedge_pv" name="Constrained strip PV" stroke={C.teal} strokeWidth={2} dot={false} strokeDasharray="4 4" />
+              </LineChart>
+            </ResponsiveContainer>
+          </Panel>
+        </div>
+      </div>
+
+          <SectionTitle>Strike-Bucketed Residual Cash Risk</SectionTitle>
+      <div className="overflow-hidden rounded-md border border-border-soft bg-surface p-4">
+        <div className="flex justify-between items-center mb-6">
+            <div className="text-sm text-muted">Target and static hedge grouped by contractual barrier. Delta is P&amp;L for +1% spot; gamma is ½Γ(1% spot)². Values are per ₹100 face.</div>
+            <div className="flex space-x-6 text-sm font-mono">
+                <div><span className="text-muted text-[10px] uppercase block">Net Δ / +1%</span><span className="text-ink">{signed(data.summary.residual_cash_delta_1pct, 4)}</span></div>
+                <div><span className="text-muted text-[10px] uppercase block">Net Γ P&amp;L / 1%²</span><span className="text-ink">{signed(data.summary.residual_cash_gamma_1pct, 4)}</span></div>
+            </div>
+        </div>
+        <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={data.risk_ladder} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#1a202b" />
+                    <XAxis dataKey="bucket" tick={{ fill: "#97a2b4", fontSize: 11 }} axisLine={false} tickLine={false} />
+                    <YAxis yAxisId="left" orientation="left" stroke={C.teal} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => Number(v).toFixed(2)} />
+                    <YAxis yAxisId="right" orientation="right" stroke={C.accent} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v) => Number(v).toFixed(3)} />
+                    <Tooltip
+                        contentStyle={{ backgroundColor: "#12161f", borderColor: "#232a37", fontSize: 12, color: "#eaeef5" }}
+                    />
+                    <Bar yAxisId="left" dataKey="cash_delta_target_1pct" name="Target Δ P&L / +1%" fill={C.teal} opacity={0.6} />
+                    <Bar yAxisId="left" dataKey="cash_delta_hedge_1pct" name="Hedge Δ P&L / +1%" fill={C.teal} />
+                    <Bar yAxisId="right" dataKey="cash_gamma_target_1pct" name="Target Γ P&L / 1%²" fill={C.accent} opacity={0.6} />
+                    <Bar yAxisId="right" dataKey="cash_gamma_hedge_1pct" name="Hedge Γ P&L / 1%²" fill={C.accent} />
+                </BarChart>
+            </ResponsiveContainer>
+        </div>
+      </div>
     </div>
   );
 }

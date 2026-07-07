@@ -51,6 +51,62 @@ def test_price_endpoint_returns_greeks_and_scenarios(client):
     assert "greeks" in body and "scenarios" in body and body["pv"] > 0
 
 
+def test_semistatic_uses_the_submitted_book_and_selection(client):
+    payload = {
+        "trades": [{
+            "trade_id": "LIVE-BRC-42",
+            "underlying": "NIFTY",
+            "product_type": "brc",
+            "notional": 100,
+            "observation_times": [0.5, 1.0],
+            "maturity": 1.0,
+            "params": {"coupon_rate": 0.06, "knock_in": 0.8, "strike": 1.0},
+            "initial_fixing": 100.0,
+            "barrier_breached": False,
+        }],
+        "spot": 92.0,
+        "sigma": 0.2,
+        "r": 0.05,
+        "q": 0.0,
+        "selected_trade_id": "LIVE-BRC-42",
+    }
+    response = client.post("/api/semistatic", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["selected_trade_id"] == "LIVE-BRC-42"
+    assert [row["trade_id"] for row in body["pre_unwind"]] == ["LIVE-BRC-42"]
+    assert body["pre_unwind"][0]["barrier"] == pytest.approx(80.0)
+    assert body["pre_unwind"][0]["barrier_type"] == "KI"
+    assert body["pre_unwind"][0]["lifecycle_action"] == "Maintain static strip"
+    assert body["pre_unwind"][0]["target_action_pct"] is None
+    assert body["pre_unwind"][0]["monitoring"] == "2 dates"
+    assert body["pre_unwind"][0]["executed_action_pct"] == 0.0
+    assert body["portfolio"] and body["tracking"]
+    assert "cash_delta_target_1pct" in body["risk_ladder"][0]
+    assert "residual_cash_delta_1pct" in body["summary"]
+
+
+def test_outcome_lab_connects_issuance_hedging_and_ccr(client):
+    response = client.get("/api/outcomes")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["issuance"]["n_issuances"] > 100
+    assert len(body["hedge"]["strategies"]) == 4
+    assert body["case_study"]["ccr_outcome"]["decision"] in {
+        "APPROVED", "REJECTED", "MANUAL_REVIEW",
+    }
+    assert body["case_study"]["recommendation"]
+    assert body["contract_id"] == body["case_study"]["contract_id"]
+    assert body["contract_id"] == body["source_trade"]["trade_id"]
+    assert body["contract_id"].startswith("NOTE-")
+    structure = body["case_study"]["structure"]
+    assert structure["fair_coupon_before_xva_pct"] >= structure["offered_coupon_after_xva_pct"]
+    assert structure["target_shortfall_pct_pt"] == pytest.approx(
+        max(12.0 - structure["offered_coupon_after_xva_pct"], 0.0), abs=0.01
+    )
+    assert body["issuance"]["terms"].startswith("2Y")
+
+
 def test_structure_endpoint_solves(client):
     r = client.post(
         "/api/structure",
@@ -161,3 +217,6 @@ def test_api_token_gate(client, monkeypatch):
             "params": {"coupon_rate": 0.03, "knock_in": 0.6}}
     assert client.post("/api/price", json=body).status_code == 401
     assert client.post("/api/price", json=body, headers={"X-API-Token": "s3cret"}).status_code == 200
+    assert client.get("/api/outcomes").status_code == 401
+    assert client.post("/api/semistatic", json={"trades": [], "spot": 100, "sigma": .2,
+                       "r": .05, "q": 0}).status_code == 401

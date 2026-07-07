@@ -19,7 +19,9 @@ jobs:
       - name: Type-check
         run: mypy spdt integration webapp
       - name: Test
-        run: pytest
+        run: |
+          pytest
+          pytest xva/tests
 
   frontend:
     runs-on: ubuntu-latest

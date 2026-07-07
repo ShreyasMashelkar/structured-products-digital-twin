@@ -103,6 +103,29 @@ class Product(ABC):
 
 
 @dataclass(frozen=True)
+class ScaledProduct(Product):
+    """A product position with an explicit quantity.
+
+    Keeping quantity outside primitive option definitions makes the unit contract unambiguous:
+    option strikes are quoted in underlying-price units while ``scale`` is the number of option
+    units held.  This is particularly useful when a note payoff is normalized by its initial
+    fixing, so a cash notional ``N`` maps to ``N / initial_fixing`` option units.
+    """
+
+    product: Product
+    scale: float
+
+    def monitoring_times(self) -> tuple[float, ...]:
+        return self.product.monitoring_times()
+
+    def cashflows(self, paths: PathSet) -> list[Cashflow]:
+        return [
+            Cashflow(cf.time, cf.amount * self.scale, cf.leg)
+            for cf in self.product.cashflows(paths)
+        ]
+
+
+@dataclass(frozen=True)
 class PriceResult:
     """A Monte-Carlo price with its sampling uncertainty."""
 

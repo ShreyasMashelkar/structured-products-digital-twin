@@ -32,7 +32,8 @@ from spdt.products.catalog import (
     CapitalProtectedNote,
     ReverseConvertible,
 )
-from spdt.products.graph import Product
+from spdt.products.graph import Product, ScaledProduct
+from spdt.products.legs import CompositeNote
 from spdt.products.primitives import CashOrNothingDigital, DownBarrierPut, EuropeanOption
 
 
@@ -42,6 +43,10 @@ def age(product: Product, dt: float) -> Product:
     Raises if an observation would cross the as-of date — daily attribution assumes ``dt`` is
     small enough that no cashflow is realised inside the step (which would be separate P&L).
     """
+    if isinstance(product, ScaledProduct):
+        return dataclasses.replace(product, product=age(product.product, dt))
+    if isinstance(product, CompositeNote):
+        return dataclasses.replace(product, legs=tuple(age(leg, dt) for leg in product.legs))
     if isinstance(product, (Autocallable, BarrierReverseConvertible, ReverseConvertible)):
         new_times = tuple(t - dt for t in product.observation_times)
         if min(new_times) <= 0.0:

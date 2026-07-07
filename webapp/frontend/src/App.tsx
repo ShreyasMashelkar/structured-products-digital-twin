@@ -4,9 +4,9 @@ import { Trade, bookTrades, priceReq } from "./lib/trades";
 import { Kpi, Tabs } from "./components/ui";
 import { cn } from "./lib/cn";
 import { compact, fmt, signed } from "./lib/format";
-import { BookRisk, CounterpartyXva, Originate, Overview, Validate } from "./views";
+import { OutcomeLab, SemiStaticHedging, BookRisk, CounterpartyXva, Originate, Overview, Validate } from "./views";
 
-const WORKSPACES = ["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate"];
+const WORKSPACES = ["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Outcome Lab"];
 
 // Rough standard normal (sum of uniforms) for the simulated tick.
 const gauss = () => Math.random() + Math.random() + Math.random() - 1.5;
@@ -185,6 +185,22 @@ export default function App() {
           )}
           {ws === "Counterparty & XVA" && <CounterpartyXva trades={trades} selectedId={selectedId} />}
           {ws === "Validate" && <Validate desk={desk} selectedId={selectedId} />}
+          {ws === "Semi-Static Hedging" && (
+            <SemiStaticHedging
+              trades={trades}
+              selectedId={selectedId}
+              setSelectedId={setSelectedId}
+              market={{
+                // Rebuild expensive replication analytics on desk risk buckets, not every 700ms
+                // cosmetic tick: 50 index points and half a vol point are the live snapshot grid.
+                spot: Math.round(agg.liveSpot / 50) * 50,
+                sigma: Math.round(agg.liveVol / 0.005) * 0.005,
+                r: desk.model.r,
+                q: desk.model.q,
+              }}
+            />
+          )}
+          {ws === "Outcome Lab" && <OutcomeLab />}
         </div>
       </div>
     </div>
