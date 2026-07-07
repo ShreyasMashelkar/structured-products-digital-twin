@@ -62,6 +62,23 @@ Everything is **snapshot-in, report-out**: every layer consumes an immutable, ve
 | L13 | `spdt/reporting` | Term sheet / factsheet / scenario-table generation |
 | L14 | `spdt/dashboard` | Executive desk blotter (Streamlit) + React desk (`webapp/`) |
 
+### Methodology & Engine Specs
+
+To ensure institutional fidelity, SPDT relies on industry-standard quantitative methods rather than simplified black-box approximations. The core engine specifications are:
+
+*   **Pricing Models:** 
+    *   **Local Stochastic Volatility (LSV):** Calibrated via Dupire's equation coupled with a Heston stochastic volatility process to correctly price the forward smile and barrier gap risk.
+    *   **Alternatives:** Pure Black-Scholes, Local Volatility (LV), and Heston are also available and used to compute the LSV−LV model reserve.
+*   **Monte Carlo Kernel:** 
+    *   Implemented as a hot **C++ kernel** exposed to Python via `pybind11` for high-performance path generation.
+    *   **Iterations:** Standard runs use **100,000 paths**.
+    *   **Variance Reduction:** Utilizes **Sobol low-discrepancy sequences** combined with a Brownian Bridge construction.
+*   **Greeks Engine:** 
+    *   Computes standard bump-and-revalue (finite difference) Greeks.
+    *   Implements **Adjoint Algorithmic Differentiation (AAD)** to compute all first-order sensitivities (Delta, Vega across the surface) at a constant multiple of a single pricing run.
+*   **Structuring Solvers:** Uses Brent's method and Levenberg-Marquardt to solve exotic note structures to par (e.g., finding the exact coupon rate that makes PV = 0 at inception, net of XVA and fees).
+*   **Multi-Asset Capabilities:** The engine is asset-agnostic. While Indian equities (NIFTY) are used for the live demo via NSE Bhavcopy, the `WorstOf` engine dynamically accepts any $N$-dimensional asset basket (e.g., US equities like AAPL, TSLA) and automatically scales the Cholesky correlation matrix.
+
 ### Decomposition and semi-static hedge lifecycle
 
 The risk layer now turns each supported note into typed components (`funding`, `coupon`,
