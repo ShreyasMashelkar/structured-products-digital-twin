@@ -1,3 +1,12 @@
+---
+title: Structured Products Digital Twin
+emoji: 📈
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
+
 # Structured Products Digital Twin (SPDT)
 
 > A production-shaped educational simulation of an equity structured-products desk **plus its counterparty-risk twin**: `structuring → pricing → hedging → risk → P&L attribution`, then `exposure → CVA/FVA → all-in price → governance`, built on free Indian market data.
