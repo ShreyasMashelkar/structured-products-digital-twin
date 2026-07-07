@@ -6,7 +6,7 @@ import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./compo
 import { cn } from "./lib/cn";
 import { fmt, pct, signed } from "./lib/format";
 import { C } from "./lib/theme";
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, LineChart, Line } from "recharts";
+import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, LineChart, Line, Legend } from "recharts";
 
 /* ======================= shared bits ======================= */
 
@@ -1076,6 +1076,7 @@ export function SemiStaticHedging({
                     <Tooltip
                         contentStyle={{ backgroundColor: "#12161f", borderColor: "#232a37", fontSize: 12, color: "#eaeef5" }}
                     />
+                    <Legend wrapperStyle={{ fontSize: 12, paddingTop: 10 }} />
                     <Bar yAxisId="left" dataKey="cash_delta_target_1pct" name="Target Δ P&L / +1%" fill={C.teal} opacity={0.6} />
                     <Bar yAxisId="left" dataKey="cash_delta_hedge_1pct" name="Hedge Δ P&L / +1%" fill={C.teal} />
                     <Bar yAxisId="right" dataKey="cash_gamma_target_1pct" name="Target Γ P&L / 1%²" fill={C.accent} opacity={0.6} />
