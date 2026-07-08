@@ -4,9 +4,9 @@ import { Trade, bookTrades, priceReq } from "./lib/trades";
 import { Kpi, Tabs } from "./components/ui";
 import { cn } from "./lib/cn";
 import { compact, fmt, signed } from "./lib/format";
-import { OutcomeLab, SemiStaticHedging, BookRisk, CounterpartyXva, Originate, Overview, Validate } from "./views";
+import { OutcomeLab, SemiStaticHedging, BookRisk, CounterpartyXva, HowToUse, Originate, Overview, Validate } from "./views";
 
-const WORKSPACES = ["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Outcome Lab"];
+const WORKSPACES = ["How to use", "Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Outcome Lab"];
 
 // Rough standard normal (sum of uniforms) for the simulated tick.
 const gauss = () => Math.random() + Math.random() + Math.random() - 1.5;
@@ -189,6 +189,7 @@ export default function App() {
         <KpiStrip desk={desk} nNotes={trades.length} nav={agg.nav} cashDelta={agg.cashDelta} vegaPt={agg.vegaPt} sim={sim} markMove={agg.markMove} />
         <Tabs tabs={WORKSPACES} active={ws} onChange={setWs} />
         <div className="pt-5">
+          {ws === "How to use" && <HowToUse onGo={setWs} />}
           {ws === "Overview" && <Overview desk={desk} onPickTrade={pickTrade} />}
           {ws === "Originate" && <Originate desk={desk} onStage={stageTrade} volShiftPct={Math.round((agg.liveVol - desk.model.atm_vol) * 1000) / 10} />}
           {ws === "Book & Risk" && (

@@ -35,6 +35,143 @@ function GreekStat({ label, value, tone }: { label: string; value: string; tone?
   );
 }
 
+/* ======================= How to use ======================= */
+
+const TOUR_STEPS = [
+  {
+    tab: "Overview",
+    kicker: "Start here",
+    title: "Read the desk in 30 seconds",
+    body: "Book NAV, overnight P&L explain, top movers and worst stresses. This is the front-office snapshot: what changed, why it changed, and where the risk sits.",
+    checks: ["Confirm the book is live/loaded and note count looks right.", "Use the waterfall to see whether P&L is explained by Greeks or residual.", "Click a top mover if you want to drill into one note."],
+    firstClick: "Top movers list",
+  },
+  {
+    tab: "Originate",
+    kicker: "Build a note",
+    title: "Turn a client brief into a priced structure",
+    body: "Set coupon, protection, maturity and observations. The engine recommends a structure, solves it to par, and lets you stage it into the book.",
+    checks: ["Move coupon/protection sliders and watch whether the ask is achievable.", "Compare the recommended product with alternatives ranked by fit.", "Add the solved note to the book to see its risk impact."],
+    firstClick: "Target coupon slider",
+  },
+  {
+    tab: "Book & Risk",
+    kicker: "Inspect the book",
+    title: "Drill into the 15-note portfolio",
+    body: "Click a trade to see terms, live re-price, Greeks, stress contribution and how it behaves under the simulated market move.",
+    checks: ["Select any trade ID to open the live detail pane.", "Use tenor/product filters to see risk concentrations.", "Check delta, gamma, vega and stress by individual note."],
+    firstClick: "Any NOTE-xxx row",
+  },
+  {
+    tab: "Counterparty & XVA",
+    kicker: "Capital view",
+    title: "See the CCR/XVA layer on the same trades",
+    body: "Shows exposure, CVA/FVA/KVA-style charges, RAROC and approval logic from the companion INR CCR/XVA engine integrated at the exposure seam.",
+    checks: ["Select a note and see exposure profiles feeding XVA.", "Review whether incremental XVA/RAROC passes governance.", "Use this as the bridge from structuring price to capital-aware approval."],
+    firstClick: "Trade selector",
+  },
+  {
+    tab: "Validate",
+    kicker: "Model controls",
+    title: "Check whether the model output is believable",
+    body: "Surface health, pricing checks, explain residuals and validation flags. This is the model-risk sanity layer, not a decorative chart page.",
+    checks: ["Check vol-surface no-arbitrage and model-health flags.", "Look for pricing/explain residuals that are too large.", "Use it to understand when the dashboard is warning you not to trust a number blindly."],
+    firstClick: "Validation flags",
+  },
+  {
+    tab: "Semi-Static Hedging",
+    kicker: "Hedge implementation",
+    title: "Replicate barrier risk with listed-style strips",
+    body: "For barrier-linked notes, it builds constrained option strips to cover part of the embedded barrier exposure, then shows the residual Greeks left for dynamic hedging.",
+    checks: ["Pick a barrier-linked trade from the live book.", "Inspect the option strip, gross notional and policy limits.", "Use the residual ladder to see what the static hedge did not remove."],
+    firstClick: "Barrier trade row",
+  },
+  {
+    tab: "Outcome Lab",
+    kicker: "Outcomes",
+    title: "Move from model values to realised-style evidence",
+    body: "Synthetic issuance-cohort backtest, hedge comparison, and one client-to-desk case study tied back to the book. This is the ‘so what happened?’ section.",
+    checks: ["Read the issuance-cohort backtest as a regime study, not real issued-note history.", "Compare unhedged, delta-only, semi-static and hybrid hedging.", "Use the case study to see coupon, hedge cost, XVA and decision outcome together."],
+    firstClick: "Hedge comparison table",
+  },
+];
+
+export function HowToUse({ onGo }: { onGo: (tab: string) => void }) {
+  return (
+    <div className="space-y-5">
+      <Panel className="relative overflow-hidden p-5">
+        <div className="absolute right-0 top-0 h-32 w-72 rounded-bl-full bg-accent/10 blur-2xl" />
+        <div className="relative grid gap-5 lg:grid-cols-[1.15fr_0.85fr] lg:items-end">
+          <div>
+            <div className="text-label font-bold uppercase tracking-[0.16em] text-accent">First-time reviewer guide</div>
+            <h2 className="mt-2 text-[1.8rem] font-extrabold tracking-tight text-ink">How to use this structuring desk</h2>
+            <p className="mt-2 max-w-4xl text-body leading-relaxed text-muted">
+              SPDT is a NIFTY structured-products digital twin: originate client notes, mark a 15-trade book, explain P&amp;L,
+              inspect Greeks/stress, pass the same trades into CCR/XVA, validate model health, test semi-static barrier hedges,
+              and review outcome-style evidence.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button onClick={() => onGo("Overview")} className="ring-desk rounded-lg border border-accent/50 bg-accent/15 px-3 py-2 text-body font-semibold text-accent hover:bg-accent/25">
+                Start with Overview →
+              </button>
+              <button onClick={() => onGo("Outcome Lab")} className="ring-desk rounded-lg border border-border bg-panel2/60 px-3 py-2 text-body font-semibold text-ink hover:border-teal/50">
+                Jump to outcomes
+              </button>
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-panel2/55 p-4">
+            <div className="text-micro font-bold uppercase tracking-[0.12em] text-muted">Recommended review path</div>
+            <div className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-small">
+              {["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Outcome Lab"].map((tab, i) => (
+                <button key={tab} onClick={() => onGo(tab)} className="contents text-left">
+                  <span className="tnum rounded border border-border bg-surface px-1.5 py-0.5 text-faint">{String(i + 1).padStart(2, "0")}</span>
+                  <span className="text-muted hover:text-accent">{tab}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </Panel>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {TOUR_STEPS.map((step) => (
+          <button
+            key={step.tab}
+            onClick={() => onGo(step.tab)}
+            className="ring-desk group rounded-xl border border-border bg-panel2/35 p-4 text-left transition-colors hover:border-accent/55 hover:bg-panel2/70"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-micro font-bold uppercase tracking-[0.12em] text-accent">{step.kicker}</span>
+              <span className="text-small text-faint group-hover:text-accent">{step.tab} →</span>
+            </div>
+            <div className="mt-2 text-figure font-semibold text-ink">{step.title}</div>
+            <p className="mt-2 text-small leading-relaxed text-muted">{step.body}</p>
+            <div className="mt-3 border-t border-border-soft pt-3">
+              <div className="text-micro font-bold uppercase tracking-[0.1em] text-muted">What to check</div>
+              <ul className="mt-2 space-y-1.5">
+                {step.checks.map((item) => (
+                  <li key={item} className="flex gap-2 text-small leading-snug text-muted">
+                    <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-accent/80" />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+              <div className="mt-3 rounded-md border border-border-soft bg-surface/70 px-2.5 py-2 text-small text-faint">
+                Good first click: <span className="font-semibold text-ink">{step.firstClick}</span>
+              </div>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div className="rounded-lg border border-violet/25 bg-violet/[0.06] px-4 py-3 text-small leading-relaxed text-muted">
+        <span className="font-semibold text-violet">Data boundary:</span> hosted mode uses synthetic NIFTY equity paths/surfaces unless a live/private data feed is supplied.
+        Local mode can use the Bloomberg MIFOR workbook as a funding overlay; the app labels what is real versus synthetic in the masthead.
+      </div>
+    </div>
+  );
+}
+
 /* ======================= Overview ======================= */
 
 export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: string) => void }) {
