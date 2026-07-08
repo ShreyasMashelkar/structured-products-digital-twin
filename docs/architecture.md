@@ -50,19 +50,21 @@ whole stack is source-agnostic:
 - **Dhan** (`SPDT_SOURCE=dhan`) — DhanHQ's authenticated **intraday** option-chain API; a
   broker feed, so it isn't IP-blocked like the public NSE endpoints.
 
-Rates always bootstrap from **FBIL** (India's OIS benchmark). NSE blocks public *scraping*,
+Live rates bootstrap from **FBIL** (India's OIS benchmark). NSE blocks public *scraping*,
 so the reliable free live path is EOD bhavcopy; Dhan is the keyed route for true intraday.
+An optional local Bloomberg workbook can be supplied as a **MIFOR funding overlay** only; unless it
+contains true MIBOR/OIS inputs, it does not replace the discount curve or NIFTY equity volatility.
 
 ## The XVA / CCR seam (two desks, one core)
 
-A vendored INR OTC / CCR / XVA engine (`xva/`) is combined with SPDT as **two desks over one
+A separately built INR OTC / CCR / XVA engine (`xva/`) is combined with SPDT as **two desks over one
 shared core**, coupled at exactly one place — the **exposure/position seam** — so the two
 product models never have to be unified ([ADR-0007](adr/0007-integrate-xva-at-the-exposure-seam.md)).
 
 - The seam is one artefact, `ExposurePackage` (a path × time NPV cube + curves + counterparty),
   produced by SPDT's Monte Carlo (mark-to-future, via Longstaff–Schwartz for path-dependent
   notes) and consumed by the XVA stack.
-- `integration/` is the **only** package allowed to import both worlds; it *reuses* the engine's
+- `integration/` is the **only** package allowed to import both worlds; it reuses the companion engine's
   `CVAEngine` / `KVAEngine` / `MVAEngine` / `CSAEngine` / `BACVAEngine` rather than reimplementing.
 - The journey: `position → exposure → [netting · CSA/MPoR collateral · wrong-way tilt] →
   CVA + FVA + KVA + MVA − DVA → all-in price → EAD/PFE + economic & regulatory capital +

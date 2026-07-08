@@ -4,8 +4,8 @@
 Accepted
 
 ## Context
-SPDT (this repo, the equity structuring desk) and the XVA Engine (an INR OTC / CCR / XVA
-platform, now vendored under `xva/`) are complementary halves of one derivatives business: SPDT
+SPDT (the equity structuring desk) and the XVA Engine (an INR OTC / CCR / XVA
+platform built as a separate companion project and now kept in-tree under `xva/`) are complementary halves of one derivatives business: SPDT
 *prices and hedges* equity structured notes; XVA *charges* positions for counterparty, funding and
 capital cost. They already share a data foundation (FBIL/RBI free Indian data), a curve framework
 (OIS bootstrapping), and a Heston/AAD lineage. The XVA engine even ships the equity hooks the
@@ -31,8 +31,8 @@ shared core.
    React desk for the per-trade charge — we do **not** rebuild XVA's ~12.5k LOC of analytics in
    React (effort with no new capability; see "two different kinds of tool" below).
 
-4. **Vendored via `git subtree --squash`** under `xva/`. SPDT history stays readable; the original
-   XVA repo retains its 33-commit granular history. Generated artefacts (exposure cube, EOD
+4. **Companion engine kept in-tree** under `xva/`. SPDT history stays readable, the XVA platform
+   remains a separate subsystem behind the seam, and generated artefacts (exposure cube, EOD
    reports, db) are git-ignored.
 
 ## Rationale
@@ -46,7 +46,7 @@ shared core.
   code that already exists on both sides.
 
 ## Consequences
-- A new top-level `integration/` package depends on *both* `spdt.*` and the vendored XVA `src.*`
+- A new top-level `integration/` package depends on *both* `spdt.*` and the companion XVA `src.*`
   (it puts `xva/` on `sys.path`). It is the only place allowed to import across both worlds.
 - The first milestone is a **curve-join proof**: one SPDT curve drives `CVAEngine` and the adapter's
   discount factors match the source to 1e-8 (`tests/test_xva_integration.py`, which carries every

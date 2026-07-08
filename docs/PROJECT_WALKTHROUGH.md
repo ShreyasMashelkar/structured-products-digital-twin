@@ -7,7 +7,7 @@ How to explain this project to someone — from a client's need to the end of th
 ## Part A — The talk track (rehearse these)
 
 ### 🎯 30-second elevator
-> "I built a digital twin of an equity structured-products desk **and** its counterparty-risk function. On real Indian market data, it takes a client brief, structures and prices an exotic autocallable, then runs it through the full XVA stack — CVA, FVA, KVA, MVA — to produce an *all-in* price and an automated trade-approval decision. The headline: the same note's coupon drops from **7.3% to 1.1% p.a.** just from the counterparty's credit quality, and the platform shows you exactly why."
+> "I built a digital twin of an equity structured-products desk and integrated it with a separate INR CCR/XVA engine I built earlier. The structuring side produces future exposure cubes for notes like autocallables; the counterparty-risk side consumes those cubes for CVA, FVA, KVA, MVA, capital, RAROC and governance. The point is to show how a client payoff becomes a desk decision, not just a model PV."
 
 ### 🎯 2-minute version
 Three beats:
@@ -39,7 +39,7 @@ Walk Part B, but spend your time on the three things that signal seniority:
 ## Part B — The end-to-end journey (the detailed version)
 
 ### The thesis: two desks, one seam
-A bank has two groups that both touch the same trade — the **structuring desk** (prices & hedges the note) and the **XVA/CCR desk** (charges it for default, funding and capital cost). In the project these are two codebases (SPDT + a vendored XVA engine) that talk through **exactly one object — the exposure cube** — and nothing else (ADR-0007). The structuring desk *produces* it; the XVA desk *consumes* it. That seam is the whole story.
+A bank has two groups that both touch the same trade — the **structuring desk** (prices & hedges the note) and the **XVA/CCR desk** (charges it for default, funding and capital cost). In the project these are two systems I built separately: SPDT for equity structured products and `xva/` for INR CCR/XVA. They talk through **exactly one object — the exposure cube** — and nothing else (ADR-0007). The structuring desk *produces* it; the XVA desk *consumes* it. That seam is the whole story.
 
 ### Stage 0 — Market data foundation (a real, 3-way pipeline)
 Everything starts from a versioned `MarketSnapshot`: spot, an OIS discount curve, and an **arbitrage-free implied-vol surface** (SVI/SSVI + arbitrage repair). The data behind it comes from three interchangeable sources, all behind one `fetch() → RawMarketData` seam:
@@ -57,7 +57,7 @@ Everything starts from a versioned `MarketSnapshot`: spot, an OIS discount curve
 - **NSE bhavcopy** (`SPDT_LIVE=1`) — the real public **EOD** F&O file; walks back to the latest *published* file, so it works any time of day (mid-session it serves the previous close — settlement marks).
 - **Dhan** (`SPDT_SOURCE=dhan`) — DhanHQ's authenticated **intraday** option-chain API; a broker feed, so it isn't IP-blocked like the public NSE endpoints.
 
-Rates always bootstrap from **FBIL** (India's OIS benchmark). *Snapshot in, report out* — every layer consumes an immutable snapshot, which is what makes reproducible pricing and historical replay possible. (Engineering note worth telling: NSE blocks public *scraping*, so the reliable free live path is EOD bhavcopy; Dhan is the keyed route for true intraday — bhavcopy is the better default, Dhan only when real-time matters.)
+Live rates bootstrap from **FBIL** (India's OIS benchmark). *Snapshot in, report out* — every layer consumes an immutable snapshot, which is what makes reproducible pricing and historical replay possible. (Engineering note worth telling: NSE blocks public *scraping*, so the reliable free live path is EOD bhavcopy; Dhan is the keyed route for true intraday — bhavcopy is the better default, Dhan only when real-time matters.) If a local Bloomberg workbook is supplied, the current app uses it only as a **MIFOR funding overlay**; it does not pretend USD/INR vol is NIFTY vol or that MIFOR is a MIBOR/OIS discount curve.
 
 ### Stage 1 — The client need
 A private-bank client: *"~12% annual income, can stomach a 30% drop, 2-year horizon."* That's a **client brief**.
@@ -114,12 +114,12 @@ A React trading desk with a "Counterparty & XVA" tab: pick a note, dial counterp
 
 ## The architecture / engineering story (if they push on craft)
 - **One seam, enforced.** `integration/` is the *only* package allowed to import both worlds; the boundary is real, not aspirational.
-- **Reuse over rebuild.** The integration layer wires the vendored engine's `CVAEngine` / `KVAEngine` / `MVAEngine` / `CSAEngine` / `BACVAEngine` rather than reimplementing them — it owns the *seam*, not the analytics.
+- **Two owned systems, one seam.** The integration layer wires the companion CCR/XVA engine's `CVAEngine` / `KVAEngine` / `MVAEngine` / `CSAEngine` / `BACVAEngine` into SPDT rather than merging the product models — it owns the *seam*, not duplicate analytics.
 - **Honest scope.** A `REAL / FAITHFUL / STUBBED / SKIPPED` contract names exactly what's production-shaped vs simplified vs out of scope.
 - **Quality gates.** ~280 tests, ~88% coverage, ruff + mypy clean across 100+ files, CI on Python *and* the frontend.
 
 ## What's deliberately out of scope (have these ready)
-Jointly-simulated (vs parametric) wrong-way risk, full **FRTB-CVA** regulatory capital, term-structure funding curves everywhere, and the entire **rates/swap** asset class (Hull-White, swaptions) — all served by the vendored engine directly, not forced through the equity seam.
+Jointly-simulated (vs parametric) wrong-way risk inside SPDT, full **FRTB-CVA** regulatory capital in the equity seam, term-structure funding curves everywhere, and the entire **rates/swap** asset class (Hull-White, swaptions) — those are served by the companion CCR/XVA project directly, not forced through the equity-structuring seam.
 
 ---
 

@@ -18,6 +18,8 @@ Two rules govern everything below:
 - **The math is the asset, not the code.** The single biggest failure mode for a project like this is shallow ownership of the core math — being able to run an autocallable Monte Carlo but unable to derive why the pathwise delta estimator is unbiased. Every layer below ends with a **"You must be able to defend"** box. Treat those as the real deliverable.
 
 > **Reuse note (read first):** This project is a deliberate *superset* of your ESP (Equity Structuring & Exotics Platform) and shares a lineage with your XVA engine. The autocallable LSV pricer, the AAD spine, the dependency-graph architecture, and the model-reserve artefact you already designed for ESP are **Layers 4, 5, and 11 of this system**. Do not rebuild them. SPDT's new content is the *desk simulation* around the pricer: the structurer workstation, the virtual book, historical replay, hedging simulation, and P&L attribution. Frame SPDT as "ESP grown into a full desk twin," and you save ~2 months.
+>
+> **Current integrated architecture:** the `xva/` tree is not a third-party library. It is a standalone INR CCR/XVA platform built as a separate project and integrated into SPDT through the exposure-cube seam. The right story is: *I built the structuring side, I built the counterparty-risk side, and I connected them at the one object real systems exchange — path × time exposure.*
 
 ---
 
@@ -62,10 +64,13 @@ A worst-of/basket product on 3 liquid names is enough to exercise the entire cor
 | **FBIL / RBI** | MIBOR, OIS, T-bill yields, reference rates | High | **Bootstrap** the OIS / risk-free curve → risk-neutral drift + risk-free discounting |
 | **Issuer bond / note levels** | Issuer funding/credit spread over OIS | Medium | **Bootstrap** the issuer funding curve (OIS + spread) → discounts the note's ZCB leg |
 | **NSE corporate actions** | Dividends, splits, bonus | Medium | Dividend curve, dividend delta |
+| **Bloomberg Terminal export (when available)** | MIFOR, SOFR, USD/INR vol in the current workbook | High for those specific markets | **Funding overlay only** unless a true MIBOR/OIS sheet is supplied; never use USD/INR vol as NIFTY equity vol |
 
 > **Rates are bootstrapped, never assumed flat.** Both curves are *term structures* built by bootstrapping the traded instruments above (solve maturity-by-maturity so each step has one unknown discount factor; interpolate between pillars — default log-linear on discount factors). We carry **two** curves because they play different roles: the **OIS / risk-free curve** sets the risk-neutral drift `(r−q)` and discounts the option leg, while the **issuer funding curve** discounts the note's zero-coupon-bond leg — the note is the issuer's *debt* (see §XI.8 of the interview defense). A flat rate would give the wrong drift at every tenor *and* collapse the funding-spread economics that explain a note's cost decomposition.
 >
 > **Funding curve = spread over OIS** (decision, see [ADR 0002](docs/adr/0002-funding-curve-as-spread-over-ois.md)). We fully bootstrap OIS, then add a *small parametric* spread term structure `s(T)` (piecewise-linear, 2–3 knots; **not** flat) calibrated to whatever issuer reference exists (issuance spread / benchmark bank-bond spread / CDS). Rationale: our data has no dense liquid issuer bond curve, so a direct issuer bootstrap is unstable and breaks snapshot reproducibility; spread-over-OIS stays coherent under rate moves and makes the spread a first-class **shockable** factor for structuring economics and stress. Switch to a direct issuer bootstrap only given a liquid issuer bond/CDS curve.
+>
+> **Data-boundary rule for Bloomberg files:** a Terminal export is not automatically "real market data for the whole desk." The current workbook contains Modified MIFOR, SOFR and USD/INR vol. SPDT maps MIFOR into an indicative funding-spread overlay and leaves NIFTY equity vol and the OIS/MIBOR discount curve untouched. The UI surfaces that boundary explicitly.
 
 **Key insight that solves the "no historical IV" problem:** you do **not** need a paid IV history. The F&O bhavcopy contains the **daily settlement price of every option contract**. Combined with the underlying close and a discount rate, you invert Black-Scholes per contract to get **implied vol per (strike, expiry) for every historical day**. That gives you a genuine historical implied-vol surface time series — for free — which is the single most valuable dataset for the whole project (backtesting, vega P&L, model reserve, surface versioning all depend on it).
 

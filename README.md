@@ -13,7 +13,7 @@ pinned: false
 
 SPDT is a modular platform that structures, prices (BS / Local Vol / Heston / LSV), risk-manages, hedges, and attributes P&L for equity exotics (autocallables, Phoenix, barrier reverse convertibles, worst-of baskets) on NSE data — with AAD Greeks, typed payoff decomposition, semi-static vanilla-strip replication, model-reserve computation, historical backtesting, and a desk dashboard.
 
-It then couples to a vendored **INR OTC / CCR / XVA engine** at a single seam (the exposure cube), so a note can be priced *all-in* — coupon net of its lifetime CVA + FVA — and gated by counterparty limits, economic capital and RAROC. See [**XVA & Counterparty Credit Risk**](#xva--counterparty-credit-risk) below and [`docs/adr/0007`](docs/adr/0007-integrate-xva-at-the-exposure-seam.md).
+It then couples to a separate **INR OTC / CCR / XVA engine that I built as its own project** at a single seam (the exposure cube), so a note can be priced *all-in* — coupon net of its lifetime CVA + FVA — and gated by counterparty limits, economic capital and RAROC. See [**XVA & Counterparty Credit Risk**](#xva--counterparty-credit-risk) below and [`docs/adr/0007`](docs/adr/0007-integrate-xva-at-the-exposure-seam.md).
 
 The full design specification and week-by-week build roadmap live in [`SPDT_Design_and_Build.md`](SPDT_Design_and_Build.md). **New here? Read the [project walkthrough](docs/PROJECT_WALKTHROUGH.md)** — the end-to-end story from client need to the XVA decision, with a talk track.
 
@@ -29,9 +29,9 @@ Two rules govern everything here:
 | Bucket | Meaning | Examples in SPDT |
 |---|---|---|
 | **REAL** | Mathematically correct, production-shaped, owned end to end | SVI/SSVI calibration, autocallable MC pricing, bump/pathwise/**AAD** Greeks (cross-checked on the autocallable), P&L attribution with **bucketed vega**, **two-curve discounting**, autocallable/Phoenix/**BRC/reverse-convertible/capital-protected** catalog, **mark-to-future exposure (LSM) → CVA + FVA + KVA + MVA − DVA → all-in coupon**, **netting / CSA-MPoR collateral / dynamic IM / wrong-way-risk overlays**, **term-structure credit curves**, **CS01 / JTD / credit-stress**, **EAD/PFE/EEPE + ASRF economic capital + equity SA-CCR EAD + RAROC governance gate** |
-| **FAITHFUL** | Correct method, scoped scale; a bank implementation differs in calibration depth, liquidity treatment and operational controls | LSV calibration, the payoff DSL (composable leg primitives), Heston QE + Carr–Madan FFT, BGK barrier correction, historical replay, **semi-static barrier replication** (model-calibrated liquid vanilla strip + tracking/residual-risk lifecycle), **C++ MC kernel** (one product ported, measured speedup; rest "same pattern"), the vendored **XVA/CCR engine** (CVA/FVA/KVA/MVA, SA-CCR, SIMM, WWR — surfaced by SPDT only through the exposure seam); parametric (exponential-tilt) WWR vs the engine's jointly-simulated copula version |
+| **FAITHFUL** | Correct method, scoped scale; a bank implementation differs in calibration depth, liquidity treatment and operational controls | LSV calibration, the payoff DSL (composable leg primitives), Heston QE + Carr–Madan FFT, BGK barrier correction, historical replay, **semi-static barrier replication** (model-calibrated liquid vanilla strip + tracking/residual-risk lifecycle), **C++ MC kernel** (one product ported, measured speedup; rest "same pattern"), the companion **XVA/CCR engine** (CVA/FVA/KVA/MVA, SA-CCR, SIMM, WWR — built separately and surfaced by SPDT only through the exposure seam); parametric (exponential-tilt) WWR vs the engine's jointly-simulated copula version |
 | **STUBBED** | Architecturally present with a clean interface; placeholder implementation | GPU pricing kernels (designed-for; CPU C++ path implemented), message queue (in-process bus that *could* be Kafka) |
-| **SKIPPED (declared)** | Out of scope, named explicitly | Real-time market connectivity, **regulatory CVA capital** (BA-CVA / FRTB-CVA — in the vendored engine, not the equity seam), a **jointly-simulated** WWR intensity (the seam uses a parametric tilt), the **rates/swap** asset class (Hull-White, swaptions, CCIL data — served by the engine directly), multi-currency/quanto at scale |
+| **SKIPPED (declared)** | Out of scope, named explicitly | Real-time market connectivity, full **regulatory CVA capital inside the equity seam** (BA-CVA / FRTB-CVA live in the companion CCR/XVA project), a **jointly-simulated** WWR intensity inside SPDT (the seam uses a parametric tilt), the **rates/swap** asset class (Hull-White, swaptions, CCIL data — served by the companion engine directly), multi-currency/quanto at scale |
 
 ---
 
@@ -142,15 +142,15 @@ Synthetic is the reproducible default; `SPDT_LIVE=1` uses NSE's public **EOD bha
 
 ## XVA & Counterparty Credit Risk
 
-SPDT (the structuring desk) and a vendored **INR OTC / CCR / XVA engine** (`xva/`, ~12.5k LOC: CVA/FVA/KVA/MVA, SA-CCR, SIMM, wrong-way risk, economic capital) are combined as **two desks over one shared core**, coupled at exactly one place — the **exposure/position seam** — so the two product models never have to be unified ([ADR-0007](docs/adr/0007-integrate-xva-at-the-exposure-seam.md)).
+SPDT (the structuring desk) and a separately built **INR OTC / CCR / XVA engine** (`xva/`, ~12.5k LOC: CVA/FVA/KVA/MVA, SA-CCR, SIMM, wrong-way risk, economic capital) are combined as **two desks over one shared core**, coupled at exactly one place — the **exposure/position seam** — so the two product models never have to be unified ([ADR-0007](docs/adr/0007-integrate-xva-at-the-exposure-seam.md)).
 
-> **Ownership boundary.** The `spdt/` equity structured-products platform, the `integration/`
-> exposure/curve/governance seam, and the React/FastAPI desk integration are developed in this
-> repository. The standalone `xva/` platform is vendored and deliberately kept behind that seam;
-> its engines are reused rather than presented as newly authored SPDT code.
+> **Ownership boundary.** `spdt/` is the equity structured-products desk. `xva/` is a standalone
+> INR CCR/XVA platform I built earlier and integrated here as a companion engine. The `integration/`
+> package is the seam between them: SPDT produces exposure packages; the CCR/XVA engine consumes
+> them for charge, capital and governance. The two product models stay deliberately separate.
 
 ```
-   SPDT (equity structuring)                 vendored XVA / CCR engine
+   SPDT (equity structuring)                 companion XVA / CCR engine
  ┌───────────────────────────┐            ┌────────────────────────────┐
  │ payoff DSL · MC pricing   │            │ CVAEngine · KVA · MVA      │
  │ Heston/LSV · SSVI · AAD   │            │ CSAEngine · BA-CVA · SIMM  │
@@ -182,7 +182,7 @@ The `integration/` package is the only code allowed to import both worlds. The s
 | **Governance gate** | Mirrors the bank's trade-approval logic — limit check on EAD/PFE + **RAROC** vs hurdle → **APPROVED / REJECTED / MANUAL_REVIEW** — fed from the exposure seam, reusing the engine's `LimitEngine` / `RAROCEngine` / `EconomicCapitalEngine` | `integration/governance.py` |
 | **Desk tab** | A "Counterparty & XVA" React workspace + `POST /api/xva`: dial counterparty CDS / recovery / funding / hurdle / margin / EAD limit and watch the decision, charge, exposure profile and CVA-vs-spread curve update live | `webapp/` |
 
-**Honest scope.** The seam now prices the full **`CVA + FVA + KVA + MVA − DVA`** suite and supports **netting**, **CSA/MPoR collateral**, **dynamic IM**, **term-structure credit curves**, **CS01 / JTD / stress** and a regulatory **equity SA-CCR EAD**. Deliberately still in the vendored engine rather than the equity seam: **regulatory CVA capital** (BA-CVA / FRTB-CVA), a **jointly-simulated** WWR intensity (vs the parametric tilt here), and the entire **rates/swap** world (Hull-White, swaptions, CCIL/RBI data) — a different asset class the engine serves directly. Naming exactly what's in vs. out is the point (see the two rules above).
+**Honest scope.** The seam now prices the full **`CVA + FVA + KVA + MVA − DVA`** suite and supports **netting**, **CSA/MPoR collateral**, **dynamic IM**, **term-structure credit curves**, **CS01 / JTD / stress** and a regulatory **equity SA-CCR EAD**. Deliberately still owned by the companion CCR/XVA project rather than SPDT's equity seam: **regulatory CVA capital** (BA-CVA / FRTB-CVA), a **jointly-simulated** WWR intensity (vs the parametric tilt here), and the entire **rates/swap** world (Hull-White, swaptions, CCIL/RBI data) — a different asset class the engine serves directly. Naming exactly what's in vs. out is the point (see the two rules above).
 
 ---
 
@@ -195,7 +195,7 @@ pip install -e ".[dev]"
 # run the tests
 pytest
 
-# run the vendored XVA engine's own suite
+# run the companion XVA engine's own suite
 pytest xva/tests
 
 # the same quality gates used by CI

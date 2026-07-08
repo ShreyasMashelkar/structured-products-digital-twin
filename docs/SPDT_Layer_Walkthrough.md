@@ -1164,7 +1164,7 @@ concentrations**. Your dashboard surfaces exactly that.
 
 # L15 — XVA / CCR integration (the exposure seam)
 
-The second desk. A vendored INR OTC / CCR / XVA engine is combined with SPDT as **two desks over one
+The second desk. A separately built INR OTC / CCR / XVA engine is combined with SPDT as **two desks over one
 core**, coupled at exactly one artefact — the exposure cube — and nowhere else
 ([ADR‑0007](adr/0007-integrate-xva-at-the-exposure-seam.md)).
 
@@ -1172,7 +1172,7 @@ core**, coupled at exactly one artefact — the exposure cube — and nowhere el
 - SPDT *produces* an **`ExposurePackage`**: a path × time NPV cube + curves + counterparty, marked to
   future (exact BSM for Europeans; **Longstaff–Schwartz** continuation value for path‑dependent notes,
   so EE isn't Jensen‑biased). An autocallable's EE **builds then collapses on each autocall date**.
-- The `integration/` package (the only cross‑world importer) *reuses* the engine's
+- The `integration/` package (the only cross‑world importer) reuses the companion engine's
   `CVAEngine`/`KVAEngine`/`MVAEngine`/`CSAEngine`/`BACVAEngine` to compute the charge and gate the trade.
 - The chain: `exposure → [netting · CSA/MPoR collateral · wrong‑way tilt] → CVA + FVA + KVA + MVA − DVA
   → all‑in price (PV = par − fee − XVA) → EAD/PFE · economic (ASRF) + regulatory (SA‑CCR EAD, BA‑CVA)
@@ -1200,7 +1200,9 @@ Nothing in the core needs to know what's happening *right now*.
 
 What you use (all free, all EOD/historical): **NSE F&O bhavcopy** (backbone), **NSE cash bhavcopy**,
 **yfinance** (backup), **FBIL/RBI** rates, **NSE corporate actions**. Even the volatility surface is
-*reconstructed* from downloaded EOD settlement prices.
+*reconstructed* from downloaded EOD settlement prices. A local Bloomberg workbook can be used when
+available, but the current export contains Modified MIFOR / SOFR / USDINR vol, so SPDT treats it
+only as a **MIFOR funding overlay** and leaves NIFTY vol plus OIS/MIBOR discounting unchanged.
 
 A real, opt-in **live pipeline** exists behind one source seam (default stays synthetic for
 reproducibility), with three engines:
@@ -1212,7 +1214,7 @@ reproducibility), with three engines:
    not IP-blocked like the public NSE endpoints. (Public NSE *scraping* via `nsepython` was tried and
    removed — NSE hard-blocks it, returning empty payloads even from a residential IP.)
 
-Rates always bootstrap from **FBIL**. Real-time *streaming* connectivity remains in the **SKIPPED
+Live rates bootstrap from **FBIL**. Real-time *streaming* connectivity remains in the **SKIPPED
 (declared)** bucket — named as out-of-scope on purpose.
 
 Why this is correct, not a compromise: a bank's "official close" marks are also EOD snapshots; EOD is
