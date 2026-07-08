@@ -44,6 +44,12 @@ webapp/frontend/.vite/
 # Local Claude Code settings
 .claude/
 
+# Local interview/prep notes — keep on laptop, do not publish
+docs/EQUITY_STRUCTURING_INTERVIEW_ANSWER_KEY.md
+docs/EQUITY_STRUCTURING_INTERVIEW_PREP_GUIDE.md
+docs/SPDT_Interview_Defense_Detailed.md
+docs/interview_defense.md
+
 # generated desk dashboard cache
 dashboard_data/
 webapp/frontend/tsconfig.tsbuildinfo
