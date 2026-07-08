@@ -42,10 +42,16 @@ SPDT_LIVE=1 uvicorn webapp.server:app --port 8077
 SPDT_LIVE=1 SPDT_SOURCE=dhan \
   DHAN_CLIENT_ID=xxxxxxxxxx DHAN_ACCESS_TOKEN=eyJ... \
   uvicorn webapp.server:app --port 8077
+
+# 3. Optional local Bloomberg export: MIFOR funding overlay only
+SPDT_SOURCE=bloomberg-rates \
+SPDT_BLOOMBERG_RATES_XLSX="/Users/shreyas/Downloads/Data for Intern's usage.xlsx" \
+  uvicorn webapp.server:app --port 8077
 ```
 
 - **bhavcopy** — NSE's public EOD F&O file; walks back to the latest *published* file, so it works any time of day (mid-session it serves the previous close — the masthead shows the data date with an **EOD** badge). Today's file publishes after the close (~6 pm IST).
 - **dhan** — DhanHQ's v2 Option Chain API: an *authenticated broker feed*, so it gives **intraday** spot + chain (with IV) and isn't IP-blocked like the public NSE endpoints. Set `DHAN_CLIENT_ID` / `DHAN_ACCESS_TOKEN` (never commit them); Dhan returns one expiry per call, so the source fetches the nearest few (≈1 req/3s). Requires a free Dhan account.
+- **bloomberg-rates** — reads the one-sheet Terminal export used in this project. The file contains Modified MIFOR, SOFR and USD/INR vol, not NIFTY options and not a MIBOR/OIS curve. SPDT therefore uses it only as a **MIFOR-implied funding overlay**; the masthead explicitly shows that equity and discount-curve inputs are unchanged.
 
 Keep synthetic for reproducible runs and tests.
 

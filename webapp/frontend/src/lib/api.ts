@@ -2,6 +2,13 @@ export interface Desk {
   as_of: string;
   data_date?: string;
   data_source: string;
+  data_source_detail?: string | null;
+  data_boundary?: {
+    equity: string;
+    discount_curve: string;
+    funding: string;
+    fx_vol?: string | null;
+  };
   underlying: string;
   spot: number;
   model: { r: number; q: number; atm_vol: number };

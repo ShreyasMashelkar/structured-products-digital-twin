@@ -668,12 +668,15 @@ export function CounterpartyXva({ trades, selectedId }: { trades: Trade[]; selec
         <div className="grid grid-cols-2 gap-5 md:grid-cols-3 lg:grid-cols-6">
           <Slider label="Counterparty CDS" value={cds} min={25} max={800} step={25} onChange={setCds} display={`${cds}bp`} />
           <Slider label="Recovery rate" value={rec} min={0.2} max={0.7} step={0.05} onChange={setRec} display={pct(rec, 0)} />
-          <Slider label="Funding spread" value={fund} min={0} max={150} step={10} onChange={setFund} display={`${fund}bp`} />
+          <Slider label="XVA funding scenario" value={fund} min={0} max={150} step={10} onChange={setFund} display={`${fund}bp`} />
           <Slider label="RAROC hurdle" value={hurdle} min={0.05} max={0.25} step={0.01} onChange={setHurdle} display={pct(hurdle, 0)} />
           <Slider label="Structuring margin" value={margin} min={0} max={6} step={0.25} onChange={setMargin} display={fmt(margin, 2)} />
           <Slider label="EAD limit (0=off)" value={eadLimit} min={0} max={400} step={10} onChange={setEadLimit} display={eadLimit > 0 ? fmt(eadLimit, 0) : "off"} />
         </div>
         <div className="mt-4 border-t border-border-soft pt-4">
+          <div className="mb-3 rounded-md border border-border-soft bg-panel2/60 px-3 py-2 text-[12px] text-muted">
+            The funding slider is the XVA/FVA scenario spread for this hedge counterparty run. It is separate from the masthead's issuer funding overlay.
+          </div>
           <div className="mb-3 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">XVA depth · CVA + FVA + KVA + MVA − DVA</div>
           <div className="grid grid-cols-2 items-end gap-5 md:grid-cols-3 lg:grid-cols-5">
             <Slider label="Own CDS → DVA (0=off)" value={ownCds} min={0} max={600} step={25} onChange={setOwnCds} display={ownCds > 0 ? `${ownCds}bp` : "off"} />

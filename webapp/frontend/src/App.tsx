@@ -21,6 +21,7 @@ function Masthead({
 }: { desk: Desk; spot: number; vol: number; spotChgBp: number; sim: boolean; onToggle: () => void }) {
   const m = desk.model;
   const up = spotChgBp >= 0;
+  const sourceLabel = desk.data_source.replace("bloomberg-rates", "mifor-funding").toUpperCase();
   return (
     <div className="mb-5 flex items-end justify-between border-b border-border-soft pb-4">
       <div>
@@ -43,8 +44,8 @@ function Masthead({
         {desk.underlying} · spot{" "}
         <b className={cn(sim ? (up ? "text-up" : "text-down") : "text-ink")}>{compact(spot)}</b>
         {sim && <span className={cn("ml-1", up ? "text-up" : "text-down")}>{up ? "▲" : "▼"}{Math.abs(spotChgBp).toFixed(0)}bp</span>} · {desk.data_date ?? desk.as_of}
-        <span className="ml-1.5 rounded border border-border px-1 py-px text-[9px] font-bold uppercase tracking-[0.1em] text-faint">
-          {desk.data_source}
+        <span className="ml-1.5 rounded border border-border px-1 py-px text-[9px] font-bold uppercase tracking-[0.1em] text-faint" title={desk.data_source_detail ?? undefined}>
+          {sourceLabel}
         </span>
         {desk.data_source === "live" && desk.data_date && desk.data_date !== desk.as_of && (
           <span className="ml-1 rounded border border-teal/50 bg-teal/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.1em] text-teal" title="latest published EOD bhavcopy — not intraday">
@@ -58,6 +59,16 @@ function Masthead({
         <br />
         surface <b className="text-ink">{desk.arb_clean ? "arb-free" : "FLAGGED"}</b> · overnight move +{desk.market_move.spot_bp}bp spot
         / +{desk.market_move.vol_pt} vol
+        {desk.data_boundary && (
+          <>
+            <br />
+            <span className="text-[10px] text-faint">
+              equity: <span className="text-muted">{desk.data_boundary.equity}</span> · discount:{" "}
+              <span className="text-muted">{desk.data_boundary.discount_curve}</span> · funding:{" "}
+              <span className="text-muted">{desk.data_boundary.funding}</span>
+            </span>
+          </>
+        )}
       </div>
     </div>
   );

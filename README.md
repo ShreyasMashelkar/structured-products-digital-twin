@@ -136,7 +136,7 @@ Three interchangeable sources behind one `fetch() → RawMarketData` seam, so th
  Dhan API   (LIVE)    ─┘  real EOD (walk-back) / intraday (broker token)   ▲ FBIL OIS rates
 ```
 
-Synthetic is the reproducible default; `SPDT_LIVE=1` uses NSE's public **EOD bhavcopy** (walks back to the latest published file); `SPDT_SOURCE=dhan` uses DhanHQ's authenticated **intraday** API. Rates always come from **FBIL**. See [`webapp/README.md`](webapp/README.md#data-source-env-driven).
+Synthetic is the reproducible default; `SPDT_LIVE=1` uses NSE's public **EOD bhavcopy** (walks back to the latest published file); `SPDT_SOURCE=dhan` uses DhanHQ's authenticated **intraday** API. Live rates bootstrap from **FBIL**. A local Bloomberg Terminal workbook can also be supplied with `SPDT_SOURCE=bloomberg-rates` / `SPDT_BLOOMBERG_RATES_XLSX`, but that export is treated only as a **MIFOR funding overlay** unless it contains a true MIBOR/OIS curve. See [`webapp/README.md`](webapp/README.md#data-source-env-driven).
 
 ---
 

@@ -7,6 +7,7 @@ import pytest
 from spdt.core.types import SourceTag
 from spdt.data import build_snapshot, load_snapshot, save_snapshot
 from spdt.data.curate import invert_chain
+from spdt.data.ingest.bloomberg_rates_overlay import BloombergRatesOverlaySource
 from spdt.data.ingest.synthetic import SyntheticSource, _smile_vol
 from spdt.data.store import load_iv_points, save_iv_points
 
@@ -45,6 +46,26 @@ def test_funding_curve_sits_above_ois(raw):
     snap = build_snapshot(raw)
     pillar = max(raw.ois_zero_rates)
     assert snap.funding_curve.zero_rate(pillar) > snap.ois_curve.zero_rate(pillar)
+
+
+def test_bloomberg_mifor_overlay_does_not_replace_ois_curve(raw, tmp_path):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = "Modified Mifor curve"
+    ws.append(["Term", "Unit", "Final Mid", "Rate Type"])
+    ws.append([0, "DY", 96.0, "FX Spot"])
+    ws.append([2, "YR", 7.50, "Swap"])
+    ws.append([5, "YR", 7.80, "Swap"])
+    path = tmp_path / "bbg.xlsx"
+    wb.save(path)
+
+    overlaid = BloombergRatesOverlaySource(SyntheticSource(), path).fetch(AS_OF, "NIFTY")
+
+    assert overlaid.source is SourceTag.SYNTHETIC
+    assert overlaid.ois_zero_rates == raw.ois_zero_rates
+    assert max(overlaid.funding_spread_knots.values()) > 0.0
 
 
 def test_builder_is_single_underlying_with_empty_surface(raw):

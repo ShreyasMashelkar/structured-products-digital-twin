@@ -12,6 +12,7 @@ assembly runs on a live snapshot (``spdt.data.build_live_snapshot``) unchanged.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -23,6 +24,7 @@ from spdt.backtest import aggregate, generate_realized_series, roll_issuance
 from spdt.book import generate_mixed_book, mark_book
 from spdt.data import build_snapshot
 from spdt.data.curate import invert_chain
+from spdt.data.ingest.bloomberg_rates_overlay import BloombergRatesOverlaySource
 from spdt.data.ingest.synthetic import SyntheticSource
 from spdt.hedging import simulate_delta_hedge
 from spdt.modelrisk import model_gap_reserve, vol_bid_offer_reserve
@@ -81,13 +83,37 @@ def _fetch_raw(as_of: date, *, live: bool, source: str = "bhavcopy"):
     """Raw market data for ``as_of`` — live NSE/FBIL when ``live``, else the synthetic source.
 
     ``source`` selects the live option-chain engine (``"bhavcopy"`` EOD or ``"dhan"`` intraday);
-    ignored when ``live`` is False.
+    ``"bloomberg-rates"`` keeps the base equity/OIS source but overlays MIFOR-implied funding
+    spreads from the local Bloomberg Terminal export named by ``SPDT_BLOOMBERG_RATES_XLSX``.
     """
+    bloomberg_rates = os.environ.get("SPDT_BLOOMBERG_RATES_XLSX")
     if live:
         from spdt.data import fetch_live_raw
 
-        return fetch_live_raw(as_of, "NIFTY", source=source)
-    return SyntheticSource().fetch(as_of, "NIFTY")
+        base = fetch_live_raw(as_of, "NIFTY", source=source)
+        if bloomberg_rates:
+            return BloombergRatesOverlaySource(
+                _FrozenRawSource(base), bloomberg_rates
+            ).fetch(base.date, "NIFTY")
+        return base
+
+    base_source = SyntheticSource()
+    if source in {"bloomberg-rates", "bloomberg_rates"} or bloomberg_rates:
+        path = bloomberg_rates or "/Users/shreyas/Downloads/Data for Intern's usage.xlsx"
+        return BloombergRatesOverlaySource(base_source, path).fetch(as_of, "NIFTY")
+    return base_source.fetch(as_of, "NIFTY")
+
+
+def _uses_bloomberg_funding(live: bool, source: str) -> bool:  # noqa: ARG001
+    return source in {"bloomberg-rates", "bloomberg_rates"} or bool(os.environ.get("SPDT_BLOOMBERG_RATES_XLSX"))
+
+
+@dataclass(frozen=True)
+class _FrozenRawSource:
+    raw: Any
+
+    def fetch(self, as_of: date, underlying: str):  # noqa: ARG002
+        return self.raw
 
 
 @dataclass(frozen=True)
@@ -610,7 +636,28 @@ def build_desk_data(
     payload = {
         "as_of": as_of.isoformat(),
         "data_date": raw.date.isoformat(),  # the actual market-data date (e.g. last EOD bhavcopy)
-        "data_source": "live" if live else "synthetic",
+        "data_source": (
+            "live+mifor-funding"
+            if live and _uses_bloomberg_funding(live, source)
+            else "mifor-funding"
+            if (not live and _uses_bloomberg_funding(live, source))
+            else "live"
+            if live
+            else "synthetic"
+        ),
+        "data_source_detail": (
+            "Bloomberg MIFOR funding overlay; OIS/MIBOR discount and NIFTY equity inputs unchanged"
+            if _uses_bloomberg_funding(live, source)
+            else None
+        ),
+        "data_boundary": {
+            "equity": "live NSE/Dhan" if live else "synthetic",
+            "discount_curve": "FBIL/MIBOR-style live" if live else "synthetic INR OIS-style",
+            "funding": "Bloomberg MIFOR spread overlay" if _uses_bloomberg_funding(live, source)
+            else "model spread assumption",
+            "fx_vol": "available in workbook; not used for NIFTY equity vol"
+            if _uses_bloomberg_funding(live, source) else None,
+        },
         "underlying": "NIFTY",
         "spot": spot,
         "model": {"r": r, "q": q, "atm_vol": atm_vol},
