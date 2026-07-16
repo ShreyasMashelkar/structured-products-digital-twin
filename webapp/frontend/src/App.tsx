@@ -16,12 +16,23 @@ interface Market {
   dVol: number; // additive vol points
 }
 
+interface LiveTick {
+  spot: number | null;
+  future: { description: string; ltp: number | null; bid: number | null; ask: number | null };
+  timestamp: string | null;
+  age_s: number | null;
+  stale: boolean;
+}
+
 function Masthead({
-  desk, spot, vol, spotChgBp, sim, onToggle,
-}: { desk: Desk; spot: number; vol: number; spotChgBp: number; sim: boolean; onToggle: () => void }) {
+  desk, spot, vol, spotChgBp, sim, live, tick, onToggle,
+}: { desk: Desk; spot: number; vol: number; spotChgBp: number; sim: boolean; live: boolean; tick: LiveTick | null; onToggle: () => void }) {
   const m = desk.model;
   const up = spotChgBp >= 0;
   const sourceLabel = desk.data_source.replace("bloomberg-rates", "mifor-funding").toUpperCase();
+  const quoteAge = tick?.age_s != null
+    ? (tick.age_s < 120 ? `quote ${Math.round(tick.age_s)}s old` : `quote ${Math.round(tick.age_s / 60)}m old`)
+    : undefined;
   return (
     <div className="mb-5 flex items-end justify-between border-b border-border-soft pb-4">
       <div>
@@ -30,14 +41,14 @@ function Masthead({
         </span>
         <button
           onClick={onToggle}
-          title="Toggle the simulated market tick"
+          title={live ? `broker tick feed — ${quoteAge ?? "waiting for first tick"}` : "Toggle the simulated market tick"}
           className={cn(
             "ml-2.5 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 align-middle text-[10px] font-bold uppercase tracking-[0.16em] transition-colors",
-            sim ? "border-up/50 bg-up/10 text-up" : "border-border bg-panel2 text-muted",
+            sim ? (live ? "border-teal/50 bg-teal/10 text-teal" : "border-up/50 bg-up/10 text-up") : "border-border bg-panel2 text-muted",
           )}
         >
-          <span className={cn("h-1.5 w-1.5 rounded-full", sim ? "animate-pulse bg-up" : "bg-muted")} />
-          {sim ? "sim" : "paused"}
+          <span className={cn("h-1.5 w-1.5 rounded-full", sim ? (live ? "animate-pulse bg-teal" : "animate-pulse bg-up") : "bg-muted")} />
+          {sim ? (live ? "live" : "sim") : "paused"}
         </button>
       </div>
       <div className="tnum text-right text-[12px] leading-relaxed text-muted">
@@ -75,15 +86,15 @@ function Masthead({
 }
 
 function KpiStrip({
-  desk, nNotes, nav, cashDelta, vegaPt, sim, markMove,
-}: { desk: Desk; nNotes: number; nav: number; cashDelta: number; vegaPt: number; sim: boolean; markMove: number }) {
+  desk, nNotes, nav, cashDelta, vegaPt, sim, live, markMove,
+}: { desk: Desk; nNotes: number; nav: number; cashDelta: number; vegaPt: number; sim: boolean; live: boolean; markMove: number }) {
   const worst = Math.min(...desk.stress.map((s) => s.pnl));
   return (
     <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
       <Kpi
         label="Book NAV"
         value={sim ? fmt(nav, 2) : compact(nav)}
-        sub={sim ? `${nNotes} notes · ${signed(markMove, 2)} sim` : `${nNotes} notes`}
+        sub={sim ? `${nNotes} notes · ${signed(markMove, 2)} ${live ? "Δ-est" : "sim"}` : `${nNotes} notes`}
         flashKey={Math.round(nav * 100)}
       />
       <Kpi label="Overnight P&L" value={signed(desk.day_pnl, 2)} sub="Taylor explain" tone={desk.day_pnl >= 0 ? "pos" : "neg"} />
@@ -104,14 +115,34 @@ export default function App() {
   const [tenorFilter, setTenorFilter] = useState<string | null>(null);
   const [sim, setSim] = useState(true);
   const [market, setMarket] = useState<Market>({ spotMult: 1, dVol: 0 });
+  const [liveTick, setLiveTick] = useState<LiveTick | null>(null);
+  const feedLive = liveTick?.spot != null;
 
   useEffect(() => {
     getDesk().then(setDesk).catch((e) => setErr(String(e)));
   }, []);
 
-  // Simulated market tick: a gentle mean-reverting random walk on spot and vol.
+  // Real broker tick feed (SSE). 409 = desk not on a live feed → stay on the sim ticker.
+  useEffect(() => {
+    const es = new EventSource("/api/live/ticks");
+    es.onmessage = (ev) => setLiveTick(JSON.parse(ev.data) as LiveTick);
+    es.onerror = () => {
+      if (es.readyState === EventSource.CLOSED) {
+        es.close();
+        setLiveTick(null);
+      }
+    };
+    return () => es.close();
+  }, []);
+
+  // Real ticks drive the market when the feed is up (vol doesn't tick — it re-marks with
+  // the desk); otherwise a gentle mean-reverting random walk keeps the demo alive.
   useEffect(() => {
     if (!sim) return;
+    if (feedLive) {
+      if (desk && liveTick?.spot != null) setMarket({ spotMult: liveTick.spot / desk.spot, dVol: 0 });
+      return;
+    }
     const id = setInterval(() => {
       setMarket((mk) => {
         const spotMult = Math.min(1.03, Math.max(0.97, mk.spotMult * (1 + 0.0009 * gauss())));
@@ -120,7 +151,7 @@ export default function App() {
       });
     }, 700);
     return () => clearInterval(id);
-  }, [sim]);
+  }, [sim, feedLive, liveTick, desk]);
 
   const trades = useMemo(() => (desk ? [...staged, ...bookTrades(desk)] : []), [desk, staged]);
 
@@ -185,8 +216,8 @@ export default function App() {
       <div className="wash-gold" />
       <div className="wash-teal" />
       <div className="relative z-10 mx-auto max-w-[1560px] px-6 py-5">
-        <Masthead desk={desk} spot={agg.liveSpot} vol={agg.liveVol} spotChgBp={agg.spotChgBp} sim={sim} onToggle={() => setSim((s) => !s)} />
-        <KpiStrip desk={desk} nNotes={trades.length} nav={agg.nav} cashDelta={agg.cashDelta} vegaPt={agg.vegaPt} sim={sim} markMove={agg.markMove} />
+        <Masthead desk={desk} spot={agg.liveSpot} vol={agg.liveVol} spotChgBp={agg.spotChgBp} sim={sim} live={feedLive} tick={liveTick} onToggle={() => setSim((s) => !s)} />
+        <KpiStrip desk={desk} nNotes={trades.length} nav={agg.nav} cashDelta={agg.cashDelta} vegaPt={agg.vegaPt} sim={sim} live={feedLive} markMove={agg.markMove} />
         <Tabs tabs={WORKSPACES} active={ws} onChange={setWs} />
         <div className="pt-5">
           {ws === "How to use" && <HowToUse onGo={setWs} />}

@@ -271,3 +271,47 @@ def test_nse_session_window():
     assert not server._in_nse_session(datetime(2026, 7, 16, 9, 14, tzinfo=ist))
     assert not server._in_nse_session(datetime(2026, 7, 16, 15, 36, tzinfo=ist))
     assert not server._in_nse_session(datetime(2026, 7, 18, 10, 30, tzinfo=ist))  # Saturday
+
+
+def test_live_ticks_needs_the_xts_feed(client):
+    r = client.get("/api/live/ticks")
+    assert r.status_code == 409
+
+
+def test_fetch_tick_returns_spot_and_front_future(monkeypatch):
+    from datetime import date
+
+    from spdt.data.ingest.xts import InstrumentRef, Quote
+
+    index = InstrumentRef(exchange_segment=1, exchange_instrument_id=26000, symbol="NIFTY 50")
+    front = InstrumentRef(exchange_segment=2, exchange_instrument_id=61093, symbol="NIFTY",
+                          description="NIFTY26JULFUT", series="FUTIDX",
+                          instrument_type="FUTIDX",
+                          expiry=date.today() + timedelta(days=7), lot_size=65)
+    ts = datetime.now(timezone.utc) - timedelta(seconds=3)
+
+    class FakeXts:
+        token = "TOK"
+
+        def indexes(self, segment=1):
+            return [index]
+
+        def instruments(self, segment, **kw):
+            return [front]
+
+        def quotes(self, refs, *, now=None, max_age_s=None):
+            out = []
+            for ref in refs:
+                ltp = 24072.75 if ref.exchange_segment == 1 else 24103.7
+                out.append(Quote(instrument=ref, ltp=ltp, bid=ltp - 1, ask=ltp + 1,
+                                 bid_qty=65.0, ask_qty=65.0, timestamp=ts, stale=False))
+            return out
+
+    monkeypatch.setattr(server, "_xts_quote_client", FakeXts())
+    monkeypatch.setattr(server, "_tick_refs", None)  # force re-resolve against the fake
+    tick = server._fetch_tick()
+    assert tick["spot"] == 24072.75
+    assert tick["future"]["ltp"] == 24103.7 and tick["future"]["description"] == "NIFTY26JULFUT"
+    assert tick["stale"] is False and tick["age_s"] == pytest.approx(3, abs=2)
+    # refs are cached for the day — a second call must not re-resolve
+    assert server._tick_refs is not None and server._tick_refs[0] == date.today()

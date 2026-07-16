@@ -21,6 +21,7 @@ from typing import cast
 import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 # `integration` is the sole cross-world seam — it re-exports everything (incl. CreditCurve) the
@@ -1120,6 +1121,111 @@ def live_quote(symbol: str = "NIFTY") -> dict:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "live quotes need SPDT_LIVE=1 and SPDT_SOURCE=xts")
     return _live_quote(symbol)
+
+
+# --- live tick feed: spot + front future pushed to the browser over SSE --------------------
+# ponytail: a 2s REST poll of two instruments, not the XTS socket.io stream — the socket
+# needs a legacy socket.io client and can only be proven out during market hours; swap the
+# body of _fetch_tick for a socket-fed cache if tick-level latency ever matters.
+_TICK_INTERVAL_S = float(os.environ.get("SPDT_TICK_INTERVAL_S", "2"))
+_latest_tick: dict | None = None
+_tick_clients = 0
+_ticker_running = False
+_tick_lock = threading.Lock()
+_tick_refs: tuple | None = None  # (resolved_on: date, index_ref, future_ref)
+
+
+def _resolve_tick_refs(client, underlying: str = "NIFTY"):
+    """Index + front-future refs, re-resolved daily (expiry rolls, master changes)."""
+    global _tick_refs
+    today = date.today()
+    if _tick_refs is not None and _tick_refs[0] == today:
+        return _tick_refs[1], _tick_refs[2]
+    index_name = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}.get(underlying, underlying)
+    index = next(r for r in client.indexes() if r.symbol == index_name)
+    future = min(
+        (r for r in client.instruments("NSEFO")
+         if r.symbol == underlying and r.instrument_type == "FUTIDX"
+         and r.expiry is not None and r.expiry >= today),
+        key=lambda r: r.expiry,
+    )
+    _tick_refs = (today, index, future)
+    return index, future
+
+
+def _fetch_tick() -> dict:
+    """One tick: current index spot + front-future touchline via the shared XTS client."""
+    from spdt.data.ingest.xts import XTSMarketDataClient
+
+    global _xts_quote_client
+    with _xts_quote_lock:
+        if _xts_quote_client is None:
+            from tempfile import gettempdir
+            _xts_quote_client = XTSMarketDataClient(timeout=300.0,
+                                                    master_cache_dir=gettempdir())
+        client = _xts_quote_client
+        if not client.token:
+            client.login()
+        index, future = _resolve_tick_refs(client)
+        now = datetime.now(timezone.utc)
+        quotes = {q.instrument.exchange_instrument_id: q
+                  for q in client.quotes([index, future], now=now, max_age_s=_QUOTE_MAX_AGE_S)}
+    spot_q = quotes.get(index.exchange_instrument_id)
+    fut_q = quotes.get(future.exchange_instrument_id)
+    ts = (fut_q.timestamp if fut_q and fut_q.timestamp else
+          spot_q.timestamp if spot_q else None)
+    return {
+        "spot": spot_q.ltp if spot_q else None,
+        "future": {"description": future.description,
+                   "ltp": fut_q.ltp if fut_q else None,
+                   "bid": fut_q.bid if fut_q else None,
+                   "ask": fut_q.ask if fut_q else None},
+        "timestamp": ts.isoformat() if ts else None,
+        "age_s": round((datetime.now(timezone.utc) - ts).total_seconds(), 1) if ts else None,
+        "stale": spot_q.stale if spot_q else True,
+    }
+
+
+def _ticker_loop() -> None:  # pragma: no cover — thin poll loop; _fetch_tick is tested
+    global _latest_tick, _ticker_running
+    while True:
+        with _tick_lock:
+            if _tick_clients == 0:
+                _ticker_running = False
+                return
+        try:
+            _latest_tick = _fetch_tick()
+        except Exception as exc:  # noqa: BLE001 — a failed poll must not kill the feed
+            print(f"spdt-ticker: poll failed: {exc}")
+        time.sleep(_TICK_INTERVAL_S)
+
+
+@app.get("/api/live/ticks")
+def live_ticks() -> StreamingResponse:
+    """SSE stream of spot/front-future ticks. The poll loop runs only while someone listens."""
+    if not (_LIVE and _SOURCE == "xts"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "live ticks need SPDT_LIVE=1 and SPDT_SOURCE=xts")
+
+    def stream():
+        global _tick_clients, _ticker_running
+        import json as json_mod
+        with _tick_lock:
+            _tick_clients += 1
+            if not _ticker_running:
+                _ticker_running = True
+                threading.Thread(target=_ticker_loop, daemon=True, name="spdt-ticker").start()
+        try:
+            while True:
+                if _latest_tick is not None:
+                    yield f"data: {json_mod.dumps(_latest_tick)}\n\n"
+                time.sleep(_TICK_INTERVAL_S)
+        finally:
+            with _tick_lock:
+                _tick_clients -= 1
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/live/snapshot")
