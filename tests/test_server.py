@@ -220,3 +220,30 @@ def test_api_token_gate(client, monkeypatch):
     assert client.get("/api/outcomes").status_code == 401
     assert client.post("/api/semistatic", json={"trades": [], "spot": 100, "sigma": .2,
                        "r": .05, "q": 0}).status_code == 401
+
+
+def test_stale_desk_serves_immediately_and_revalidates_in_background(client, monkeypatch):
+    import threading
+
+    server._desk()  # ensure a payload exists
+    old_payload = server._cache.payload
+    monkeypatch.setattr(server, "_DESK_TTL", 0.0)  # everything is now stale
+
+    release = threading.Event()
+    marker = dict(old_payload, marker="rebuilt")
+
+    def slow_build(**kw):
+        assert release.wait(timeout=10)
+        return type("D", (), {"payload": marker})()
+
+    monkeypatch.setattr(server, "build_desk_data", slow_build)
+    served = server._desk()  # must NOT block on the in-flight rebuild
+    assert served is old_payload
+
+    release.set()
+    assert server._rebuild_thread is not None
+    server._rebuild_thread.join(timeout=10)
+    assert server._cache.payload.get("marker") == "rebuilt"
+    # and once rebuilt, subsequent calls serve the fresh payload
+    monkeypatch.setattr(server, "_DESK_TTL", 3600.0)
+    assert server._desk().get("marker") == "rebuilt"

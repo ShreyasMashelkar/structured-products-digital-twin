@@ -18,6 +18,8 @@ from spdt.data.ingest.nse_bhavcopy import NseBhavcopySource
 from spdt.data.ingest.xts import XTSMarketDataClient, XTSSource
 from spdt.data.snapshot_builder import build_snapshot
 
+_fbil_cache: dict[date, list] = {}  # per-process: FBIL's curve is published daily
+
 
 def fetch_live_raw(
     as_of: date,
@@ -41,7 +43,10 @@ def fetch_live_raw(
     Both pair with FBIL-bootstrapped rates. Exposed separately from :func:`build_live_snapshot` so
     callers that also need the raw option chain (e.g. surface calibration) don't have to refetch.
     """
-    _, rate_instruments = fetch_fbil_ois_instruments(anchor=as_of, timeout=timeout)
+    if as_of not in _fbil_cache:  # FBIL publishes a daily curve — one fetch per day is plenty
+        _fbil_cache.clear()
+        _fbil_cache[as_of] = fetch_fbil_ois_instruments(anchor=as_of, timeout=timeout)[1]
+    rate_instruments = _fbil_cache[as_of]
     if source == "dhan":
         engine: NseBhavcopySource | DhanSource | XTSSource = DhanSource(
             dividend_yield=dividend_yield, funding_spread=funding_spread,

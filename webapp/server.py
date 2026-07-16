@@ -108,18 +108,36 @@ class _DeskCache:
 
 _cache = _DeskCache()
 _cache_lock = threading.Lock()
+_rebuild_thread: threading.Thread | None = None
+
+
+def _rebuild_desk() -> None:
+    with _cache_lock:  # only one builder; others wait then see the fresh result
+        if _cache.payload is None or (time.time() - _cache.built_at) >= _DESK_TTL:
+            _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE).payload
+            _cache.built_at = time.time()
 
 
 def _desk(force: bool = False) -> dict:
-    """The desk payload, rebuilt when stale (older than the TTL) or on ``force``."""
-    now = time.time()
-    if _cache.payload is not None and not force and (now - _cache.built_at) < _DESK_TTL:
+    """The desk payload — stale-while-revalidate.
+
+    The first build (and an explicit ``force``) blocks; after that a stale cache is
+    served immediately while one background thread re-marks, so no request ever waits
+    out a live rebuild (~45s on the XTS feed).
+    """
+    global _rebuild_thread
+    if _cache.payload is None or force:
+        with _cache_lock:
+            if force or _cache.payload is None:
+                _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE).payload
+                _cache.built_at = time.time()
         return _cache.payload
-    with _cache_lock:  # only one builder; others wait then see the fresh result
-        if force or _cache.payload is None or (time.time() - _cache.built_at) >= _DESK_TTL:
-            _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE).payload
-            _cache.built_at = time.time()
-    assert _cache.payload is not None
+    if (time.time() - _cache.built_at) >= _DESK_TTL:
+        if _rebuild_thread is None or not _rebuild_thread.is_alive():
+            _rebuild_thread = threading.Thread(
+                target=_rebuild_desk, daemon=True, name="spdt-desk-rebuild",
+            )
+            _rebuild_thread.start()
     return _cache.payload
 
 
