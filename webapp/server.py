@@ -1132,32 +1132,83 @@ _latest_tick: dict | None = None
 _tick_clients = 0
 _ticker_running = False
 _tick_lock = threading.Lock()
-_tick_refs: tuple | None = None  # (resolved_on: date, index_ref, future_ref)
+_tick_refs: tuple | None = None  # (resolved_on, index_ref, future_ref, atm_ce, atm_pe)
+_iv_baseline: tuple | None = None  # (desk_built_at, straddle_iv at that mark)
 
 
 def _resolve_tick_refs(client, underlying: str = "NIFTY"):
-    """Index + front-future refs, re-resolved daily (expiry rolls, master changes)."""
+    """Index, front-future, and front-expiry ATM straddle refs.
+
+    Re-resolved daily (expiry rolls) and whenever spot drifts >1% off the picked ATM
+    strike (see :func:`_fetch_tick`).
+    """
     global _tick_refs
     today = date.today()
     if _tick_refs is not None and _tick_refs[0] == today:
-        return _tick_refs[1], _tick_refs[2]
+        return _tick_refs[1:]
     index_name = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}.get(underlying, underlying)
     index = next(r for r in client.indexes() if r.symbol == index_name)
+    fo_master = [r for r in client.instruments("NSEFO") if r.symbol == underlying]
     future = min(
-        (r for r in client.instruments("NSEFO")
-         if r.symbol == underlying and r.instrument_type == "FUTIDX"
+        (r for r in fo_master if r.instrument_type == "FUTIDX"
          and r.expiry is not None and r.expiry >= today),
         key=lambda r: r.expiry,
     )
-    _tick_refs = (today, index, future)
-    return index, future
+    # ATM straddle on the nearest option expiry strictly after today (T>0 for inversion)
+    spot_guess = (_cache.payload or {}).get("spot")
+    if not spot_guess:
+        spot_quotes = client.quotes([index], now=datetime.now(timezone.utc),
+                                    max_age_s=_QUOTE_MAX_AGE_S)
+        spot_guess = spot_quotes[0].ltp if spot_quotes and spot_quotes[0].ltp else None
+    atm_ce = atm_pe = None
+    if spot_guess:
+        options = [r for r in fo_master if r.option_type and r.strike is not None
+                   and r.expiry is not None and r.expiry > today]
+        if options:
+            front_exp = min(r.expiry for r in options)
+            strikes = sorted({r.strike for r in options if r.expiry == front_exp})
+            atm_strike = min(strikes, key=lambda k: abs(k - spot_guess))
+            legs = {r.option_type: r for r in options
+                    if r.expiry == front_exp and r.strike == atm_strike}
+            atm_ce, atm_pe = legs.get("CE"), legs.get("PE")
+    _tick_refs = (today, index, future, atm_ce, atm_pe)
+    return index, future, atm_ce, atm_pe
+
+
+def _straddle_iv(quotes: dict, atm_ce, atm_pe, spot: float) -> float | None:
+    """Black-76 IV averaged over the invertible ATM legs; None when nothing inverts."""
+    from math import exp as _exp
+
+    from spdt.data.curate.bs_inversion import implied_vol
+    from spdt.core.types import year_fraction
+
+    model = (_cache.payload or {}).get("model", {})
+    r, q = model.get("r", 0.065), model.get("q", 0.013)
+    ivs = []
+    for leg in (atm_ce, atm_pe):
+        quote = quotes.get(leg.exchange_instrument_id) if leg is not None else None
+        if quote is None:
+            continue
+        mid = ((quote.bid + quote.ask) / 2.0
+               if quote.bid is not None and quote.ask is not None and quote.bid <= quote.ask
+               else quote.ltp)
+        if mid is None:
+            continue
+        tau = year_fraction(date.today(), leg.expiry)
+        forward = spot * _exp((r - q) * tau)
+        try:
+            ivs.append(implied_vol(mid, forward, leg.strike, tau,
+                                   _exp(-r * tau), leg.option_type == "CE"))
+        except ValueError:
+            continue  # stale/crossed print — skip the leg
+    return sum(ivs) / len(ivs) if ivs else None
 
 
 def _fetch_tick() -> dict:
-    """One tick: current index spot + front-future touchline via the shared XTS client."""
+    """One tick: index spot, front-future touchline, and live ATM straddle vol."""
     from spdt.data.ingest.xts import XTSMarketDataClient
 
-    global _xts_quote_client
+    global _xts_quote_client, _tick_refs, _iv_baseline
     with _xts_quote_lock:
         if _xts_quote_client is None:
             from tempfile import gettempdir
@@ -1166,20 +1217,37 @@ def _fetch_tick() -> dict:
         client = _xts_quote_client
         if not client.token:
             client.login()
-        index, future = _resolve_tick_refs(client)
+        index, future, atm_ce, atm_pe = _resolve_tick_refs(client)
         now = datetime.now(timezone.utc)
+        wanted = [r for r in (index, future, atm_ce, atm_pe) if r is not None]
         quotes = {q.instrument.exchange_instrument_id: q
-                  for q in client.quotes([index, future], now=now, max_age_s=_QUOTE_MAX_AGE_S)}
+                  for q in client.quotes(wanted, now=now, max_age_s=_QUOTE_MAX_AGE_S)}
     spot_q = quotes.get(index.exchange_instrument_id)
     fut_q = quotes.get(future.exchange_instrument_id)
+    spot = spot_q.ltp if spot_q else None
+
+    atm_iv = dvol = None
+    if spot is not None and atm_ce is not None:
+        if abs(spot / atm_ce.strike - 1.0) > 0.01:
+            _tick_refs = None  # spot drifted off the strike — re-pick ATM next tick
+        atm_iv = _straddle_iv(quotes, atm_ce, atm_pe, spot)
+        if atm_iv is not None:
+            # vol move is measured against the straddle IV captured at the current desk
+            # mark, so dvol resets to ~0 every time the desk re-marks (it absorbed the move)
+            if _iv_baseline is None or _iv_baseline[0] != _cache.built_at:
+                _iv_baseline = (_cache.built_at, atm_iv)
+            dvol = atm_iv - _iv_baseline[1]
+
     ts = (fut_q.timestamp if fut_q and fut_q.timestamp else
           spot_q.timestamp if spot_q else None)
     return {
-        "spot": spot_q.ltp if spot_q else None,
+        "spot": spot,
         "future": {"description": future.description,
                    "ltp": fut_q.ltp if fut_q else None,
                    "bid": fut_q.bid if fut_q else None,
                    "ask": fut_q.ask if fut_q else None},
+        "atm_iv": round(atm_iv, 6) if atm_iv is not None else None,
+        "dvol": round(dvol, 6) if dvol is not None else None,
         "timestamp": ts.isoformat() if ts else None,
         "age_s": round((datetime.now(timezone.utc) - ts).total_seconds(), 1) if ts else None,
         "stale": spot_q.stale if spot_q else True,

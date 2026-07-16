@@ -315,3 +315,66 @@ def test_fetch_tick_returns_spot_and_front_future(monkeypatch):
     assert tick["stale"] is False and tick["age_s"] == pytest.approx(3, abs=2)
     # refs are cached for the day — a second call must not re-resolve
     assert server._tick_refs is not None and server._tick_refs[0] == date.today()
+
+
+def test_fetch_tick_inverts_live_atm_straddle_vol(monkeypatch):
+    from datetime import date
+    from math import exp
+
+    from spdt.data.curate.bs_inversion import bs_price
+    from spdt.data.ingest.xts import InstrumentRef, Quote
+    from spdt.core.types import year_fraction
+
+    model = server._desk()["model"]
+    spot, strike, sigma = 24000.0, 24000.0, 0.15
+    expiry = date.today() + timedelta(days=7)
+    tau = year_fraction(date.today(), expiry)
+    fwd = spot * exp((model["r"] - model["q"]) * tau)
+    disc = exp(-model["r"] * tau)
+    prices = {
+        26000: spot,
+        61093: fwd,
+        45001: bs_price(fwd, strike, tau, sigma, disc, True),
+        45002: bs_price(fwd, strike, tau, sigma, disc, False),
+    }
+
+    index = InstrumentRef(exchange_segment=1, exchange_instrument_id=26000, symbol="NIFTY 50")
+    fo = [
+        InstrumentRef(exchange_segment=2, exchange_instrument_id=61093, symbol="NIFTY",
+                      description="NIFTY-FUT", series="FUTIDX", instrument_type="FUTIDX",
+                      expiry=expiry, lot_size=65),
+        InstrumentRef(exchange_segment=2, exchange_instrument_id=45001, symbol="NIFTY",
+                      series="OPTIDX", instrument_type="OPTIDX", expiry=expiry,
+                      strike=strike, option_type="CE"),
+        InstrumentRef(exchange_segment=2, exchange_instrument_id=45002, symbol="NIFTY",
+                      series="OPTIDX", instrument_type="OPTIDX", expiry=expiry,
+                      strike=strike, option_type="PE"),
+    ]
+    ts = datetime.now(timezone.utc)
+
+    class FakeXts:
+        token = "TOK"
+
+        def indexes(self, segment=1):
+            return [index]
+
+        def instruments(self, segment, **kw):
+            return fo
+
+        def quotes(self, refs, *, now=None, max_age_s=None):
+            return [Quote(instrument=r, ltp=prices[r.exchange_instrument_id],
+                          bid=None, ask=None, bid_qty=None, ask_qty=None,
+                          timestamp=ts, stale=False) for r in refs]
+
+    monkeypatch.setattr(server, "_xts_quote_client", FakeXts())
+    monkeypatch.setattr(server, "_tick_refs", None)
+    monkeypatch.setattr(server, "_iv_baseline", None)
+    tick = server._fetch_tick()
+    assert tick["atm_iv"] == pytest.approx(sigma, abs=1e-4)
+    assert tick["dvol"] == pytest.approx(0.0, abs=1e-9)  # first tick after a mark = baseline
+
+    # vol moves: richer straddle → positive dvol against the unchanged baseline
+    prices[45001] = bs_price(fwd, strike, tau, 0.18, disc, True)
+    prices[45002] = bs_price(fwd, strike, tau, 0.18, disc, False)
+    tick = server._fetch_tick()
+    assert tick["dvol"] == pytest.approx(0.03, abs=1e-4)

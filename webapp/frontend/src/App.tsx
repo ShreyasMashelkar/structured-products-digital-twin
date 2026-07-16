@@ -19,6 +19,8 @@ interface Market {
 interface LiveTick {
   spot: number | null;
   future: { description: string; ltp: number | null; bid: number | null; ask: number | null };
+  atm_iv: number | null; // live front-expiry ATM straddle IV
+  dvol: number | null; // IV move since the current desk mark (absolute vol units)
   timestamp: string | null;
   age_s: number | null;
   stale: boolean;
@@ -135,12 +137,15 @@ export default function App() {
     return () => es.close();
   }, []);
 
-  // Real ticks drive the market when the feed is up (vol doesn't tick — it re-marks with
-  // the desk); otherwise a gentle mean-reverting random walk keeps the demo alive.
+  // Real ticks drive the market when the feed is up — spot from the index print, vol from
+  // the live ATM straddle IV vs the desk mark; otherwise a gentle mean-reverting random
+  // walk keeps the demo alive.
   useEffect(() => {
     if (!sim) return;
     if (feedLive) {
-      if (desk && liveTick?.spot != null) setMarket({ spotMult: liveTick.spot / desk.spot, dVol: 0 });
+      if (desk && liveTick?.spot != null) {
+        setMarket({ spotMult: liveTick.spot / desk.spot, dVol: liveTick.dvol ?? 0 });
+      }
       return;
     }
     const id = setInterval(() => {
