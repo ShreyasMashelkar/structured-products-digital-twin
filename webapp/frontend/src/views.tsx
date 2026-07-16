@@ -4,7 +4,7 @@ import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trad
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
 import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
 import { cn } from "./lib/cn";
-import { compact, fmt, pct, signed } from "./lib/format";
+import { compact, fmt, fmtAge, pct, signed } from "./lib/format";
 import { C } from "./lib/theme";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, LineChart, Line, Legend } from "recharts";
 
@@ -1255,6 +1255,7 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
   const [bid, setBid] = useState(Math.round(desk.spot) - 1);
   const [ask, setAsk] = useState(Math.round(desk.spot) + 1);
   const [lot, setLot] = useState(75); // NIFTY futures lot (overwritten by the live master)
+  const [deltaOverride, setDeltaOverride] = useState(0); // 0 = hedge the actual book delta
   const [live, setLive] = useState<LiveQuote | null>(null);
   const [rec, setRec] = useState<HedgeRec | null>(null);
   const [blotter, setBlotter] = useState<PaperBlotter | null>(null);
@@ -1311,6 +1312,7 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
     setError(null);
     try {
       setRec(await recommendHedge({
+        ...(deltaOverride !== 0 ? { book_delta: deltaOverride } : {}),
         future: live ? {
           instrument_id: live.instrument_id, segment: live.segment, symbol: live.description,
           bid, ask, ltp: live.ltp ?? (bid + ask) / 2,
@@ -1360,7 +1362,7 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
                 <Chip hot={!live.stale}>{live.stale ? "LIVE · STALE" : "LIVE"}</Chip>
                 <span className="tnum text-[11px] text-muted">
                   {live.description} · exp {live.expiry}
-                  {live.age_s != null && ` · quote ${live.age_s < 120 ? `${Math.round(live.age_s)}s` : `${Math.round(live.age_s / 60)}m`} old`}
+                  {live.age_s != null && ` · quote ${fmtAge(live.age_s)} old`}
                 </span>
                 <button
                   onClick={() => { setError(null); void loadLiveQuote(); }}
@@ -1392,6 +1394,15 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
             <NumField label="Fut ask" value={ask} onChange={setAsk} />
             <NumField label="Lot size" value={lot} onChange={(v) => setLot(Math.max(1, Math.round(v)))} />
           </div>
+          <div className="mb-3 grid grid-cols-3 gap-3">
+            <NumField label="Δ to hedge (0 = book's own)" value={deltaOverride} onChange={setDeltaOverride} />
+          </div>
+          {Math.abs(desk.net_greeks.delta) < 1 && deltaOverride === 0 && (
+            <p className="mb-3 text-[11px] text-muted">
+              The book is currently delta-flat, so a recommendation will propose no orders.
+              Enter a Δ to hedge (say 500) to walk the full recommend, execute and attribution loop.
+            </p>
+          )}
           <button
             onClick={recommend}
             disabled={busy}
@@ -1407,7 +1418,7 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
             <SectionTitle>Recommendation {rec.recommendation_id}</SectionTitle>
             <div className="mb-2">
               <Chip hot={rec.approval_state === "PROPOSED"}>{rec.approval_state}</Chip>
-              {rec.reason_codes.map((c) => <Chip key={c}>{c}</Chip>)}
+              {rec.reason_codes.map((c) => <Chip key={c}>{c.replace(/_/g, " ").toLowerCase()}</Chip>)}
               {executed && <Chip hot>EXECUTED</Chip>}
             </div>
             {rec.orders.length > 0 ? (

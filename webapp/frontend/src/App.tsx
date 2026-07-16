@@ -3,7 +3,7 @@ import { Desk, getDesk, priceTrade } from "./lib/api";
 import { Trade, bookTrades, priceReq } from "./lib/trades";
 import { Kpi, Tabs } from "./components/ui";
 import { cn } from "./lib/cn";
-import { compact, fmt, signed } from "./lib/format";
+import { compact, fmt, fmtAge, signed } from "./lib/format";
 import { BrokerView, HedgeExecute, OptionChainView, PayoffExplorer, OutcomeLab, SemiStaticHedging, BookRisk, CounterpartyXva, HowToUse, Originate, Overview, Validate } from "./views";
 
 const WORKSPACES = ["How to use", "Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Hedge & Execute", "Payoff Explorer", "Option Chain", "Broker", "Outcome Lab"];
@@ -32,9 +32,7 @@ function Masthead({
   const m = desk.model;
   const up = spotChgBp >= 0;
   const sourceLabel = desk.data_source.replace("bloomberg-rates", "mifor-funding").toUpperCase();
-  const quoteAge = tick?.age_s != null
-    ? (tick.age_s < 120 ? `quote ${Math.round(tick.age_s)}s old` : `quote ${Math.round(tick.age_s / 60)}m old`)
-    : undefined;
+  const quoteAge = tick?.age_s != null ? `quote ${fmtAge(tick.age_s)} old` : undefined;
   return (
     <div className="mb-5 flex items-end justify-between border-b border-border-soft pb-4">
       <div>
