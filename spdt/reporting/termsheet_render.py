@@ -139,7 +139,16 @@ def terminal_scenarios(
     times = np.array((0.0, *product.monitoring_times()))
     n = len(terminal_levels)
     m = times.size
-    spots = np.full((n, m), ref)
+    # Intermediate observations must NOT trigger an autocall (spot >= level·s0), or the
+    # note redeems at the first call date and every maturity payment sweeps to zero. Pin
+    # them a hair below the trigger — still above any coupon barrier, so conditional
+    # coupons keep paying.
+    pin = ref
+    autocall_level = getattr(product, "autocall_level", None)
+    if autocall_level is not None and autocall_level <= 1.0:
+        pin = ref * autocall_level * (1.0 - 1e-9)
+    spots = np.full((n, m), pin)
+    spots[:, 0] = ref
     spots[:, m - 1] = ref * np.asarray(terminal_levels)
     cashflows = product.cashflows(PathSet(times=times, spots=spots))
     maturity_time = float(times[-1])

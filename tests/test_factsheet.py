@@ -44,3 +44,23 @@ def test_factsheet_renders_terms_and_disclosures():
     assert "Risk disclosures" in md
     assert "Capital is at risk" in md
     assert "99.1" in md
+
+
+def test_autocallable_scenarios_survive_to_maturity():
+    """Regression: with autocall_level=1.0 the old sweep pinned intermediate observations AT
+    the trigger, autocalling every path at the first date — maturity payment was 0 across
+    the whole sweep and the payoff chart drew a flat line at zero."""
+    from spdt.products import Autocallable
+
+    note = Autocallable(notional=100.0, observation_times=(0.25, 0.5, 0.75, 1.0),
+                        coupon_rate=0.025, autocall_level=1.0, coupon_barrier=0.8,
+                        knock_in=0.7)
+    rows = {r.terminal_level: r for r in terminal_scenarios(note, LEVELS)}
+    # Above the knock-in the investor gets par (+ final coupon at/above the coupon barrier).
+    assert rows[1.0].payment_pct >= 100.0
+    assert not rows[1.0].ki_breached
+    # Below the knock-in the principal takes the spot return.
+    assert rows[0.5].payment_pct < 100.0
+    assert rows[0.5].ki_breached
+    # And the sweep is not the all-zero line of the old bug.
+    assert any(r.payment_pct > 0 for r in rows.values())

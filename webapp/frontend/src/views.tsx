@@ -1299,6 +1299,11 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
     void loadLiveQuote().then(refresh);
     return () => { refreshSequence.current += 1; };
   }, []);
+  useEffect(() => {
+    if (live) return; // connected — stop retrying
+    const id = setInterval(() => void loadLiveQuote(), 30_000);
+    return () => clearInterval(id);
+  }, [live]);
 
   const recommend = async () => {
     setBusy(true);
@@ -1368,6 +1373,12 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
               <>
                 <Chip>MANUAL</Chip>
                 <span className="text-[11px] text-muted">no broker feed — type the futures quote</span>
+                <button
+                  onClick={() => { setError(null); void loadLiveQuote(); }}
+                  className="ring-desk rounded border border-border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.08em] text-muted hover:text-ink"
+                >
+                  Try live
+                </button>
               </>
             )}
           </div>
@@ -1616,7 +1627,7 @@ export function PayoffExplorer({ desk }: { desk: Desk }) {
             <Panel>
               <SectionTitle>Payment at maturity vs where the index ends</SectionTitle>
               <ResponsiveContainer width="100%" height={260}>
-                <LineChart data={result.payoff.map((p) => ({ level: Math.round(p.terminal_level), pay: p.payment_pct }))}>
+                <LineChart data={result.payoff.map((p) => ({ level: Math.round(p.terminal_level * 100), pay: p.payment_pct }))}>
                   <CartesianGrid stroke={C.grid} strokeDasharray="3 3" />
                   <XAxis dataKey="level" tick={{ fontSize: 11 }} label={{ value: "index at maturity (% of start)", position: "insideBottom", offset: -4, fontSize: 10 }} />
                   <YAxis tick={{ fontSize: 11 }} label={{ value: "payment %", angle: -90, position: "insideLeft", fontSize: 10 }} />
@@ -1675,9 +1686,14 @@ export function OptionChainView() {
     byStrike.set(r.strike, e);
   });
   const table = [...byStrike.values()].sort((a, b) => a.strike - b.strike);
+  // The liquid smile is the OTM side: puts below spot, calls above. ITM quotes are mostly
+  // stale settlement prints whose IVs don't invert cleanly — plotting them draws spikes.
   const smile = table
-    .map((r) => ({ strike: r.strike, ce: r.ce?.iv != null ? r.ce.iv * 100 : null, pe: r.pe?.iv != null ? r.pe.iv * 100 : null }))
-    .filter((r) => r.ce != null || r.pe != null);
+    .map((r) => {
+      const otm = r.strike <= chain.spot ? r.pe : r.ce;
+      return { strike: r.strike, iv: otm?.iv != null ? otm.iv * 100 : null };
+    })
+    .filter((r) => r.iv != null);
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -1711,14 +1727,13 @@ export function OptionChainView() {
             <CartesianGrid stroke={C.grid} strokeDasharray="3 3" />
             <XAxis dataKey="strike" tick={{ fontSize: 10 }} domain={["dataMin", "dataMax"]} type="number" />
             <YAxis tick={{ fontSize: 10 }} unit="%" domain={["auto", "auto"]} />
-            <Tooltip formatter={(v: number, n: string) => [`${v.toFixed(2)}%`, n.toUpperCase()]} />
-            <Legend />
-            <Line type="monotone" dataKey="ce" name="calls" stroke={C.accent} strokeWidth={2} dot={{ r: 2 }} connectNulls />
-            <Line type="monotone" dataKey="pe" name="puts" stroke={C.teal} strokeWidth={2} dot={{ r: 2 }} connectNulls />
+            <Tooltip formatter={(v: number) => [`${v.toFixed(2)}%`, "IV"]} labelFormatter={(l) => `strike ${l}`} />
+            <Line type="monotone" dataKey="iv" name="OTM IV" stroke={C.teal} strokeWidth={2} dot={{ r: 2 }} connectNulls />
           </LineChart>
         </ResponsiveContainer>
         <p className="mt-2 text-[10.5px] text-faint">
-          EOD settlement prints today; the same view carries live XTS bid/ask once the broker feed is connected.
+          Broker-chain mids (last print when one side is missing). The smile shows the liquid OTM side:
+          puts below spot, calls above. ITM rows in the table are often stale prints, which is why their IVs are blank.
         </p>
       </Panel>
     </div>
