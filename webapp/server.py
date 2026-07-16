@@ -14,14 +14,14 @@ import dataclasses
 import os
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from math import exp
 from typing import cast
 
 import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 # `integration` is the sole cross-world seam — it re-exports everything (incl. CreditCurve) the
 # desk needs from the vendored XVA engine, so the webapp never imports `src.*` directly.
@@ -42,8 +42,17 @@ from integration import (
     xva_charge,
     xva_sensitivities,
 )
+from spdt.alerts import AlertEngine, greek_limit_alert
 from spdt.core.types import Curve, year_fraction
 from spdt.book.book import Trade as BookTrade
+from spdt.data.ingest.xts import InstrumentRef, Quote
+from spdt.execution import PaperBroker
+from spdt.hedging.recommend import (
+    HedgeInstrument,
+    HedgeRecommendation,
+    recommend_delta_hedge,
+    recommend_delta_vega_hedge,
+)
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
 from spdt.pricing import BlackScholes, price_mc, price_worst_of
@@ -56,7 +65,7 @@ from spdt.products import (
     WorstOfAutocallable,
 )
 from spdt.reporting import terminal_scenarios
-from spdt.outcomes import OutcomeTerms, hedge_comparison, issuance_study
+from spdt.outcomes import OutcomeTerms, hedge_comparison, issuance_study, outcome_profile
 from spdt.stress import STANDARD_SCENARIOS
 from spdt.structurer import (
     ClientBrief,
@@ -112,6 +121,38 @@ def _desk(force: bool = False) -> dict:
             _cache.built_at = time.time()
     assert _cache.payload is not None
     return _cache.payload
+
+
+# --- snapshot archiver: accumulate an owned intraday history while the desk is live --------
+_ARCHIVE_INTERVAL_S = float(os.environ.get("SPDT_ARCHIVE_INTERVAL_S", "900"))  # 0 disables
+_ARCHIVE_ROOT = os.environ.get("SPDT_ARCHIVE_ROOT", "dashboard_data")
+
+
+def _in_nse_session(now: datetime) -> bool:
+    """Mon–Fri 09:15–15:35 IST (5 minutes past close to catch the closing prints)."""
+    return now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 35)
+
+
+def _archive_loop() -> None:  # pragma: no cover — thin network loop; the pieces are tested
+    from zoneinfo import ZoneInfo
+
+    from spdt.data.archive import archive_snapshot
+    from spdt.data.live import fetch_live_raw
+    from spdt.data.snapshot_builder import build_snapshot
+
+    ist = ZoneInfo("Asia/Kolkata")
+    while True:
+        if _in_nse_session(datetime.now(ist)):
+            try:
+                snap = build_snapshot(fetch_live_raw(date.today(), source=_SOURCE))
+                archive_snapshot(snap, _ARCHIVE_ROOT, captured_at=datetime.now())
+            except Exception as exc:  # noqa: BLE001 — a failed capture must not kill the loop
+                print(f"spdt-archiver: capture failed: {exc}")
+        time.sleep(_ARCHIVE_INTERVAL_S)
+
+
+if _LIVE and _ARCHIVE_INTERVAL_S > 0:
+    threading.Thread(target=_archive_loop, daemon=True, name="spdt-archiver").start()
 
 
 @app.get("/api/health")
@@ -801,6 +842,482 @@ def xva(req: XvaRequest) -> dict:
         "inputs": {"cds_spread_bps": req.cds_spread_bps, "recovery_rate": req.recovery_rate,
                    "funding_spread_bp": req.funding_spread_bp, "hurdle_rate": req.hurdle_rate},
     }
+
+
+# --- live desk: snapshot info, hedge recommendations, paper execution, alerts (Phase 5) -----
+# In-process desk state: one paper book and one alert engine per server. Fine for a
+# single-user desk terminal; move to a store if the app ever goes multi-user.
+_DELTA_LIMIT = float(os.environ.get("SPDT_DELTA_LIMIT", "1000000"))
+_VEGA_LIMIT = float(os.environ.get("SPDT_VEGA_LIMIT", "500000"))
+_QUOTE_MAX_AGE_S = float(os.environ.get("SPDT_QUOTE_MAX_AGE_S", "30"))
+_QUOTE_MAX_FUTURE_SKEW = float(os.environ.get("SPDT_QUOTE_MAX_FUTURE_SKEW", "5"))
+_RECOMMENDATION_TTL_S = float(os.environ.get("SPDT_RECOMMENDATION_TTL_S", "30"))
+
+_paper = PaperBroker()
+_alert_engine = AlertEngine()
+_desk_state_lock = threading.RLock()
+
+
+@dataclasses.dataclass
+class _RecommendationState:
+    recommendation: HedgeRecommendation
+    quotes: dict[tuple[int, int], Quote]
+    created_monotonic: float
+    execution_state: str = "PROPOSED"
+    execution_result: dict | None = None
+
+
+_recommendations: dict[str, _RecommendationState] = {}
+
+
+class InstrumentIn(BaseModel):
+    """A tradable hedge instrument with its current quote and per-unit Greeks."""
+
+    instrument_id: int = Field(gt=0)
+    segment: int = Field(default=2, gt=0)  # NSEFO
+    symbol: str = ""
+    bid: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    ask: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    ltp: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    bid_qty: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    ask_qty: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    quote_timestamp: datetime
+    lot_size: int = Field(default=1, gt=0)
+    delta: float = Field(default=1.0, allow_inf_nan=False)
+    vega: float = Field(default=0.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_market(self):
+        if self.bid is None and self.ask is None and self.ltp is None:
+            raise ValueError("instrument requires at least one positive price")
+        if self.bid is not None and self.ask is not None and self.bid > self.ask:
+            raise ValueError("bid must not exceed ask")
+        if self.quote_timestamp.tzinfo is None:
+            raise ValueError("quote_timestamp must include a timezone")
+        return self
+
+
+class HedgeRequest(BaseModel):
+    future: InstrumentIn
+    option: InstrumentIn | None = None  # supplied → delta-vega hedge, else delta-only
+    book_delta: float | None = Field(default=None, allow_inf_nan=False)
+    book_vega: float | None = Field(default=None, allow_inf_nan=False)
+    max_notional: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_hedge_ratios(self):
+        if self.future.delta == 0:
+            raise ValueError("future delta must be non-zero")
+        if self.option is not None and self.option.vega == 0:
+            raise ValueError("option vega must be non-zero")
+        return self
+
+
+class ExecuteRequest(BaseModel):
+    recommendation_id: str
+
+
+def _hedge_instrument(spec: InstrumentIn) -> HedgeInstrument:
+    ref = InstrumentRef(exchange_segment=spec.segment, exchange_instrument_id=spec.instrument_id,
+                        symbol=spec.symbol)
+    timestamp = spec.quote_timestamp.astimezone(timezone.utc)
+    age_s = (datetime.now(timezone.utc) - timestamp).total_seconds()
+    stale = age_s > _QUOTE_MAX_AGE_S or age_s < -_QUOTE_MAX_FUTURE_SKEW
+    quote = Quote(instrument=ref, ltp=spec.ltp, bid=spec.bid, ask=spec.ask,
+                  bid_qty=spec.bid_qty, ask_qty=spec.ask_qty, timestamp=timestamp, stale=stale,
+                  source="manual")
+    return HedgeInstrument(quote=quote, delta=spec.delta, vega=spec.vega, lot_size=spec.lot_size)
+
+
+def _rec_json(rec: HedgeRecommendation, execution_state: str | None = None) -> dict:
+    payload = {
+        "recommendation_id": rec.recommendation_id,
+        "created_at": rec.created_at.isoformat(),
+        "objective": rec.objective,
+        "current_greeks": rec.current_greeks,
+        "expected_greeks": rec.expected_greeks,
+        "orders": [
+            {"instrument_id": o.instrument.exchange_instrument_id,
+             "segment": o.instrument.exchange_segment, "symbol": o.instrument.symbol,
+             "side": o.side.name, "qty": o.qty}
+            for o in rec.orders
+        ],
+        "estimated_cost": rec.estimated_cost,
+        "approval_state": rec.approval_state,
+        "reason_codes": list(rec.reason_codes),
+    }
+    if execution_state is not None:
+        payload["execution_state"] = execution_state
+    return payload
+
+
+def _alert_json(alert) -> dict:
+    return {
+        "id": alert.id, "severity": alert.severity, "category": alert.category,
+        "message": alert.message, "metric": alert.metric, "value": alert.value,
+        "threshold": alert.threshold, "trade_id": alert.trade_id, "status": alert.status,
+        "timestamp": alert.timestamp.isoformat() if alert.timestamp else None,
+    }
+
+
+_EXPLORER_LEVELS = tuple(round(0.4 + 0.1 * i, 1) for i in range(13))  # 0.4 … 1.6
+
+
+def _explorer_summary(req: PriceRequest, outcomes: dict) -> list[str]:
+    """Plain-English lines a non-quant can read. Facts from the same engine as the price."""
+    p = req.params
+    obs = req.observation_times or []
+    per_year = round(len(obs) / max(obs)) if obs else 0
+    lines: list[str] = []
+    if p.get("coupon_rate") and per_year:
+        lines.append(
+            f"Pays a {p['coupon_rate'] * per_year * 100:.1f}% p.a. coupon, "
+            f"{per_year}× per year."
+        )
+    if p.get("knock_in"):
+        lines.append(
+            f"Your capital is protected unless the index falls below "
+            f"{p['knock_in'] * 100:.0f}% of its starting level; beyond that you take the fall."
+        )
+    if p.get("autocall_level"):
+        lines.append(
+            f"Redeems early if the index is at or above {p['autocall_level'] * 100:.0f}% "
+            f"of start on an observation date "
+            f"(model-implied chance: {outcomes['prob_autocall_pct']:.0f}%)."
+        )
+    if p.get("protection"):
+        lines.append(
+            f"{p['protection'] * 100:.0f}% of your capital is protected at maturity; "
+            f"upside participation is {p.get('participation', 1.0):.2f}×."
+        )
+    lines.append(
+        f"Model-implied chance of losing money: {outcomes['prob_loss_pct']:.1f}%. "
+        f"In the worst 5% of scenarios the return is {outcomes['p5_return_pct']:.1f}% or lower."
+    )
+    return lines
+
+
+@app.post("/api/explorer", dependencies=[Depends(require_token)])
+def payoff_explorer(req: PriceRequest) -> dict:
+    """Client-facing view of a product: payoff sweep, outcome odds, coupon schedule, plain English."""
+    d = _desk()
+    spot, m = d["spot"], d["model"]
+    model = BlackScholes(spot=spot, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    product = _build_product(req, spot)
+    pv = price_mc(product, model, n_paths=20_000, seed=7)
+    outcomes = outcome_profile(product, model, n_paths=20_000, seed=7)
+    coupon_rate = req.params.get("coupon_rate")
+    return {
+        "pv": pv.price,
+        "notional": req.notional,
+        "payoff": [
+            {"terminal_level": s.terminal_level, "payment_pct": s.payment_pct,
+             "ki_breached": s.ki_breached}
+            for s in terminal_scenarios(product, _EXPLORER_LEVELS)
+        ],
+        "outcomes": outcomes,
+        "coupon_schedule": [
+            {"time": t, "amount_pct": coupon_rate * 100.0}
+            for t in (req.observation_times or [])
+        ] if coupon_rate else [],
+        "summary": _explorer_summary(req, outcomes),
+        "disclaimer": (
+            "Probabilities are model-implied (risk-neutral Black-Scholes at the desk's "
+            "current marks), not forecasts. Educational illustration — not investment advice."
+        ),
+    }
+
+
+@app.get("/api/live/option-chain")
+def live_option_chain() -> dict:
+    """The chain the desk is calibrated on: nearest expiries, priced strikes, inverted IVs."""
+    d = _desk()
+    return {"as_of": d["as_of"], "data_source": d["data_source"],
+            "underlying": d["underlying"], "spot": d["spot"],
+            "rows": d.get("option_chain", [])}
+
+
+_xts_quote_client = None
+_xts_quote_lock = threading.Lock()
+
+
+def _live_quote(symbol: str) -> dict:
+    """Front-future touchline for ``symbol`` via the XTS market-data API (login cached)."""
+    from spdt.data.ingest.xts import XTSMarketDataClient
+
+    global _xts_quote_client
+    with _xts_quote_lock:
+        if _xts_quote_client is None:
+            from tempfile import gettempdir
+            _xts_quote_client = XTSMarketDataClient(timeout=300.0,
+                                                    master_cache_dir=gettempdir())
+        client = _xts_quote_client
+
+        def fetch() -> dict:
+            if not client.token:
+                client.login()
+            futures = [
+                r for r in client.instruments("NSEFO")
+                if r.symbol == symbol and r.instrument_type == "FUTIDX"
+                and r.expiry is not None and r.expiry >= date.today()
+            ]
+            if not futures:
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    f"no live future found for {symbol!r}")
+            front = min(futures, key=lambda r: r.expiry)
+            now = datetime.now(timezone.utc)
+            quotes = client.quotes([front], now=now, max_age_s=_QUOTE_MAX_AGE_S)
+            if not quotes:
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    f"broker returned no quote for {front.description}")
+            q = quotes[0]
+            age_s = (now - q.timestamp).total_seconds() if q.timestamp else None
+            return {
+                "segment": front.exchange_segment,
+                "instrument_id": front.exchange_instrument_id,
+                "symbol": front.symbol,
+                "description": front.description,
+                "expiry": front.expiry.isoformat(),
+                "lot_size": front.lot_size,
+                "ltp": q.ltp, "bid": q.bid, "ask": q.ask,
+                "bid_qty": q.bid_qty, "ask_qty": q.ask_qty,
+                "timestamp": q.timestamp.isoformat() if q.timestamp else None,
+                "age_s": round(age_s, 1) if age_s is not None else None,
+                "stale": q.stale,
+            }
+
+        try:
+            return fetch()
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 — one re-login retry covers expired tokens
+            client.token = None
+            return fetch()
+
+
+@app.get("/api/live/quote")
+def live_quote(symbol: str = "NIFTY") -> dict:
+    """Live front-future quote for the hedge ticket. Only meaningful on the XTS feed."""
+    if not (_LIVE and _SOURCE == "xts"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "live quotes need SPDT_LIVE=1 and SPDT_SOURCE=xts")
+    return _live_quote(symbol)
+
+
+@app.get("/api/live/snapshot")
+def live_snapshot() -> dict:
+    """Provenance of the market data the desk is currently running on."""
+    d = _desk()
+    return {
+        "as_of": d["as_of"], "data_date": d["data_date"], "data_source": d["data_source"],
+        "underlying": d["underlying"], "spot": d["spot"],
+        "desk_age_s": round(time.time() - _cache.built_at, 1),
+    }
+
+
+@app.post("/api/hedges/recommend", dependencies=[Depends(require_token)])
+def hedge_recommend(req: HedgeRequest) -> dict:
+    """Size a hedge for the book's (or the given) Greeks; also refreshes Greek-limit alerts."""
+    greeks = _desk()["net_greeks"]
+    delta = req.book_delta if req.book_delta is not None else greeks["delta"]
+    vega = req.book_vega if req.book_vega is not None else greeks["vega"]
+    future = _hedge_instrument(req.future)
+    instruments = [future]
+    if req.option is not None:
+        option = _hedge_instrument(req.option)
+        instruments.append(option)
+        rec = recommend_delta_vega_hedge(delta, vega, future, option,
+                                         max_notional=req.max_notional)
+    else:
+        rec = recommend_delta_hedge(delta, future, max_notional=req.max_notional)
+    with _desk_state_lock:
+        _recommendations[rec.recommendation_id] = _RecommendationState(
+            recommendation=rec,
+            quotes={
+                (i.quote.instrument.exchange_segment, i.quote.instrument.exchange_instrument_id): i.quote
+                for i in instruments
+            },
+            created_monotonic=time.monotonic(),
+        )
+        _alert_engine.update([
+            greek_limit_alert("delta", value=greeks["delta"], limit=_DELTA_LIMIT),
+            greek_limit_alert("vega", value=greeks["vega"], limit=_VEGA_LIMIT),
+        ])
+    return _rec_json(rec)
+
+
+@app.get("/api/hedges/recommendations")
+def hedge_recommendations() -> list[dict]:
+    with _desk_state_lock:
+        return [
+            _rec_json(state.recommendation, state.execution_state)
+            for state in _recommendations.values()
+        ]
+
+
+@app.post("/api/execution/execute", dependencies=[Depends(require_token)])
+def execute_recommendation(req: ExecuteRequest) -> dict:
+    """Paper-execute a PROPOSED recommendation against the quotes it was sized on."""
+    with _desk_state_lock:
+        state = _recommendations.get(req.recommendation_id)
+        if state is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown recommendation_id")
+        if state.execution_state == "EXECUTED" and state.execution_result is not None:
+            return state.execution_result
+        rec = state.recommendation
+        if rec.approval_state != "PROPOSED" or state.execution_state != "PROPOSED":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"recommendation is {state.execution_state}, not executable",
+            )
+        if time.monotonic() - state.created_monotonic > _RECOMMENDATION_TTL_S:
+            state.execution_state = "EXPIRED"
+            raise HTTPException(status.HTTP_409_CONFLICT, "recommendation has expired")
+        now = datetime.now(timezone.utc)
+        for quote in state.quotes.values():
+            if quote.timestamp is None:
+                state.execution_state = "EXPIRED"
+                raise HTTPException(status.HTTP_409_CONFLICT, "recommendation quote has no timestamp")
+            timestamp = quote.timestamp.astimezone(timezone.utc)
+            age_s = (now - timestamp).total_seconds()
+            if age_s > _QUOTE_MAX_AGE_S or age_s < -_QUOTE_MAX_FUTURE_SKEW:
+                state.execution_state = "EXPIRED"
+                raise HTTPException(status.HTTP_409_CONFLICT, "recommendation quote is stale")
+        state.execution_state = "EXECUTING"
+        try:
+            results = []
+            for intent in rec.orders:
+                quote = state.quotes[
+                    (intent.instrument.exchange_segment, intent.instrument.exchange_instrument_id)
+                ]
+                order = _paper.submit(intent, quote)
+                results.append({"order_id": order.order_id, "status": order.status.value,
+                                "filled_qty": order.filled_qty})
+            response = {"recommendation_id": rec.recommendation_id, "orders": results}
+            state.execution_result = response
+            state.execution_state = "EXECUTED"
+            return response
+        except Exception:
+            state.execution_state = "FAILED"
+            raise
+
+
+@app.get("/api/execution/blotter")
+def execution_blotter() -> dict:
+    """Paper orders, fills, and positions — the desk's execution state."""
+    with _desk_state_lock:
+        return {
+        "orders": [
+            {"order_id": o.order_id, "instrument_id": o.intent.instrument.exchange_instrument_id,
+             "symbol": o.intent.instrument.symbol, "side": o.intent.side.name,
+             "qty": o.intent.qty, "status": o.status.value, "filled_qty": o.filled_qty}
+            for o in _paper.orders
+        ],
+        "fills": [
+            {"order_id": f.order_id, "instrument_id": f.instrument.exchange_instrument_id,
+             "side": f.side.name, "qty": f.qty, "price": f.price, "fees": f.fees,
+             "timestamp": f.timestamp.isoformat()}
+            for f in _paper.fills
+        ],
+        "positions": {
+            f"{segment}:{instrument_id}": {
+                "segment": segment,
+                "instrument_id": instrument_id,
+                "symbol": _paper.position_instruments[(segment, instrument_id)].symbol,
+                "qty": p.qty, "avg_price": p.avg_price,
+                "realized_pnl": p.realized_pnl, "fees_paid": p.fees_paid,
+            }
+            for (segment, instrument_id), p in _paper.positions.items()
+        },
+        }
+
+
+class AttributionRequest(BaseModel):
+    marks: dict[str, float] = {}  # "segment:instrument_id" → mark price
+
+
+@app.post("/api/execution/attribution")
+def execution_attribution_report(req: AttributionRequest) -> dict:
+    """Split the paper book's P&L into realized / unrealized / fees / spread cost."""
+    from spdt.execution.attribution import execution_attribution
+
+    marks: dict[tuple[int, int], float] = {}
+    for key, price in req.marks.items():
+        segment, _, instrument_id = key.partition(":")
+        marks[(int(segment), int(instrument_id))] = price
+    return execution_attribution(_paper, marks=marks)
+
+
+def _broker_client():
+    """Factory seam so tests can stub the broker; real client reads SPDT_XTS_INTERACTIVE_*."""
+    from spdt.execution.xts import XTSExecutionClient
+
+    return XTSExecutionClient()
+
+
+@app.get("/api/broker/state")
+def broker_state() -> dict:
+    """Read-only broker state + paper-vs-broker position reconciliation.
+
+    Never 500s the dashboard: without credentials (or on any broker error) it reports
+    ``connected: false`` with a reason, and the tab shows a clean not-connected state.
+    """
+    broker = _broker_client()
+    if not broker.app_key or not broker.secret:
+        return {"connected": False,
+                "reason": "XTS interactive credentials not configured (SPDT_XTS_INTERACTIVE_*)"}
+    try:
+        if not broker.token:
+            broker.login()
+        orders = broker.orders()
+        trades = broker.trades()
+        positions = broker.positions()
+        margins = broker.margins()
+    except Exception as exc:  # noqa: BLE001 — surface the reason, keep the desk up
+        return {"connected": False, "reason": str(exc)}
+
+    broker_by_id = {p.exchange_instrument_id: p for p in positions}
+    paper_by_id = {iid: (key, pos) for (seg, iid), pos in _paper.positions.items()
+                   for key in [(seg, iid)]}
+    reconciliation = []
+    for instrument_id in sorted(set(broker_by_id) | set(paper_by_id)):
+        b = broker_by_id.get(instrument_id)
+        paper_entry = paper_by_id.get(instrument_id)
+        p_qty = paper_entry[1].qty if paper_entry else 0.0
+        b_qty = b.qty if b else 0.0
+        if b is not None:
+            symbol = b.symbol
+        else:
+            symbol = _paper.position_instruments[paper_entry[0]].symbol if paper_entry else ""
+        reconciliation.append({
+            "instrument_id": instrument_id,
+            "symbol": symbol,
+            "paper_qty": p_qty,
+            "broker_qty": b_qty,
+            "difference": b_qty - p_qty,
+        })
+    return {
+        "connected": True,
+        "orders": [dataclasses.asdict(o) for o in orders],
+        "trades": [dataclasses.asdict(t) for t in trades],
+        "positions": [dataclasses.asdict(p) for p in positions],
+        "margins": dataclasses.asdict(margins),
+        "reconciliation": reconciliation,
+    }
+
+
+@app.get("/api/alerts")
+def alerts() -> dict:
+    with _desk_state_lock:
+        return {"open": [_alert_json(a) for a in _alert_engine.open_alerts],
+                "history": [_alert_json(a) for a in _alert_engine.history]}
+
+
+@app.post("/api/alerts/{alert_id}/ack", dependencies=[Depends(require_token)])
+def acknowledge_alert(alert_id: str) -> dict:
+    with _desk_state_lock:
+        _alert_engine.acknowledge(alert_id)
+    return {"status": "ok"}
 
 
 # --- static front end -----------------------------------------------------------------------

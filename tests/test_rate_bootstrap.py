@@ -14,7 +14,7 @@ from spdt.data.curate.rate_bootstrap import (
 )
 from spdt.data.ingest.fbil import fbil_instruments
 from spdt.data.ingest.nse_bhavcopy import parse_fo_bhavcopy
-from tests.test_nse_bhavcopy import _sample_bhavcopy
+from test_nse_bhavcopy import _sample_bhavcopy  # no `tests.` prefix — xva/tests shadows it once integration is imported
 
 ANCHOR = date(2024, 6, 17)
 
@@ -38,14 +38,31 @@ def test_each_ois_reprices_to_par():
     insts = _instruments()
     discount = bootstrap_discount_factors(ANCHOR, insts)
     ois = sorted((i for i in insts if i.kind == "ois"), key=lambda x: x.maturity)
-    coupon_dates = [i.maturity for i in ois]
-    for n, inst in enumerate(ois):
+    curve = bootstrap_ois_curve(ANCHOR, insts)
+    for inst in ois:
         # Fixed leg S·Σ τ_i D(t_i) must equal the floating leg 1 − D(T).
+        total_days = (inst.maturity - ANCHOR).days
+        coupon_dates = [
+            ANCHOR + timedelta(days=365 * n)
+            for n in range(1, total_days // 365 + 1)
+            if 365 * n < total_days
+        ] + [inst.maturity]
         annuity, last = 0.0, ANCHOR
-        for cd in coupon_dates[: n + 1]:
-            annuity += year_fraction(last, cd) * discount[cd]
+        for cd in coupon_dates:
+            annuity += year_fraction(last, cd) * curve.discount_factor(cd)
             last = cd
         assert inst.rate * annuity == pytest.approx(1.0 - discount[inst.maturity], abs=1e-12)
+
+
+def test_sparse_ois_still_includes_missing_annual_coupon_dates():
+    curve = bootstrap_ois_curve(ANCHOR, _instruments())
+    maturity = ANCHOR + timedelta(days=365 * 5)
+    coupon_dates = [ANCHOR + timedelta(days=365 * n) for n in range(1, 6)]
+    annuity = sum(
+        year_fraction(previous, current) * curve.discount_factor(current)
+        for previous, current in zip([ANCHOR, *coupon_dates[:-1]], coupon_dates)
+    )
+    assert 0.071 * annuity == pytest.approx(1.0 - curve.discount_factor(maturity), abs=1e-12)
 
 
 def test_discount_factors_decrease_with_maturity():

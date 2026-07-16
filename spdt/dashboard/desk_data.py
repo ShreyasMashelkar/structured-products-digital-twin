@@ -66,6 +66,35 @@ _LIVE_MAX_EXPIRIES = 6            # nearest N liquid expiries
 _LIVE_MIN_TENOR = 10.0 / 365.0    # skip ~same-day expiries (numerically unstable)
 
 
+def _chain_rows(
+    raw, ois_curve: Curve, spot: float, *, n_expiries: int = 4, band: tuple[float, float] = (0.7, 1.3)
+) -> list[dict]:
+    """Client-visible option-chain rows (nearest expiries, sane moneyness) with inverted IVs.
+
+    EOD settlement prints today; the same shape carries XTS intraday quotes (plus bid/ask)
+    when the live feed lands.
+    """
+    iv_by_key = {
+        (p.expiry, p.strike, p.is_call): round(p.implied_vol, 4)
+        for p in invert_chain(raw, ois_curve, iv_bounds=_LIVE_IV_BOUNDS)
+    }
+    expiries = sorted({q.expiry for q in raw.option_chain})[:n_expiries]
+    rows = [
+        {
+            "expiry": q.expiry.isoformat(),
+            "strike": q.strike,
+            "type": "CE" if q.is_call else "PE",
+            "price": q.settlement_price,
+            "moneyness": round(q.strike / spot, 4),
+            "iv": iv_by_key.get((q.expiry, q.strike, q.is_call)),
+        }
+        for q in raw.option_chain
+        if q.expiry in expiries and band[0] <= q.strike / spot <= band[1]
+    ]
+    rows.sort(key=lambda r: (r["expiry"], r["strike"], r["type"]))
+    return rows
+
+
 def _liquid_iv_points(raw, ois_curve: Curve):
     """IV points for a *live* surface — liquid moneyness band, sane IV bounds, and only the nearest
     well-populated expiries (drops thin far-dated/weekly slices that wreck the SSVI fit)."""
@@ -635,6 +664,7 @@ def build_desk_data(
 
     payload = {
         "as_of": as_of.isoformat(),
+        "option_chain": _chain_rows(raw, snap.ois_curve, spot),
         "data_date": raw.date.isoformat(),  # the actual market-data date (e.g. last EOD bhavcopy)
         "data_source": (
             "live+mifor-funding"

@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
-import { Decision, Desk, OutcomeResult, PriceResult, SemiStaticResult, StructureResult, XvaResult, computeXva, getOutcomes, getSemiStatic, priceTrade, solveStructure } from "./lib/api";
+import { useEffect, useRef, useState } from "react";
+import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, StructureResult, XvaResult, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getOptionChain, getOutcomes, getSemiStatic, priceTrade, recommendHedge, solveStructure } from "./lib/api";
 import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trades";
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
 import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
 import { cn } from "./lib/cn";
-import { fmt, pct, signed } from "./lib/format";
+import { compact, fmt, pct, signed } from "./lib/format";
 import { C } from "./lib/theme";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, LineChart, Line, Legend } from "recharts";
 
@@ -1225,6 +1225,567 @@ export function SemiStaticHedging({
             </ResponsiveContainer>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ======================= Hedge & Execute (Phase 5) ======================= */
+
+function NumField({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+  return (
+    <label className="block">
+      <span className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">{label}</span>
+      <input
+        type="number"
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        className="ring-desk tnum mt-1 w-full rounded-lg border border-border bg-panel2 px-2.5 py-1.5 text-[13px] text-ink"
+      />
+    </label>
+  );
+}
+
+const SEVERITY_TONE: Record<string, string> = {
+  CRITICAL: "border-down/50 bg-down/10 text-down",
+  WARNING: "border-accent/50 bg-accent/10 text-accent",
+  INFO: "border-teal/50 bg-teal/10 text-teal",
+};
+
+export function HedgeExecute({ desk }: { desk: Desk }) {
+  const [bid, setBid] = useState(Math.round(desk.spot) - 1);
+  const [ask, setAsk] = useState(Math.round(desk.spot) + 1);
+  const [lot, setLot] = useState(75); // NIFTY futures lot (overwritten by the live master)
+  const [live, setLive] = useState<LiveQuote | null>(null);
+  const [rec, setRec] = useState<HedgeRec | null>(null);
+  const [blotter, setBlotter] = useState<PaperBlotter | null>(null);
+  const [alerts, setAlerts] = useState<DeskAlert[]>([]);
+  const [attribution, setAttribution] = useState<Awaited<ReturnType<typeof getAttribution>> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [executed, setExecuted] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const refreshSequence = useRef(0);
+
+  const markKey = live ? `${live.segment}:${live.instrument_id}` : "2:1";
+
+  const refresh = async () => {
+    const sequence = ++refreshSequence.current;
+    try {
+      const mid = (bid + ask) / 2;
+      const [nextBlotter, nextAlerts, nextAttribution] = await Promise.all([
+        getBlotter(), getAlerts(), getAttribution({ [markKey]: mid }),
+      ]);
+      if (sequence === refreshSequence.current) {
+        setBlotter(nextBlotter);
+        setAlerts(nextAlerts.open);
+        setAttribution(nextAttribution);
+      }
+    } catch (e) {
+      if (sequence === refreshSequence.current) setError(String(e));
+    }
+  };
+  const loadLiveQuote = async () => {
+    try {
+      const q = await getLiveQuote(desk.underlying);
+      setLive(q);
+      if (q.bid != null) setBid(q.bid);
+      if (q.ask != null) setAsk(q.ask);
+      if (q.bid == null && q.ask == null && q.ltp != null) { setBid(q.ltp); setAsk(q.ltp); }
+      if (q.lot_size > 0) setLot(q.lot_size);
+    } catch {
+      setLive(null); // not on the XTS feed — the manual ticket still works
+    }
+  };
+  useEffect(() => {
+    void loadLiveQuote().then(refresh);
+    return () => { refreshSequence.current += 1; };
+  }, []);
+
+  const recommend = async () => {
+    setBusy(true);
+    setExecuted(false);
+    setError(null);
+    try {
+      setRec(await recommendHedge({
+        future: live ? {
+          instrument_id: live.instrument_id, segment: live.segment, symbol: live.description,
+          bid, ask, ltp: live.ltp ?? (bid + ask) / 2,
+          quote_timestamp: live.timestamp ?? new Date().toISOString(), lot_size: lot,
+        } : {
+          instrument_id: 1, segment: 2, symbol: `${desk.underlying}-FUT`, bid, ask,
+          ltp: (bid + ask) / 2, quote_timestamp: new Date().toISOString(), lot_size: lot,
+        },
+      }));
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const execute = async () => {
+    if (!rec) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await executeRecommendation(rec.recommendation_id);
+      setExecuted(true);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const positions = blotter ? Object.entries(blotter.positions).map(([id, p]) => ({ id, ...p })) : [];
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <div className="space-y-4">
+        <Panel>
+          <SectionTitle>Recommend a delta hedge</SectionTitle>
+          <p className="mb-3 text-[12px] leading-relaxed text-muted">
+            Sizes a lot-rounded futures order against the book's net delta, estimates spread + fee cost, and
+            paper-executes it against the quote below.
+          </p>
+          <div className="mb-3 flex items-center gap-2">
+            {live ? (
+              <>
+                <Chip hot={!live.stale}>{live.stale ? "LIVE · STALE" : "LIVE"}</Chip>
+                <span className="tnum text-[11px] text-muted">
+                  {live.description} · exp {live.expiry}
+                  {live.age_s != null && ` · quote ${live.age_s < 120 ? `${Math.round(live.age_s)}s` : `${Math.round(live.age_s / 60)}m`} old`}
+                </span>
+                <button
+                  onClick={() => { setError(null); void loadLiveQuote(); }}
+                  className="ring-desk rounded border border-border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.08em] text-muted hover:text-ink"
+                >
+                  Refresh quote
+                </button>
+              </>
+            ) : (
+              <>
+                <Chip>MANUAL</Chip>
+                <span className="text-[11px] text-muted">no broker feed — type the futures quote</span>
+              </>
+            )}
+          </div>
+          <div className="mb-3 grid grid-cols-3 gap-3">
+            <GreekStat label="Book net Δ" value={signed(desk.net_greeks.delta, 1)} tone={desk.net_greeks.delta >= 0 ? "pos" : "neg"} />
+            <GreekStat label="Book net vega" value={signed(desk.net_greeks.vega, 1)} />
+            <GreekStat label="Spot" value={fmt(desk.spot, 0)} />
+          </div>
+          <div className="mb-3 grid grid-cols-3 gap-3">
+            <NumField label="Fut bid" value={bid} onChange={setBid} />
+            <NumField label="Fut ask" value={ask} onChange={setAsk} />
+            <NumField label="Lot size" value={lot} onChange={(v) => setLot(Math.max(1, Math.round(v)))} />
+          </div>
+          <button
+            onClick={recommend}
+            disabled={busy}
+            className="ring-desk rounded-lg border border-accent/60 bg-accent/10 px-4 py-2 text-[12px] font-bold uppercase tracking-[0.1em] text-accent transition-colors hover:bg-accent/20 disabled:opacity-40"
+          >
+            {busy ? "…" : "Recommend"}
+          </button>
+          {error && <p className="mt-2 text-[12px] text-down" role="alert">{error}</p>}
+        </Panel>
+
+        {rec && (
+          <Panel>
+            <SectionTitle>Recommendation {rec.recommendation_id}</SectionTitle>
+            <div className="mb-2">
+              <Chip hot={rec.approval_state === "PROPOSED"}>{rec.approval_state}</Chip>
+              {rec.reason_codes.map((c) => <Chip key={c}>{c}</Chip>)}
+              {executed && <Chip hot>EXECUTED</Chip>}
+            </div>
+            {rec.orders.length > 0 ? (
+              <DataTable
+                rows={rec.orders}
+                cols={[
+                  { key: "symbol", label: "Instrument" },
+                  { key: "side", label: "Side", fmt: (o) => <span className={o.side === "BUY" ? "text-up" : "text-down"}>{o.side}</span> },
+                  { key: "qty", label: "Qty", align: "right", fmt: (o) => fmt(o.qty, 0) },
+                ]}
+              />
+            ) : (
+              <p className="text-[12px] text-muted">No orders — book delta is within tolerance.</p>
+            )}
+            <div className="mt-3 grid grid-cols-3 gap-3">
+              <GreekStat label="Δ before" value={signed(rec.current_greeks.delta, 1)} />
+              <GreekStat label="Δ after" value={signed(rec.expected_greeks.delta, 1)} tone={Math.abs(rec.expected_greeks.delta) < Math.abs(rec.current_greeks.delta) ? "pos" : undefined} />
+              <GreekStat label="Est. cost" value={fmt(rec.estimated_cost, 0)} />
+            </div>
+            {rec.orders.length > 0 && (
+              <button
+                onClick={execute}
+                disabled={busy || executed || rec.approval_state !== "PROPOSED"}
+                className="ring-desk mt-3 rounded-lg border border-up/60 bg-up/10 px-4 py-2 text-[12px] font-bold uppercase tracking-[0.1em] text-up transition-colors hover:bg-up/20 disabled:opacity-40"
+              >
+                Paper execute
+              </button>
+            )}
+          </Panel>
+        )}
+      </div>
+
+      <div className="space-y-4">
+        <Panel>
+          <SectionTitle>Paper blotter</SectionTitle>
+          {positions.length > 0 && (
+            <DataTable
+              rows={positions}
+              cols={[
+                { key: "symbol", label: "Position" },
+                { key: "qty", label: "Qty", align: "right", fmt: (p) => signed(p.qty, 0) },
+                { key: "avg_price", label: "Avg px", align: "right", fmt: (p) => fmt(p.avg_price, 1) },
+                { key: "realized_pnl", label: "Realized", align: "right", fmt: (p) => <span className={p.realized_pnl >= 0 ? "text-up" : "text-down"}>{signed(p.realized_pnl, 0)}</span> },
+                { key: "fees_paid", label: "Fees", align: "right", fmt: (p) => fmt(p.fees_paid, 0) },
+              ]}
+            />
+          )}
+          <div className="mt-3">
+            {blotter && blotter.orders.length > 0 ? (
+              <DataTable
+                max={260}
+                rows={[...blotter.orders].reverse()}
+                cols={[
+                  { key: "order_id", label: "Order" },
+                  { key: "symbol", label: "Instrument" },
+                  { key: "side", label: "Side", fmt: (o) => <span className={o.side === "BUY" ? "text-up" : "text-down"}>{o.side}</span> },
+                  { key: "qty", label: "Qty", align: "right", fmt: (o) => fmt(o.qty, 0) },
+                  { key: "status", label: "Status" },
+                ]}
+              />
+            ) : (
+              <p className="text-[12px] text-muted">No paper orders yet — recommend and execute a hedge.</p>
+            )}
+          </div>
+        </Panel>
+
+        {attribution && attribution.rows.length > 0 && (
+          <Panel>
+            <SectionTitle>Hedge P&L attribution</SectionTitle>
+            <DataTable max={220} rows={attribution.rows}
+              cols={[
+                { key: "symbol", label: "Instrument" },
+                { key: "realized_pnl", label: "Realized", align: "right", fmt: (r) => signed(r.realized_pnl, 0) },
+                { key: "unrealized_pnl", label: "Unrealized", align: "right", fmt: (r) => r.unrealized_pnl != null ? signed(r.unrealized_pnl, 0) : "no mark" },
+                { key: "spread_cost", label: "Spread", align: "right", fmt: (r) => fmt(r.spread_cost, 0) },
+                { key: "fees", label: "Fees", align: "right", fmt: (r) => fmt(r.fees, 0) },
+                { key: "net_pnl", label: "Net", align: "right", fmt: (r) => r.net_pnl != null ? <span className={r.net_pnl >= 0 ? "text-up" : "text-down"}>{signed(r.net_pnl, 0)}</span> : "—" },
+              ]} />
+            <p className="mt-2 text-[10.5px] text-faint">
+              Marked at the mid of the quote inputs. Spread cost is already inside the P&L — shown for visibility, not double-counted.
+            </p>
+          </Panel>
+        )}
+
+        <Panel>
+          <SectionTitle>Alerts</SectionTitle>
+          {alerts.length === 0 ? (
+            <p className="text-[12px] text-muted">No open alerts. Greek-limit rules re-evaluate on every recommendation.</p>
+          ) : (
+            <ul className="space-y-2">
+              {alerts.map((a) => (
+                <li key={a.id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-panel2/60 px-3 py-2">
+                  <div>
+                    <span className={cn("mr-2 rounded border px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.1em]", SEVERITY_TONE[a.severity])}>{a.severity}</span>
+                    <span className="text-[12px] text-ink/90">{a.message}</span>
+                  </div>
+                  {a.status === "OPEN" ? (
+                    <button onClick={async () => {
+                      setError(null);
+                      try {
+                        await ackAlert(a.id);
+                        await refresh();
+                      } catch (e) {
+                        setError(String(e));
+                      }
+                    }} className="ring-desk shrink-0 rounded border border-border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.08em] text-muted hover:text-ink">
+                      Ack
+                    </button>
+                  ) : (
+                    <span className="shrink-0 text-[10px] font-bold uppercase tracking-[0.08em] text-faint">{a.status}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
+/* ======================= Payoff Explorer (Phase 11) ======================= */
+
+const EXPLORER_PRODUCTS = [
+  { key: "autocallable", label: "Autocallable (Phoenix)" },
+  { key: "brc", label: "Barrier Reverse Convertible" },
+  { key: "capital_protected", label: "Capital-Protected Note" },
+] as const;
+
+export function PayoffExplorer({ desk }: { desk: Desk }) {
+  const [productType, setProductType] = useState<string>("autocallable");
+  const [couponPa, setCouponPa] = useState(0.10);
+  const [knockIn, setKnockIn] = useState(0.70);
+  const [maturity, setMaturity] = useState(2);
+  const [participation, setParticipation] = useState(1.2);
+  const [result, setResult] = useState<ExplorerResult | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      const obs = Array.from({ length: maturity * 4 }, (_, i) => (i + 1) / 4);
+      const params: Record<string, any> =
+        productType === "capital_protected"
+          ? { protection: 1.0, participation, strike: 1.0 }
+          : productType === "brc"
+            ? { coupon_rate: couponPa / 4, knock_in: knockIn, strike: 1.0 }
+            : { coupon_rate: couponPa / 4, knock_in: knockIn, autocall_level: 1.0, coupon_barrier: knockIn, memory: true };
+      setResult(await explore({
+        product_type: productType, notional: 100,
+        observation_times: productType === "capital_protected" ? undefined : obs,
+        maturity: productType === "capital_protected" ? maturity : undefined,
+        params,
+      }));
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => { run(); /* eslint-disable-line */ }, [productType]);
+
+  const o = result?.outcomes;
+  return (
+    <div className="grid gap-4 lg:grid-cols-[380px_1fr]">
+      <div className="space-y-4">
+        <Panel>
+          <SectionTitle>Pick a product</SectionTitle>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {EXPLORER_PRODUCTS.map((p) => (
+              <button key={p.key} onClick={() => setProductType(p.key)}
+                className={cn("ring-desk rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition-colors",
+                  productType === p.key ? "border-accent/60 bg-accent/10 text-accent" : "border-border bg-panel2 text-muted hover:text-ink")}>
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <div className="space-y-3">
+            {productType !== "capital_protected" && (
+              <>
+                <Slider label="Coupon (p.a.)" value={couponPa} min={0.02} max={0.25} step={0.005}
+                  onChange={setCouponPa} display={`${(couponPa * 100).toFixed(1)}%`} />
+                <Slider label="Barrier / knock-in" value={knockIn} min={0.4} max={0.95} step={0.05}
+                  onChange={setKnockIn} display={`${(knockIn * 100).toFixed(0)}%`} />
+              </>
+            )}
+            {productType === "capital_protected" && (
+              <Slider label="Participation" value={participation} min={0.5} max={2.5} step={0.05}
+                onChange={setParticipation} display={`${participation.toFixed(2)}×`} />
+            )}
+            <Slider label="Maturity (years)" value={maturity} min={1} max={4} step={1}
+              onChange={(v) => setMaturity(Math.round(v))} display={`${maturity}Y`} />
+          </div>
+          <button onClick={run} disabled={busy}
+            className="ring-desk mt-4 rounded-lg border border-accent/60 bg-accent/10 px-4 py-2 text-[12px] font-bold uppercase tracking-[0.1em] text-accent transition-colors hover:bg-accent/20 disabled:opacity-40">
+            {busy ? "Pricing…" : "Update"}
+          </button>
+        </Panel>
+        {result && (
+          <Panel>
+            <SectionTitle>In plain English</SectionTitle>
+            <ul className="space-y-2 text-[12.5px] leading-relaxed text-ink/90">
+              {result.summary.map((s, i) => <li key={i}>• {s}</li>)}
+            </ul>
+            <p className="mt-3 border-t border-border-soft pt-2 text-[10.5px] leading-relaxed text-faint">{result.disclaimer}</p>
+          </Panel>
+        )}
+      </div>
+
+      <div className="space-y-4">
+        {result && o && (
+          <>
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <Kpi label="Fair value" value={fmt(result.pv, 2)} sub={`per ${result.notional} notional`} />
+              <Kpi label="Chance of early redemption" value={`${o.prob_autocall_pct.toFixed(0)}%`} sub={`median life ${o.median_life_years.toFixed(2)}y`} tone="accent" />
+              <Kpi label="Chance of losing money" value={`${o.prob_loss_pct.toFixed(1)}%`} sub="model-implied" tone={o.prob_loss_pct > 15 ? "neg" : "pos"} />
+              <Kpi label="Worst 5% return" value={`${o.p5_return_pct.toFixed(1)}%`} sub={`best 5%: ${o.p95_return_pct.toFixed(1)}%`} tone="neg" />
+            </div>
+            <Panel>
+              <SectionTitle>Payment at maturity vs where the index ends</SectionTitle>
+              <ResponsiveContainer width="100%" height={260}>
+                <LineChart data={result.payoff.map((p) => ({ level: Math.round(p.terminal_level), pay: p.payment_pct }))}>
+                  <CartesianGrid stroke={C.grid} strokeDasharray="3 3" />
+                  <XAxis dataKey="level" tick={{ fontSize: 11 }} label={{ value: "index at maturity (% of start)", position: "insideBottom", offset: -4, fontSize: 10 }} />
+                  <YAxis tick={{ fontSize: 11 }} label={{ value: "payment %", angle: -90, position: "insideLeft", fontSize: 10 }} />
+                  <Tooltip formatter={(v: number) => [`${v.toFixed(1)}%`, "payment"]} labelFormatter={(l) => `index at ${l}%`} />
+                  <Line type="monotone" dataKey="pay" stroke={C.accent} strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </Panel>
+            <div className="grid gap-4 md:grid-cols-2">
+              <Panel>
+                <SectionTitle>When does it redeem?</SectionTitle>
+                <ResponsiveContainer width="100%" height={180}>
+                  <BarChart data={o.autocall_by_period.map((p) => ({ t: `${p.time}y`, pct: p.prob_pct }))}>
+                    <CartesianGrid stroke={C.grid} strokeDasharray="3 3" />
+                    <XAxis dataKey="t" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 10 }} />
+                    <Tooltip formatter={(v: number) => [`${v.toFixed(1)}%`, "chance"]} />
+                    <Bar dataKey="pct" fill={C.accent} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </Panel>
+              <Panel>
+                <SectionTitle>Coupon schedule</SectionTitle>
+                {result.coupon_schedule.length ? (
+                  <DataTable max={180} rows={result.coupon_schedule}
+                    cols={[
+                      { key: "time", label: "Observation", fmt: (r) => `${r.time}y` },
+                      { key: "amount_pct", label: "Coupon", align: "right", fmt: (r) => `${r.amount_pct.toFixed(2)}%` },
+                    ]} />
+                ) : (
+                  <p className="text-[12px] text-muted">No coupons — this note pays through upside participation at maturity.</p>
+                )}
+              </Panel>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ======================= Option Chain ======================= */
+
+export function OptionChainView() {
+  const [chain, setChain] = useState<Awaited<ReturnType<typeof getOptionChain>> | null>(null);
+  const [expiry, setExpiry] = useState<string | null>(null);
+  useEffect(() => { getOptionChain().then((c) => { setChain(c); setExpiry(c.rows[0]?.expiry ?? null); }).catch(() => {}); }, []);
+  if (!chain) return <div className="text-[12px] text-muted">Loading chain…</div>;
+
+  const expiries = [...new Set(chain.rows.map((r) => r.expiry))];
+  const rows = chain.rows.filter((r) => r.expiry === expiry);
+  const byStrike = new Map<number, { strike: number; ce?: ChainRow; pe?: ChainRow }>();
+  rows.forEach((r) => {
+    const e = byStrike.get(r.strike) ?? { strike: r.strike };
+    if (r.type === "CE") e.ce = r; else e.pe = r;
+    byStrike.set(r.strike, e);
+  });
+  const table = [...byStrike.values()].sort((a, b) => a.strike - b.strike);
+  const smile = table
+    .map((r) => ({ strike: r.strike, ce: r.ce?.iv != null ? r.ce.iv * 100 : null, pe: r.pe?.iv != null ? r.pe.iv * 100 : null }))
+    .filter((r) => r.ce != null || r.pe != null);
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <Panel>
+        <div className="mb-2 flex items-center justify-between">
+          <SectionTitle>Chain · {chain.underlying} · spot {fmt(chain.spot, 0)}</SectionTitle>
+          <span className="text-[10px] uppercase tracking-[0.1em] text-faint">{chain.data_source} · {chain.as_of}</span>
+        </div>
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {expiries.map((e) => (
+            <button key={e} onClick={() => setExpiry(e)}
+              className={cn("ring-desk rounded-lg border px-2.5 py-1 text-[11px] font-semibold",
+                expiry === e ? "border-accent/60 bg-accent/10 text-accent" : "border-border bg-panel2 text-muted hover:text-ink")}>
+              {e}
+            </button>
+          ))}
+        </div>
+        <DataTable max={430} rows={table}
+          cols={[
+            { key: "ce_price", label: "Call px", align: "right", fmt: (r) => r.ce ? fmt(r.ce.price, 1) : "—" },
+            { key: "ce_iv", label: "Call IV", align: "right", fmt: (r) => r.ce?.iv != null ? `${(r.ce.iv * 100).toFixed(1)}%` : "—" },
+            { key: "strike", label: "Strike", align: "right", className: (r) => (Math.abs(r.strike / chain.spot - 1) < 0.01 ? "font-bold text-accent" : ""), fmt: (r) => fmt(r.strike, 0) },
+            { key: "pe_iv", label: "Put IV", align: "right", fmt: (r) => r.pe?.iv != null ? `${(r.pe.iv * 100).toFixed(1)}%` : "—" },
+            { key: "pe_price", label: "Put px", align: "right", fmt: (r) => r.pe ? fmt(r.pe.price, 1) : "—" },
+          ]} />
+      </Panel>
+      <Panel>
+        <SectionTitle>Implied-vol smile · {expiry}</SectionTitle>
+        <ResponsiveContainer width="100%" height={420}>
+          <LineChart data={smile}>
+            <CartesianGrid stroke={C.grid} strokeDasharray="3 3" />
+            <XAxis dataKey="strike" tick={{ fontSize: 10 }} domain={["dataMin", "dataMax"]} type="number" />
+            <YAxis tick={{ fontSize: 10 }} unit="%" domain={["auto", "auto"]} />
+            <Tooltip formatter={(v: number, n: string) => [`${v.toFixed(2)}%`, n.toUpperCase()]} />
+            <Legend />
+            <Line type="monotone" dataKey="ce" name="calls" stroke={C.accent} strokeWidth={2} dot={{ r: 2 }} connectNulls />
+            <Line type="monotone" dataKey="pe" name="puts" stroke={C.teal} strokeWidth={2} dot={{ r: 2 }} connectNulls />
+          </LineChart>
+        </ResponsiveContainer>
+        <p className="mt-2 text-[10.5px] text-faint">
+          EOD settlement prints today; the same view carries live XTS bid/ask once the broker feed is connected.
+        </p>
+      </Panel>
+    </div>
+  );
+}
+
+/* ======================= Broker (Phase 7 UI) ======================= */
+
+export function BrokerView() {
+  const [state, setState] = useState<BrokerState | null>(null);
+  useEffect(() => { getBrokerState().then(setState).catch(() => {}); }, []);
+  if (!state) return <div className="text-[12px] text-muted">Checking broker connection…</div>;
+
+  if (!state.connected) {
+    return (
+      <Panel>
+        <SectionTitle>Broker · not connected</SectionTitle>
+        <p className="mb-2 text-[13px] text-ink/90">
+          The read-only broker view lights up when XTS interactive credentials are configured.
+        </p>
+        <p className="text-[12px] text-muted">{state.reason}</p>
+        <p className="mt-3 text-[11px] text-faint">
+          Set <code>SPDT_XTS_INTERACTIVE_APP_KEY</code> / <code>SPDT_XTS_INTERACTIVE_SECRET</code> in
+          .env (see .env.example). This tab only ever reads orders, positions and margins — order
+          placement stays paper unless explicitly enabled.
+        </p>
+      </Panel>
+    );
+  }
+
+  const m = state.margins!;
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+        <Kpi label="Cash available" value={compact(m.cash_available)} />
+        <Kpi label="Margin used" value={compact(m.margin_utilized)} tone="accent" />
+        <Kpi label="Net margin free" value={compact(m.net_margin_available)} tone="pos" />
+      </div>
+      <Panel>
+        <SectionTitle>Paper vs broker reconciliation</SectionTitle>
+        {state.reconciliation?.length ? (
+          <DataTable rows={state.reconciliation}
+            cols={[
+              { key: "symbol", label: "Instrument" },
+              { key: "paper_qty", label: "Paper", align: "right", fmt: (r) => signed(r.paper_qty, 0) },
+              { key: "broker_qty", label: "Broker", align: "right", fmt: (r) => signed(r.broker_qty, 0) },
+              { key: "difference", label: "Diff", align: "right", fmt: (r) => <span className={r.difference === 0 ? "text-up" : "text-down"}>{signed(r.difference, 0)}</span> },
+            ]} />
+        ) : (
+          <p className="text-[12px] text-muted">No positions on either side yet.</p>
+        )}
+      </Panel>
+      <Panel>
+        <SectionTitle>Broker orders</SectionTitle>
+        {state.orders?.length ? (
+          <DataTable max={280} rows={state.orders}
+            cols={[
+              { key: "order_id", label: "Order" },
+              { key: "symbol", label: "Instrument" },
+              { key: "side", label: "Side" },
+              { key: "qty", label: "Qty", align: "right" },
+              { key: "status", label: "Status" },
+            ]} />
+        ) : (
+          <p className="text-[12px] text-muted">No broker orders today.</p>
+        )}
+      </Panel>
     </div>
   );
 }

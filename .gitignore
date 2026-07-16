@@ -61,3 +61,4 @@ xva/**/*.db
 xva/**/*.sqlite*
 xva/**/__pycache__/
 xva/.pytest_cache/
+.env

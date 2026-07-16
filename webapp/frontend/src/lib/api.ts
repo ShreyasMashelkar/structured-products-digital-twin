@@ -1,3 +1,22 @@
+const API_TOKEN = import.meta.env.VITE_SPDT_API_TOKEN as string | undefined;
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (API_TOKEN) headers.set("X-API-Token", API_TOKEN);
+  const response = await fetch(input, { ...init, headers });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      if (typeof body?.detail === "string") detail = body.detail;
+    } catch {
+      // Preserve the HTTP status when the response is not JSON.
+    }
+    throw new Error(detail);
+  }
+  return response;
+}
+
 export interface Desk {
   as_of: string;
   data_date?: string;
@@ -139,28 +158,25 @@ export interface XvaResult {
 }
 
 export async function computeXva(req: XvaRequest): Promise<XvaResult> {
-  const r = await fetch("/api/xva", {
+  const r = await apiFetch("/api/xva", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
-  if (!r.ok) throw new Error("xva failed");
   return r.json();
 }
 
 export async function priceTrade(req: PriceRequest): Promise<PriceResult> {
-  const r = await fetch("/api/price", {
+  const r = await apiFetch("/api/price", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
-  if (!r.ok) throw new Error("price failed");
   return r.json();
 }
 
 export async function getDesk(): Promise<Desk> {
-  const r = await fetch("/api/desk");
-  if (!r.ok) throw new Error("desk fetch failed");
+  const r = await apiFetch("/api/desk");
   return r.json();
 }
 
@@ -199,12 +215,11 @@ export async function getSemiStatic(body: {
   trades: any[]; spot: number; sigma: number; r: number; q: number;
   selected_trade_id: string | null;
 }): Promise<SemiStaticResult> {
-  const response = await fetch("/api/semistatic", {
+  const response = await apiFetch("/api/semistatic", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error("semi-static analytics failed");
   return response.json();
 }
 
@@ -240,8 +255,7 @@ export interface OutcomeResult {
 }
 
 export async function getOutcomes(): Promise<OutcomeResult> {
-  const r = await fetch("/api/outcomes");
-  if (!r.ok) throw new Error("outcome study failed");
+  const r = await apiFetch("/api/outcomes");
   return r.json();
 }
 
@@ -255,12 +269,11 @@ export async function solveStructure(body: {
   prefer_basket?: boolean;
   product?: string | null;
 }): Promise<StructureResult> {
-  const r = await fetch("/api/structure", {
+  const r = await apiFetch("/api/structure", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error("structure solve failed");
   return r.json();
 }
 
@@ -285,7 +298,197 @@ export interface AnalyticsResult {
 }
 
 export async function getAnalytics(): Promise<AnalyticsResult> {
-  const r = await fetch("/api/analytics");
-  if (!r.ok) throw new Error("analytics fetch failed");
+  const r = await apiFetch("/api/analytics");
+  return r.json();
+}
+
+/* ---- live desk: hedge recommendations, paper execution, alerts (Phase 5) ---- */
+
+export interface HedgeInstrumentIn {
+  instrument_id: number;
+  segment?: number;
+  symbol?: string;
+  bid?: number | null;
+  ask?: number | null;
+  ltp?: number | null;
+  quote_timestamp: string;
+  lot_size?: number;
+  delta?: number;
+  vega?: number;
+}
+
+export interface HedgeRec {
+  recommendation_id: string;
+  created_at: string;
+  objective: string;
+  current_greeks: Record<string, number>;
+  expected_greeks: Record<string, number>;
+  orders: { instrument_id: number; segment: number; symbol: string; side: "BUY" | "SELL"; qty: number }[];
+  estimated_cost: number;
+  approval_state: string;
+  execution_state?: string;
+  reason_codes: string[];
+}
+
+export interface Blotter {
+  orders: { order_id: string; instrument_id: number; symbol: string; side: string; qty: number; status: string; filled_qty: number }[];
+  fills: { order_id: string; instrument_id: number; side: string; qty: number; price: number; fees: number; timestamp: string }[];
+  positions: Record<string, { segment: number; instrument_id: number; symbol: string; qty: number; avg_price: number; realized_pnl: number; fees_paid: number }>;
+}
+
+export interface DeskAlert {
+  id: string;
+  severity: "INFO" | "WARNING" | "CRITICAL";
+  category: string;
+  message: string;
+  metric: string;
+  value: number;
+  threshold: number;
+  trade_id: string | null;
+  status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+  timestamp: string | null;
+}
+
+export async function recommendHedge(body: {
+  future: HedgeInstrumentIn;
+  option?: HedgeInstrumentIn;
+  book_delta?: number;
+  book_vega?: number;
+  max_notional?: number;
+}): Promise<HedgeRec> {
+  const r = await apiFetch("/api/hedges/recommend", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+export async function executeRecommendation(recommendation_id: string): Promise<{ orders: { order_id: string; status: string; filled_qty: number }[] }> {
+  const r = await apiFetch("/api/execution/execute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ recommendation_id }),
+  });
+  return r.json();
+}
+
+export interface LiveQuote {
+  segment: number;
+  instrument_id: number;
+  symbol: string;
+  description: string;
+  expiry: string;
+  lot_size: number;
+  ltp: number | null;
+  bid: number | null;
+  ask: number | null;
+  bid_qty: number | null;
+  ask_qty: number | null;
+  timestamp: string | null;
+  age_s: number | null;
+  stale: boolean;
+}
+
+export async function getLiveQuote(symbol = "NIFTY"): Promise<LiveQuote> {
+  const r = await apiFetch(`/api/live/quote?symbol=${encodeURIComponent(symbol)}`);
+  return r.json();
+}
+
+export async function getBlotter(): Promise<Blotter> {
+  const r = await apiFetch("/api/execution/blotter");
+  return r.json();
+}
+
+export async function getAlerts(): Promise<{ open: DeskAlert[]; history: DeskAlert[] }> {
+  const r = await apiFetch("/api/alerts");
+  return r.json();
+}
+
+export async function ackAlert(id: string): Promise<void> {
+  await apiFetch(`/api/alerts/${encodeURIComponent(id)}/ack`, { method: "POST" });
+}
+
+/* ---- payoff explorer, option chain, broker state, attribution ---- */
+
+export interface ExplorerResult {
+  pv: number;
+  notional: number;
+  payoff: { terminal_level: number; payment_pct: number; ki_breached: boolean }[];
+  outcomes: {
+    n_paths: number;
+    prob_autocall_pct: number;
+    prob_loss_pct: number;
+    mean_return_pa_pct: number;
+    median_return_pct: number;
+    p5_return_pct: number;
+    p95_return_pct: number;
+    median_life_years: number;
+    autocall_by_period: { time: number; prob_pct: number }[];
+  };
+  coupon_schedule: { time: number; amount_pct: number }[];
+  summary: string[];
+  disclaimer: string;
+}
+
+export async function explore(req: PriceRequest): Promise<ExplorerResult> {
+  const r = await fetch("/api/explorer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) throw new Error("explorer failed");
+  return r.json();
+}
+
+export interface ChainRow {
+  expiry: string;
+  strike: number;
+  type: "CE" | "PE";
+  price: number;
+  moneyness: number;
+  iv: number | null;
+}
+
+export async function getOptionChain(): Promise<{
+  as_of: string; data_source: string; underlying: string; spot: number; rows: ChainRow[];
+}> {
+  const r = await fetch("/api/live/option-chain");
+  if (!r.ok) throw new Error("option chain fetch failed");
+  return r.json();
+}
+
+export interface BrokerState {
+  connected: boolean;
+  reason?: string;
+  orders?: Record<string, any>[];
+  trades?: Record<string, any>[];
+  positions?: { symbol: string; exchange_instrument_id: number; qty: number }[];
+  margins?: { cash_available: number; margin_utilized: number; net_margin_available: number };
+  reconciliation?: { instrument_id: number; symbol: string; paper_qty: number; broker_qty: number; difference: number }[];
+}
+
+export async function getBrokerState(): Promise<BrokerState> {
+  const r = await fetch("/api/broker/state");
+  if (!r.ok) throw new Error("broker state fetch failed");
+  return r.json();
+}
+
+export interface AttributionRow {
+  segment: number; instrument_id: number; symbol: string; qty: number; avg_price: number;
+  realized_pnl: number; unrealized_pnl: number | null; fees: number; spread_cost: number;
+  net_pnl: number | null;
+}
+
+export async function getAttribution(marks: Record<string, number>): Promise<{
+  rows: AttributionRow[];
+  totals: { realized_pnl: number; fees: number; spread_cost: number; net_pnl: number | null; unmarked_positions: number };
+}> {
+  const r = await fetch("/api/execution/attribution", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ marks }),
+  });
+  if (!r.ok) throw new Error("attribution failed");
   return r.json();
 }

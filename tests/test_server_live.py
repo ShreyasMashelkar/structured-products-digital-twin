@@ -1,0 +1,273 @@
+"""Integration tests for the live-desk endpoints (Phase 5): snapshot info, hedge
+recommendations, paper execution blotter, and alerts — the pieces built in Phases 6/8/12
+exposed over HTTP. Uses a small synthetic desk build; no network, no credentials.
+
+Note: the hedge/execution/alert endpoints share module-level state (paper broker, alert
+engine), so tests in this file build on each other in order.
+"""
+
+import dataclasses
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+
+import webapp.server as server
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _small_desk():
+    original = server.build_desk_data
+    server.build_desk_data = lambda **kw: original(n_notes=4, n_paths=4000, **kw)
+    server._cache.payload = None
+    server._cache.built_at = 0.0
+    server._paper = server.PaperBroker()
+    server._alert_engine = server.AlertEngine()
+    server._recommendations.clear()
+    yield
+    server.build_desk_data = original
+
+
+@pytest.fixture(scope="module")
+def client():
+    return TestClient(server.app)
+
+
+def _future():
+    return {"instrument_id": 101, "segment": 2, "symbol": "NIFTY-FUT",
+            "bid": 24000.0, "ask": 24001.0, "ltp": 24000.5,
+            "quote_timestamp": datetime.now(timezone.utc).isoformat(), "lot_size": 1}
+
+
+def test_live_snapshot_reports_source_and_spot(client):
+    body = client.get("/api/live/snapshot").json()
+    assert body["data_source"] == "synthetic"
+    assert body["spot"] > 0
+    assert body["underlying"] == "NIFTY"
+    assert "as_of" in body and "desk_age_s" in body
+
+
+def test_hedge_recommend_execute_blotter_roundtrip(client):
+    r = client.post("/api/hedges/recommend", json={"book_delta": 150.0, "future": _future()})
+    assert r.status_code == 200
+    rec = r.json()
+    assert rec["approval_state"] == "PROPOSED"
+    assert rec["orders"] == [{"instrument_id": 101, "segment": 2, "symbol": "NIFTY-FUT",
+                              "side": "SELL", "qty": 150.0}]
+    assert rec["expected_greeks"]["delta"] == 0.0
+
+    listed = client.get("/api/hedges/recommendations").json()
+    assert listed[-1]["recommendation_id"] == rec["recommendation_id"]
+
+    r2 = client.post("/api/execution/execute",
+                     json={"recommendation_id": rec["recommendation_id"]})
+    assert r2.status_code == 200
+    assert r2.json()["orders"][0]["status"] == "FILLED"
+
+    blotter = client.get("/api/execution/blotter").json()
+    assert blotter["positions"]["2:101"]["qty"] == -150.0
+    assert len(blotter["fills"]) == 1
+    assert blotter["orders"][0]["side"] == "SELL"
+
+    # Idempotent retry returns the original result without another fill.
+    retry = client.post("/api/execution/execute",
+                        json={"recommendation_id": rec["recommendation_id"]})
+    assert retry.json() == r2.json()
+    assert len(client.get("/api/execution/blotter").json()["fills"]) == 1
+
+
+def test_execute_unknown_recommendation_is_404(client):
+    r = client.post("/api/execution/execute", json={"recommendation_id": "nope"})
+    assert r.status_code == 404
+
+
+def test_execute_revalidates_quote_age(client):
+    rec = client.post(
+        "/api/hedges/recommend", json={"book_delta": 10.0, "future": _future()}
+    ).json()
+    state = server._recommendations[rec["recommendation_id"]]
+    for key, quote in state.quotes.items():
+        state.quotes[key] = dataclasses.replace(
+            quote, timestamp=datetime.now(timezone.utc) - timedelta(minutes=5)
+        )
+    before = len(client.get("/api/execution/blotter").json()["fills"])
+    response = client.post(
+        "/api/execution/execute", json={"recommendation_id": rec["recommendation_id"]}
+    )
+    assert response.status_code == 409
+    assert len(client.get("/api/execution/blotter").json()["fills"]) == before
+
+
+def test_recommend_defaults_to_desk_book_greeks(client):
+    desk_delta = client.get("/api/desk").json()["net_greeks"]["delta"]
+    rec = client.post("/api/hedges/recommend", json={"future": _future()}).json()
+    assert rec["current_greeks"]["delta"] == pytest.approx(desk_delta)
+
+
+def test_scenario_override_cannot_suppress_canonical_alert(client, monkeypatch):
+    monkeypatch.setattr(server, "_DELTA_LIMIT", 0.0)
+    client.post("/api/hedges/recommend", json={"book_delta": 0.0, "future": _future()})
+    alerts = client.get("/api/alerts").json()
+    (delta_alert,) = [a for a in alerts["open"] if a["metric"] == "delta"]
+    assert delta_alert["severity"] == "CRITICAL" and delta_alert["status"] == "OPEN"
+
+    client.post(f"/api/alerts/{delta_alert['id']}/ack")
+    refreshed = client.get("/api/alerts").json()
+    assert [a["status"] for a in refreshed["open"] if a["id"] == delta_alert["id"]] == ["ACKNOWLEDGED"]
+    assert len(refreshed["history"]) >= 1
+
+
+def test_payoff_explorer_returns_client_view(client):
+    r = client.post("/api/explorer", json={
+        "product_type": "brc", "notional": 100, "observation_times": [0.5, 1.0],
+        "params": {"coupon_rate": 0.03, "knock_in": 0.7, "strike": 1.0},
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pv"] > 0
+    assert len(body["payoff"]) >= 10  # fine terminal-level sweep for the diagram
+    assert {"terminal_level", "payment_pct"} <= set(body["payoff"][0])
+    outcomes = body["outcomes"]
+    assert 0.0 <= outcomes["prob_loss_pct"] <= 100.0
+    assert [c["time"] for c in body["coupon_schedule"]] == [0.5, 1.0]
+    assert body["coupon_schedule"][0]["amount_pct"] == pytest.approx(3.0)
+    assert body["summary"] and isinstance(body["summary"][0], str)
+    assert "model-implied" in body["disclaimer"]
+
+
+def test_payoff_explorer_capital_protected_has_no_coupons(client):
+    r = client.post("/api/explorer", json={
+        "product_type": "capital_protected", "notional": 100, "maturity": 1.0,
+        "params": {"protection": 1.0, "participation": 1.2, "strike": 1.0},
+    })
+    body = r.json()
+    assert body["coupon_schedule"] == []
+    assert body["outcomes"]["prob_loss_pct"] == 0.0
+
+
+def test_option_chain_endpoint_serves_priced_rows(client):
+    r = client.get("/api/live/option-chain")
+    assert r.status_code == 200
+    body = r.json()
+    rows = body["rows"]
+    assert rows and {"expiry", "strike", "type", "price", "moneyness", "iv"} <= set(rows[0])
+    assert all(row["type"] in ("CE", "PE") for row in rows)
+    assert all(0.7 <= row["moneyness"] <= 1.3 for row in rows)
+    assert any(row["iv"] is not None for row in rows)  # inverted IVs attached
+    assert len({row["expiry"] for row in rows}) <= 4  # nearest expiries only
+    assert body["as_of"] and body["data_source"] == "synthetic"
+
+
+def test_broker_state_not_connected_without_credentials(client, monkeypatch):
+    monkeypatch.delenv("SPDT_XTS_INTERACTIVE_APP_KEY", raising=False)
+    monkeypatch.delenv("SPDT_XTS_INTERACTIVE_SECRET", raising=False)
+    body = client.get("/api/broker/state").json()
+    assert body["connected"] is False
+    assert "credentials" in body["reason"]
+
+
+def test_broker_state_reconciles_paper_vs_broker(client, monkeypatch):
+    from spdt.execution.xts import BrokerPosition, MarginState
+
+    class FakeBroker:
+        app_key, secret, token = "K", "S", "T"
+
+        def login(self):
+            pass
+
+        def orders(self):
+            return []
+
+        def trades(self):
+            return []
+
+        def positions(self):
+            return [BrokerPosition(symbol="NIFTY-FUT", exchange_instrument_id=101,
+                                   qty=-75.0, buy_avg_price=0.0, sell_avg_price=24010.0)]
+
+        def margins(self):
+            return MarginState(cash_available=5e5, margin_utilized=1.2e5,
+                               net_margin_available=3.8e5)
+
+    monkeypatch.setattr(server, "_broker_client", lambda: FakeBroker())
+    body = client.get("/api/broker/state").json()
+    assert body["connected"] is True
+    assert body["margins"]["cash_available"] == 5e5
+    row = next(r for r in body["reconciliation"] if r["instrument_id"] == 101)
+    assert row["broker_qty"] == -75.0
+    assert row["paper_qty"] == -150.0  # from the earlier paper execution in this module
+    assert row["difference"] == pytest.approx(75.0)
+
+
+def test_execution_attribution_endpoint(client):
+    r = client.post("/api/execution/attribution", json={"marks": {"2:101": 24000.5}})
+    assert r.status_code == 200
+    body = r.json()
+    row = next(x for x in body["rows"] if x["instrument_id"] == 101)
+    assert row["qty"] == -150.0
+    assert row["unrealized_pnl"] is not None and row["net_pnl"] is not None
+    assert "spread_cost" in body["totals"]
+
+
+def test_invalid_zero_vega_option_returns_422(client):
+    future = _future()
+    option = {**future, "instrument_id": 202, "symbol": "NIFTY-OPT", "vega": 0.0}
+    response = client.post("/api/hedges/recommend", json={
+        "book_delta": 10.0, "book_vega": 100.0, "future": future, "option": option,
+    })
+    assert response.status_code == 422
+
+
+def test_live_quote_needs_the_xts_feed(client):
+    r = client.get("/api/live/quote")
+    assert r.status_code == 409
+    assert "SPDT_SOURCE=xts" in r.json()["detail"]
+
+
+def test_live_quote_serves_front_future(client, monkeypatch):
+    from datetime import date
+
+    from spdt.data.ingest.xts import InstrumentRef, Quote
+
+    front = InstrumentRef(exchange_segment=2, exchange_instrument_id=61093, symbol="NIFTY",
+                          description="NIFTY26JULFUT", series="FUTIDX",
+                          instrument_type="FUTIDX",
+                          expiry=date.today() + timedelta(days=7), lot_size=65)
+    far = dataclasses.replace(front, exchange_instrument_id=61094,
+                              expiry=date.today() + timedelta(days=35))
+    spread_like = dataclasses.replace(front, exchange_instrument_id=61095,
+                                      expiry=date.today() - timedelta(days=1))  # expired
+
+    class FakeXts:
+        token = "TOK"
+
+        def instruments(self, segment, **kw):
+            assert segment == "NSEFO"
+            return [far, front, spread_like]
+
+        def quotes(self, refs, *, now=None, max_age_s=None):
+            (ref,) = refs
+            assert ref is front  # nearest live expiry wins
+            return [Quote(instrument=ref, ltp=24103.7, bid=24101.0, ask=24103.7,
+                          bid_qty=65.0, ask_qty=130.0,
+                          timestamp=datetime.now(timezone.utc) - timedelta(seconds=12),
+                          stale=False)]
+
+    monkeypatch.setattr(server, "_LIVE", True)
+    monkeypatch.setattr(server, "_SOURCE", "xts")
+    monkeypatch.setattr(server, "_xts_quote_client", FakeXts())
+    body = client.get("/api/live/quote").json()
+    assert body["instrument_id"] == 61093 and body["lot_size"] == 65
+    assert body["bid"] == 24101.0 and body["stale"] is False
+    assert body["age_s"] == pytest.approx(12, abs=2)
+
+
+def test_nse_session_window():
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    assert server._in_nse_session(datetime(2026, 7, 16, 10, 30, tzinfo=ist))   # Thu mid-session
+    assert server._in_nse_session(datetime(2026, 7, 16, 9, 15, tzinfo=ist))    # open
+    assert not server._in_nse_session(datetime(2026, 7, 16, 9, 14, tzinfo=ist))
+    assert not server._in_nse_session(datetime(2026, 7, 16, 15, 36, tzinfo=ist))
+    assert not server._in_nse_session(datetime(2026, 7, 18, 10, 30, tzinfo=ist))  # Saturday

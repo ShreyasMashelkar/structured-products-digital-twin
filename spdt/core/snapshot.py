@@ -16,6 +16,7 @@ from dataclasses import dataclass, fields, is_dataclass
 from datetime import date
 from enum import Enum
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any
 
 from spdt.core.provenance import Provenance
@@ -77,6 +78,11 @@ class MarketSnapshot:
     dividends: Mapping[Underlying, DividendSchedule]
     provenance: Provenance
     correlation: CorrelationMatrix | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "spots", MappingProxyType(dict(self.spots)))
+        object.__setattr__(self, "surfaces", MappingProxyType(dict(self.surfaces)))
+        object.__setattr__(self, "dividends", MappingProxyType(dict(self.dividends)))
 
     @cached_property
     def content_hash(self) -> str:

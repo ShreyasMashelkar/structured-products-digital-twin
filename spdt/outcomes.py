@@ -18,10 +18,62 @@ from scipy.special import ndtr
 from spdt.backtest import aggregate, generate_realized_series, roll_issuance
 from spdt.decomposition.components import BarrierComponent
 from spdt.pricing.analytic import bs_vanilla
+from spdt.pricing.engine import PathModel, _simulation_grid
+from spdt.pricing.mc.rng import standard_normals
 from spdt.pricing.models import BlackScholes
 from spdt.products import Autocallable, EuropeanOption
-from spdt.products.graph import Leg
+from spdt.products.graph import Leg, PathSet, Product
 from spdt.replication.strategies.barrier_replication import BarrierReplicationStrategy
+
+
+def outcome_profile(
+    product: Product, model: PathModel, *, n_paths: int = 20_000, seed: int = 0
+) -> dict[str, Any]:
+    """Client-facing outcome distribution for *any* DSL product under forward MC.
+
+    Generic over the payoff DSL: per-path cashflow totals give the return distribution,
+    the last payment time gives each path's life, and life short of maturity means early
+    redemption (autocall). Risk-neutral paths — outcome *probabilities* are model-implied,
+    stated as such in the explorer's disclaimer.
+    """
+    monitoring = product.monitoring_times()
+    grid = _simulation_grid(monitoring, None)
+    normals = standard_normals(n_paths, grid.size - 1, antithetic=True, seed=seed)
+    paths = PathSet(times=grid, spots=model.simulate(grid, normals))
+
+    notional = float(getattr(product, "notional", 100.0))
+    maturity = float(max(monitoring))
+    total = np.zeros(n_paths)
+    last_pay = np.zeros(n_paths)
+    for cf in product.cashflows(paths):
+        total += cf.amount
+        paid = cf.amount > 1e-9
+        last_pay[paid] = np.maximum(last_pay[paid], cf.time)
+    last_pay[last_pay <= 0.0] = maturity  # paid nothing → held to maturity
+
+    tol = 1e-9
+    autocalled = last_pay < maturity - tol
+    life = np.where(autocalled, last_pay, maturity)
+    returns = total / notional - 1.0
+    annualised = np.power(np.maximum(1.0 + returns, 1e-9), 1.0 / life) - 1.0
+
+    def pct(mask: np.ndarray) -> float:
+        return round(float(mask.mean() * 100.0), 4)
+
+    return {
+        "n_paths": n_paths,
+        "prob_autocall_pct": pct(autocalled),
+        "prob_loss_pct": pct(total < notional - tol),
+        "mean_return_pa_pct": round(float(annualised.mean() * 100.0), 2),
+        "median_return_pct": round(float(np.median(returns) * 100.0), 2),
+        "p5_return_pct": round(float(np.percentile(returns, 5) * 100.0), 2),
+        "p95_return_pct": round(float(np.percentile(returns, 95) * 100.0), 2),
+        "median_life_years": round(float(np.median(life)), 4),
+        "autocall_by_period": [
+            {"time": float(t), "prob_pct": pct(autocalled & (np.abs(last_pay - t) <= tol))}
+            for t in sorted(set(monitoring))
+        ],
+    }
 
 
 @dataclass(frozen=True)

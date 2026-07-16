@@ -83,6 +83,16 @@ def test_hash_tracks_surface_content_hash():
     assert _snapshot(surface_hash="v1").content_hash != _snapshot(surface_hash="v2").content_hash
 
 
+def test_snapshot_and_nested_market_mappings_are_immutable():
+    snap = _snapshot()
+    with pytest.raises(TypeError):
+        snap.spots["NIFTY"] = 23000.0
+    with pytest.raises(TypeError):
+        snap.ois_curve.discount_factors[date(2025, 6, 17)] = 0.5
+    with pytest.raises(TypeError):
+        snap.provenance.tags["spot.NIFTY"] = SourceTag.SYNTHETIC
+
+
 def test_unhashable_surface_is_rejected():
     snap = MarketSnapshot(
         date=ANCHOR,

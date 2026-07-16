@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from math import exp, log
+from types import MappingProxyType
+from collections.abc import Mapping
 
 Underlying = str
 """An underlying identifier, e.g. ``"NIFTY"`` or ``"RELIANCE"``."""
@@ -77,12 +79,19 @@ class Curve:
 
     anchor: date
     pillars: tuple[date, ...] = ()
-    discount_factors: dict[date, float] | None = None
+    discount_factors: Mapping[date, float] | None = None
     interp: InterpMethod = InterpMethod.LOG_LINEAR_DF
     spread_over: "Curve | None" = None
-    spread_knots: dict[date, float] | None = None
+    spread_knots: Mapping[date, float] | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "pillars", tuple(self.pillars))
+        if self.discount_factors is not None:
+            object.__setattr__(
+                self, "discount_factors", MappingProxyType(dict(self.discount_factors))
+            )
+        if self.spread_knots is not None:
+            object.__setattr__(self, "spread_knots", MappingProxyType(dict(self.spread_knots)))
         if self.spread_over is None:
             if not self.discount_factors:
                 raise ValueError("OIS-style curve requires non-empty discount_factors")

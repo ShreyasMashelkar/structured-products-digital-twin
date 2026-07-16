@@ -15,6 +15,7 @@ from spdt.data.ingest import RawMarketData
 from spdt.data.ingest.dhan import DhanSource
 from spdt.data.ingest.fbil import fetch_fbil_ois_instruments
 from spdt.data.ingest.nse_bhavcopy import NseBhavcopySource
+from spdt.data.ingest.xts import XTSMarketDataClient, XTSSource
 from spdt.data.snapshot_builder import build_snapshot
 
 
@@ -42,7 +43,7 @@ def fetch_live_raw(
     """
     _, rate_instruments = fetch_fbil_ois_instruments(anchor=as_of, timeout=timeout)
     if source == "dhan":
-        engine: NseBhavcopySource | DhanSource = DhanSource(
+        engine: NseBhavcopySource | DhanSource | XTSSource = DhanSource(
             dividend_yield=dividend_yield, funding_spread=funding_spread,
             rate_instruments=rate_instruments, timeout=timeout,
         )
@@ -51,8 +52,19 @@ def fetch_live_raw(
             dividend_yield=dividend_yield, funding_spread=funding_spread,
             rate_instruments=rate_instruments, timeout=timeout,
         )
+    elif source == "xts":
+        # the NSEFO instrument master is ~17MB — the default 30s request timeout is too
+        # tight, and it only changes daily so cache it on disk between fetches
+        from tempfile import gettempdir
+
+        engine = XTSSource(
+            client=XTSMarketDataClient(timeout=max(timeout, 300.0),
+                                       master_cache_dir=gettempdir()),
+            dividend_yield=dividend_yield, funding_spread=funding_spread,
+            rate_instruments=rate_instruments,
+        )
     else:
-        raise ValueError(f"unknown live source {source!r} (use 'bhavcopy' or 'dhan')")
+        raise ValueError(f"unknown live source {source!r} (use 'bhavcopy', 'dhan' or 'xts')")
     return engine.fetch(as_of, underlying)
 
 

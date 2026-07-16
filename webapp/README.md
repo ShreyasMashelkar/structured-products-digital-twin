@@ -30,6 +30,20 @@ npm run dev
 
 Then open **http://localhost:5173**.
 
+### API token
+
+When the backend is protected with `SPDT_API_TOKEN`, supply the same token to the trusted desk
+frontend at build/dev-server startup so every API request includes `X-API-Token`:
+
+```bash
+SPDT_API_TOKEN=local-secret uvicorn webapp.server:app --port 8077
+cd webapp/frontend
+VITE_SPDT_API_TOKEN=local-secret npm run dev
+```
+
+`VITE_*` values are visible to the browser. For an internet-facing deployment, terminate user
+authentication in a server-side gateway and do not embed a privileged shared secret in the SPA.
+
 ### Data source (env-driven)
 
 The backend runs on a reproducible **synthetic** snapshot by default. To build from **live** Indian market data (option chain + FBIL rates), pick an engine:

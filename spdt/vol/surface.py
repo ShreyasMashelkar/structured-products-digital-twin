@@ -15,6 +15,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+from collections.abc import Mapping
+from types import MappingProxyType
 from dataclasses import dataclass
 from datetime import date
 from math import exp, log, sqrt
@@ -36,10 +38,15 @@ class VolSurface:
 
     underlying: str
     param_model: str  # "SVI" for this slice; "SSVI" arrives later
-    slices: dict[date, SVIParams]
-    taus: dict[date, float]  # expiry -> ACT/365F year fraction
-    forwards: dict[date, float]  # expiry -> forward used to define k = log(K/F)
+    slices: Mapping[date, SVIParams]
+    taus: Mapping[date, float]  # expiry -> ACT/365F year fraction
+    forwards: Mapping[date, float]  # expiry -> forward used to define k = log(K/F)
     arb_status: ArbReport
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "slices", MappingProxyType(dict(self.slices)))
+        object.__setattr__(self, "taus", MappingProxyType(dict(self.taus)))
+        object.__setattr__(self, "forwards", MappingProxyType(dict(self.forwards)))
 
     # --- queries ----------------------------------------------------------------------
 
