@@ -15,7 +15,7 @@ SPDT is a modular platform that structures, prices (BS / Local Vol / Heston / LS
 
 It then couples to a separate **INR OTC / CCR / XVA engine that I built as its own project** at a single seam (the exposure cube), so a note can be priced *all-in* — coupon net of its lifetime CVA + FVA — and gated by counterparty limits, economic capital and RAROC. See [**XVA & Counterparty Credit Risk**](#xva--counterparty-credit-risk) below and [`docs/adr/0007`](docs/adr/0007-integrate-xva-at-the-exposure-seam.md).
 
-The full design specification and week-by-week build roadmap live in [`SPDT_Design_and_Build.md`](SPDT_Design_and_Build.md). **New here? Read the [project walkthrough](docs/PROJECT_WALKTHROUGH.md)** — the end-to-end story from client need to the XVA decision, with a talk track.
+The full design specification and week-by-week build roadmap live in [`SPDT_Design_and_Build.md`](SPDT_Design_and_Build.md). **New here? Read the [project walkthrough](docs/PROJECT_WALKTHROUGH.md)** — the end-to-end story from client need to the XVA decision, with a talk track. For the app itself, the [**user guide**](docs/USER_GUIDE.md) documents every tab with live screenshots, how to use each page, and the math behind every number.
 
 Two rules govern everything here:
 
