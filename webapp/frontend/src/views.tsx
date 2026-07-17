@@ -95,6 +95,30 @@ const TOUR_STEPS = [
     firstClick: "Recommend button",
   },
   {
+    tab: "Payoff Explorer",
+    kicker: "Client view",
+    title: "See a note the way the investor does",
+    body: "Pick a product and terms, and get the payoff diagram, coupon schedule and plain-English outcome odds — the same engine as the desk price, worded for a non-quant.",
+    checks: ["Sweep the terminal-level payoff to see where capital is protected and where it falls.", "Read the model-implied probabilities of loss and early redemption.", "Check the coupon schedule against the observation dates."],
+    firstClick: "Product type selector",
+  },
+  {
+    tab: "Option Chain",
+    kicker: "Market data",
+    title: "The chain the desk is calibrated on",
+    body: "Nearest expiries, priced strikes and inverted implied vols — the raw market the vol surface, barrier radar and option hedges are all marked from.",
+    checks: ["Scan IVs across strikes to see the smile the surface is fitted to.", "Compare CE vs PE vols at the same strike.", "Confirm the as-of stamp and data source match the masthead."],
+    firstClick: "Any strike row",
+  },
+  {
+    tab: "Broker",
+    kicker: "Execution seam",
+    title: "Paper desk vs real broker, reconciled",
+    body: "Connectivity to the XTS interactive API, margins, and a position-by-position reconciliation of the paper blotter against what the broker actually holds.",
+    checks: ["Check the connection state — without interactive credentials it says so explicitly.", "Compare paper vs broker quantity per instrument; differences are the desk's un-mirrored risk.", "Review cash and margin utilisation before sizing anything bigger."],
+    firstClick: "Reconciliation table",
+  },
+  {
     tab: "Outcome Lab",
     kicker: "Outcomes",
     title: "Move from model values to realised-style evidence",
@@ -131,7 +155,7 @@ export function HowToUse({ onGo }: { onGo: (tab: string) => void }) {
           <div className="rounded-xl border border-border bg-panel2/55 p-4">
             <div className="text-micro font-bold uppercase tracking-[0.12em] text-muted">Recommended review path</div>
             <div className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-small">
-              {["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Hedge & Execute", "Outcome Lab"].map((tab, i) => (
+              {["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Hedge & Execute", "Payoff Explorer", "Option Chain", "Broker", "Outcome Lab"].map((tab, i) => (
                 <button key={tab} onClick={() => onGo(tab)} className="contents text-left">
                   <span className="tnum rounded border border-border bg-surface px-1.5 py-0.5 text-faint">{String(i + 1).padStart(2, "0")}</span>
                   <span className="text-muted hover:text-accent">{tab}</span>
