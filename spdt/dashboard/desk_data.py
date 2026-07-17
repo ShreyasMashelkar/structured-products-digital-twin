@@ -681,7 +681,10 @@ def build_desk_data(
             else None
         ),
         "data_boundary": {
-            "equity": "live NSE/Dhan" if live else "synthetic",
+            "equity": (
+                {"xts": "live NSE/XTS (AC Agarwal)", "dhan": "live NSE/Dhan"}
+                .get(source, "NSE bhavcopy (EOD)") if live else "synthetic"
+            ),
             "discount_curve": "FBIL/MIBOR-style live" if live else "synthetic INR OIS-style",
             "funding": "Bloomberg MIFOR spread overlay" if _uses_bloomberg_funding(live, source)
             else "model spread assumption",
