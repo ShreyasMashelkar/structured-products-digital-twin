@@ -3,7 +3,7 @@ import { Desk, getDesk, priceTrade } from "./lib/api";
 import { Trade, bookTrades, priceReq } from "./lib/trades";
 import { Kpi, Tabs } from "./components/ui";
 import { cn } from "./lib/cn";
-import { compact, fmt, fmtAge, signed } from "./lib/format";
+import { compact, fmtAge, signed, signedCompact } from "./lib/format";
 import { BrokerView, HedgeExecute, OptionChainView, PayoffExplorer, OutcomeLab, SemiStaticHedging, BookRisk, CounterpartyXva, HowToUse, Originate, Overview, Validate } from "./views";
 
 const WORKSPACES = ["How to use", "Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Hedge & Execute", "Payoff Explorer", "Option Chain", "Broker", "Outcome Lab"];
@@ -93,14 +93,14 @@ function KpiStrip({
     <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
       <Kpi
         label="Book NAV"
-        value={sim ? fmt(nav, 2) : compact(nav)}
-        sub={sim ? `${nNotes} notes · ${signed(markMove, 2)} ${live ? "Δ-est" : "sim"}` : `${nNotes} notes`}
+        value={compact(nav)}
+        sub={sim ? `${nNotes} notes · ${signedCompact(markMove)} ${live ? "Δ-est" : "sim"}` : `${nNotes} notes`}
         flashKey={Math.round(nav * 100)}
       />
-      <Kpi label="Overnight P&L" value={signed(desk.day_pnl, 2)} sub="Taylor explain" tone={desk.day_pnl >= 0 ? "pos" : "neg"} />
-      <Kpi label="Net Δ" value={signed(cashDelta, 2)} sub="per +1% spot" tone={cashDelta >= 0 ? "pos" : "neg"} flashKey={Math.round(cashDelta * 100)} />
-      <Kpi label="Net Vega" value={signed(vegaPt, 2)} sub="per +1 vol pt" tone={vegaPt >= 0 ? "pos" : "neg"} flashKey={Math.round(vegaPt * 100)} />
-      <Kpi label="Model reserve" value={fmt(desk.total_model_reserve, 2)} sub="LSV − LV" tone="accent" />
+      <Kpi label="Overnight P&L" value={signedCompact(desk.day_pnl)} sub="Taylor explain" tone={desk.day_pnl >= 0 ? "pos" : "neg"} />
+      <Kpi label="Net Δ" value={signedCompact(cashDelta)} sub="per +1% spot" tone={cashDelta >= 0 ? "pos" : "neg"} flashKey={Math.round(cashDelta * 100)} />
+      <Kpi label="Net Vega" value={signedCompact(vegaPt)} sub="per +1 vol pt" tone={vegaPt >= 0 ? "pos" : "neg"} flashKey={Math.round(vegaPt * 100)} />
+      <Kpi label="Model reserve" value={compact(desk.total_model_reserve)} sub="LSV − LV" tone="accent" />
       <Kpi label="Worst stress" value={compact(worst)} sub="equity crash" tone="neg" />
     </div>
   );
@@ -201,10 +201,13 @@ export default function App() {
     setWs("Book & Risk");
     try {
       const r = await priceTrade(priceReq(t));
+      // the pricer quotes per the trade's own notional (100 for Originate briefs); rescale
+      // to the book's face per note so staged notes sit on the same units as booked ones
+      const k = (desk?.note_face ?? 100) / (t.notional || 100);
       setStaged((s) =>
         s.map((x) =>
           x.trade_id === t.trade_id
-            ? { ...x, pv: r.pv, delta: r.greeks.delta, gamma: r.greeks.gamma, vega: r.greeks.vega, rho: r.greeks.rho, day_pnl: 0 }
+            ? { ...x, pv: r.pv * k, delta: r.greeks.delta * k, gamma: r.greeks.gamma * k, vega: r.greeks.vega * k, rho: r.greeks.rho * k, day_pnl: 0 }
             : x,
         ),
       );

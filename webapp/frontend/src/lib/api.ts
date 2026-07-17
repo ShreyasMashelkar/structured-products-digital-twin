@@ -18,6 +18,7 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promi
 }
 
 export interface Desk {
+  note_face?: number; // ₹ face per note the book is marked at (payload unit)
   as_of: string;
   data_date?: string;
   data_source: string;

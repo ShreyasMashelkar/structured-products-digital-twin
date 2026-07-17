@@ -90,6 +90,8 @@ _CORS = os.environ.get("SPDT_CORS_ORIGINS", "http://localhost:5173,http://127.0.
 _DESK_TTL = float(os.environ.get("SPDT_DESK_TTL", "3600"))  # seconds before a rebuild
 _LIVE = os.environ.get("SPDT_LIVE", "").lower() in ("1", "true", "yes")
 _SOURCE = os.environ.get("SPDT_SOURCE", "bhavcopy")  # live engine: bhavcopy (EOD) | dhan (intraday)
+# Book notes at real face (₹ per note) so note NAV/greeks share units with hedge P&L.
+_FACE_PER_NOTE = float(os.environ.get("SPDT_FACE_PER_NOTE", "50000000"))
 _API_TOKEN = os.environ.get("SPDT_API_TOKEN")  # when set, compute endpoints require it
 
 app = FastAPI(title="SPDT Desk API", version="1.0")
@@ -122,7 +124,7 @@ _rebuild_thread: threading.Thread | None = None
 def _rebuild_desk() -> None:
     with _cache_lock:  # only one builder; others wait then see the fresh result
         if _cache.payload is None or (time.time() - _cache.built_at) >= _DESK_TTL:
-            _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE).payload
+            _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE, face_per_note=_FACE_PER_NOTE).payload
             _cache.built_at = time.time()
             _record_desk_history(_cache.payload)
 
@@ -138,7 +140,7 @@ def _desk(force: bool = False) -> dict:
     if _cache.payload is None or force:
         with _cache_lock:
             if force or _cache.payload is None:
-                _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE).payload
+                _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE, face_per_note=_FACE_PER_NOTE).payload
                 _cache.built_at = time.time()
                 _record_desk_history(_cache.payload)
         return _cache.payload

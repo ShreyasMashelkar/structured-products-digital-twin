@@ -51,18 +51,19 @@ _MIX = ("autocallable", "autocallable", "brc", "autocallable", "reverse_converti
         "capital_protected")
 
 
-def _autocallable(rng, fixing: float) -> Autocallable:
+def _autocallable(rng, fixing: float, notional: float = 100.0) -> Autocallable:
     maturity = float(rng.choice([1.0, 1.5, 2.0]))
     obs = tuple((j + 1) * 0.25 for j in range(round(maturity * 4)))
     return Autocallable(
-        100.0, obs, round(float(rng.uniform(0.015, 0.04)), 4), 1.0,
+        notional, obs, round(float(rng.uniform(0.015, 0.04)), 4), 1.0,
         round(float(rng.uniform(0.70, 0.90)), 4), round(float(rng.uniform(0.50, 0.70)), 4),
         memory=bool(rng.integers(0, 2)), initial_fixing=fixing,
     )
 
 
 def generate_mixed_book(
-    n: int, *, initial_fixing: float, underlying: str = "NIFTY", seed: int = 0
+    n: int, *, initial_fixing: float, underlying: str = "NIFTY", seed: int = 0,
+    notional: float = 100.0,
 ) -> list[Trade]:
     """A deterministic book mixing autocallables with BRCs, reverse convertibles and CPNs.
 
@@ -78,24 +79,24 @@ def generate_mixed_book(
         obs = tuple((j + 1) * 0.5 for j in range(round(maturity * 2)))  # semi-annual income notes
         note: Product
         if kind == "autocallable":
-            note = _autocallable(rng, initial_fixing)
+            note = _autocallable(rng, initial_fixing, notional)
         elif kind == "brc":
             # Coupons are semi-annual, but the knock-in is watched quarterly — the barrier
             # schedule is deliberately denser than (and distinct from) the coupon schedule.
             quarterly = tuple((j + 1) * 0.25 for j in range(round(maturity * 4)))
             note = BarrierReverseConvertible(
-                100.0, obs, round(float(rng.uniform(0.05, 0.09)), 4),
+                notional, obs, round(float(rng.uniform(0.05, 0.09)), 4),
                 strike=1.0, knock_in=round(float(rng.uniform(0.60, 0.75)), 4),
                 barrier_monitoring=quarterly, initial_fixing=initial_fixing,
             )
         elif kind == "reverse_convertible":
             note = ReverseConvertible(
-                100.0, obs, round(float(rng.uniform(0.07, 0.11)), 4),
+                notional, obs, round(float(rng.uniform(0.07, 0.11)), 4),
                 strike=1.0, initial_fixing=initial_fixing,
             )
         else:  # capital_protected
             note = CapitalProtectedNote(
-                100.0, maturity=float(rng.choice([1.0, 2.0, 3.0])),
+                notional, maturity=float(rng.choice([1.0, 2.0, 3.0])),
                 protection=1.0, participation=round(float(rng.uniform(0.6, 1.2)), 4),
                 strike=1.0, cap=None, initial_fixing=initial_fixing,
             )

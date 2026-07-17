@@ -320,9 +320,12 @@ def _hedge_capacity(positions: list[dict[str, Any]], spot: float, *, face_per_no
     """
     adv_inr = 1.2e11  # representative NIFTY cash+futures ADV (₹)
     participation = 0.20
-    scale = face_per_note / 100.0  # positions are quoted per 100 notional
-    # |∂PV/∂S|·S = the ₹ underlying position the desk must hold to be delta-flat, per note.
-    hedge_notional = sum(abs(p.get("delta", 0.0)) * spot * scale for p in positions)
+    # |∂PV/∂S|·S = the ₹ underlying position the desk must hold to be delta-flat, per note,
+    # rescaled from each row's own booked notional to the representative ticket.
+    hedge_notional = sum(
+        abs(p.get("delta", 0.0)) * spot * (face_per_note / p.get("notional", 100.0))
+        for p in positions
+    )
     days = hedge_notional / (adv_inr * participation) if adv_inr else 0.0
     return {
         "book_face_inr": face_per_note * len(positions),
@@ -496,6 +499,7 @@ def build_desk_data(
     as_of: date | None = None,
     live: bool = False,
     source: str = "bhavcopy",
+    face_per_note: float | None = None,
 ) -> DeskData:
     """Compute the full desk snapshot for the dashboard.
 
@@ -527,7 +531,8 @@ def build_desk_data(
     model1 = BlackScholes(spot=spot * 1.008, r=r, q=q, sigma=atm_vol + 0.003)
 
     # L8 — generate and mark a mixed book (autocallables + BRC / reverse-conv / capital-protected).
-    trades = generate_mixed_book(n_notes, initial_fixing=spot, seed=seed)
+    note_face = face_per_note if face_per_note is not None else 100.0
+    trades = generate_mixed_book(n_notes, initial_fixing=spot, seed=seed, notional=note_face)
     book = mark_book(trades, model0, n_paths=n_paths, seed=seed)
     marks = {p.trade_id: p for p in book.positions}
 
@@ -586,6 +591,12 @@ def build_desk_data(
 
     # L4 — a first-class worst-of *sub-book* (uses correlation) booked alongside the single names.
     worst_of_positions, wo_corr_pnl = _worst_of_book(spot, atm_vol, r, q, seed=seed)
+    wo_scale = note_face / 100.0  # worst-of rows are built per 100 notional
+    if wo_scale != 1.0:
+        for pos in worst_of_positions:
+            for key in ("pv", "delta", "gamma", "vega", "vanna", "volga", "day_pnl", "notional"):
+                pos[key] = pos.get(key, 0.0) * wo_scale
+        wo_corr_pnl = {k: v * wo_scale for k, v in wo_corr_pnl.items()}
     positions.extend(worst_of_positions)
     wo_pv = sum(p["pv"] for p in worst_of_positions)
     wo_delta = sum(p["delta"] for p in worst_of_positions)
@@ -651,7 +662,7 @@ def build_desk_data(
     funding_spread_bp = round(
         (snap.funding_curve.zero_rate(longest) - snap.ois_curve.zero_rate(longest)) * 1e4, 1
     )
-    hedge_capacity = _hedge_capacity(positions, spot)
+    hedge_capacity = _hedge_capacity(positions, spot, face_per_note=note_face) if face_per_note is not None else _hedge_capacity(positions, spot)
 
     # L2 — surface grid for the heatmap.
     ks = np.linspace(-0.35, 0.35, 25)
@@ -692,6 +703,7 @@ def build_desk_data(
             if _uses_bloomberg_funding(live, source) else None,
         },
         "underlying": "NIFTY",
+        "note_face": note_face,
         "spot": spot,
         "model": {"r": r, "q": q, "atm_vol": atm_vol},
         "market_move": {"spot_bp": 80, "vol_pt": 0.3, "horizon_days": 1},

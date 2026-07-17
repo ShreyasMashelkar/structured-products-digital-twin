@@ -13,5 +13,12 @@ export const fmtAge = (s: number) =>
 
 export const pct = (n: number, d = 1) => fmt(n * 100, d) + "%";
 
-export const compact = (n: number) =>
-  Math.abs(n) >= 1000 ? n.toLocaleString("en-US", { maximumFractionDigits: 0 }) : fmt(n, 2);
+// Indian-market compact: crores/lakhs above 1e7/1e5, plain commas below (spot stays 24,229).
+export const compact = (n: number) => {
+  const a = Math.abs(n);
+  if (a >= 1e7) return `${fmt(n / 1e7, 2)} cr`;
+  if (a >= 1e5) return `${fmt(n / 1e5, 2)} L`;
+  return a >= 1000 ? n.toLocaleString("en-US", { maximumFractionDigits: 0 }) : fmt(n, 2);
+};
+
+export const signedCompact = (n: number) => (n >= 0 ? "+" : "") + compact(n);
