@@ -42,8 +42,8 @@ const TOUR_STEPS = [
     tab: "Overview",
     kicker: "Start here",
     title: "Read the desk in 30 seconds",
-    body: "Book NAV, overnight P&L explain, top movers and worst stresses. This is the front-office snapshot: what changed, why it changed, and where the risk sits.",
-    checks: ["Confirm the book is live/loaded and note count looks right.", "Use the waterfall to see whether P&L is explained by Greeks or residual.", "Click a top mover if you want to drill into one note."],
+    body: "Book NAV, overnight P&L explain, top movers and worst stresses — plus, on the live feed, realized-vs-implied vol (the desk's carry gauge) and intraday replay charts of NAV, spot and net Δ.",
+    checks: ["Confirm the book is live/loaded and note count looks right.", "On the live feed, watch IV − RV and the Γ carry/day it implies for the book.", "Use the waterfall to see whether P&L is explained by Greeks or residual.", "The replay charts show every desk rebuild and paper execution through the day."],
     firstClick: "Top movers list",
   },
   {
@@ -58,8 +58,8 @@ const TOUR_STEPS = [
     tab: "Book & Risk",
     kicker: "Inspect the book",
     title: "Drill into the 15-note portfolio",
-    body: "Click a trade to see terms, live re-price, Greeks, stress contribution and how it behaves under the simulated market move.",
-    checks: ["Select any trade ID to open the live detail pane.", "Use tenor/product filters to see risk concentrations.", "Check delta, gamma, vega and stress by individual note."],
+    body: "Click a trade to see terms, live re-price, Greeks, stress contribution and how it behaves under the simulated market move. The barrier radar below ranks every note by knock-in/autocall proximity against live spot.",
+    checks: ["Select any trade ID to open the live detail pane.", "Use tenor/product filters to see risk concentrations.", "On the radar, watch KI distance in %, in σ's, and the model-implied touch probability — it re-ranks with spot every 30s."],
     firstClick: "Any NOTE-xxx row",
   },
   {
@@ -74,9 +74,9 @@ const TOUR_STEPS = [
     tab: "Validate",
     kicker: "Model controls",
     title: "Check whether the model output is believable",
-    body: "Surface health, pricing checks, explain residuals and validation flags. This is the model-risk sanity layer, not a decorative chart page.",
-    checks: ["Check vol-surface no-arbitrage and model-health flags.", "Look for pricing/explain residuals that are too large.", "Use it to understand when the dashboard is warning you not to trust a number blindly."],
-    firstClick: "Validation flags",
+    body: "Surface health, pricing checks, explain residuals and validation flags. The Taylor-vs-full-reval panel re-prices the whole book at any market shift you choose and shows what Δ/Γ/ν cannot explain.",
+    checks: ["Run the full reval at a 2% move (greeks should explain nearly all of it), then at 10% to watch the Taylor expansion break down.", "Check vol-surface no-arbitrage and model-health flags.", "Look for pricing/explain residuals that are too large."],
+    firstClick: "Run full reval",
   },
   {
     tab: "Semi-Static Hedging",
@@ -85,6 +85,14 @@ const TOUR_STEPS = [
     body: "For barrier-linked notes, it builds constrained option strips to cover part of the embedded barrier exposure, then shows the residual Greeks left for dynamic hedging.",
     checks: ["Pick a barrier-linked trade from the live book.", "Inspect the option strip, gross notional and policy limits.", "Use the residual ladder to see what the static hedge did not remove."],
     firstClick: "Barrier trade row",
+  },
+  {
+    tab: "Hedge & Execute",
+    kicker: "Live hedging loop",
+    title: "Recommend, paper-execute and attribute a real hedge",
+    body: "Sizes a lot-rounded futures hedge against the book's net delta off the live quote — add an option leg to hedge vega too. Executions land in the paper blotter, fold back into the desk's greeks and NAV, and survive restarts.",
+    checks: ["Recommend with Δ override 0 to hedge the book's own delta; after executing, Book net Δ reflects the position — no double-hedging.", "Tick the option leg to run a delta-vega hedge; its greeks are priced off the desk model, not typed in.", "Arm the auto-hedger and it proposes (never executes) whenever |Δ| drifts past the threshold.", "Check the hedge P&L attribution: spread, fees, realized and marked-to-model unrealized."],
+    firstClick: "Recommend button",
   },
   {
     tab: "Outcome Lab",
@@ -108,7 +116,8 @@ export function HowToUse({ onGo }: { onGo: (tab: string) => void }) {
             <p className="mt-2 max-w-4xl text-body leading-relaxed text-muted">
               SPDT is a NIFTY structured-products digital twin: originate client notes, mark a 15-trade book, explain P&amp;L,
               inspect Greeks/stress, pass the same trades into CCR/XVA, validate model health, test semi-static barrier hedges,
-              and review outcome-style evidence.
+              and review outcome-style evidence. On the live XTS feed it also runs a full hedging loop — delta/vega hedge
+              tickets paper-executed against real quotes, a barrier radar, realized-vs-implied vol, and an intraday desk replay.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               <button onClick={() => onGo("Overview")} className="ring-desk rounded-lg border border-accent/50 bg-accent/15 px-3 py-2 text-body font-semibold text-accent hover:bg-accent/25">
@@ -122,7 +131,7 @@ export function HowToUse({ onGo }: { onGo: (tab: string) => void }) {
           <div className="rounded-xl border border-border bg-panel2/55 p-4">
             <div className="text-micro font-bold uppercase tracking-[0.12em] text-muted">Recommended review path</div>
             <div className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 text-small">
-              {["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Outcome Lab"].map((tab, i) => (
+              {["Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Hedge & Execute", "Outcome Lab"].map((tab, i) => (
                 <button key={tab} onClick={() => onGo(tab)} className="contents text-left">
                   <span className="tnum rounded border border-border bg-surface px-1.5 py-0.5 text-faint">{String(i + 1).padStart(2, "0")}</span>
                   <span className="text-muted hover:text-accent">{tab}</span>
