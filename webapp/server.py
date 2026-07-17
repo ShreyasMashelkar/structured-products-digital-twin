@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import pickle
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -55,6 +56,7 @@ from spdt.hedging.recommend import (
     recommend_delta_vega_hedge,
     vanilla_spot_greeks,
 )
+from spdt.data.curate.bs_inversion import bs_price
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
 from spdt.pricing import BlackScholes, price_mc, price_worst_of
@@ -185,7 +187,9 @@ def health() -> dict:
 def desk() -> dict:
     """The whole desk payload: positions, greeks, P&L explain, reserves, stress, surface, …."""
     d = _desk()
-    return {**d, "net_greeks": _hedged_net_greeks(d)}
+    hedge_pnl = _paper_hedge_pnl(d)
+    return {**d, "net_greeks": _hedged_net_greeks(d),
+            "nav": d["nav"] + hedge_pnl["total"], "hedge_pnl": hedge_pnl}
 
 
 @app.post("/api/desk/refresh", dependencies=[Depends(require_token)])
@@ -895,6 +899,56 @@ _recommendations: dict[str, _RecommendationState] = {}
 # model on every read (a frozen option delta goes stale as spot moves — that's gamma).
 _hedge_specs: dict[tuple[int, int], dict] = {}
 
+# The paper book must survive restarts — pickled atomically after every execution.
+_PAPER_STATE_PATH = os.environ.get("SPDT_PAPER_STATE", "dashboard_data/paper_state.pkl")
+
+
+def _save_paper_state() -> None:
+    try:
+        os.makedirs(os.path.dirname(_PAPER_STATE_PATH) or ".", exist_ok=True)
+        tmp = _PAPER_STATE_PATH + ".tmp"
+        with _desk_state_lock, open(tmp, "wb") as f:
+            pickle.dump({"paper": _paper, "hedge_specs": dict(_hedge_specs)}, f)
+        os.replace(tmp, _PAPER_STATE_PATH)
+    except Exception as exc:  # noqa: BLE001 — persistence must never break an execution
+        print(f"spdt: paper state save failed: {exc}")
+
+
+def _load_paper_state() -> None:
+    global _paper
+    try:
+        with open(_PAPER_STATE_PATH, "rb") as f:
+            state = pickle.load(f)
+    except FileNotFoundError:
+        return
+    except Exception as exc:  # noqa: BLE001 — a stale/incompatible file starts fresh
+        print(f"spdt: paper state load failed (starting fresh): {exc}")
+        return
+    _paper = state["paper"]
+    _hedge_specs.update(state["hedge_specs"])
+
+
+_load_paper_state()
+
+
+def _chain_vol(d: dict, strike: float, expiry: date, is_call: bool) -> float:
+    """IV of the calibrated chain row nearest (expiry, strike) — ATM vol when none usable."""
+    rows = [r for r in d.get("option_chain", [])
+            if r["type"] == ("CE" if is_call else "PE") and r["iv"] is not None]
+    if not rows:
+        return d["model"]["atm_vol"]
+    best = min(rows, key=lambda r: (abs(date.fromisoformat(r["expiry"]).toordinal() - expiry.toordinal()),
+                                    abs(r["strike"] - strike)))
+    return float(best["iv"])
+
+
+def _option_greeks(d: dict, spec: dict) -> dict[str, float]:
+    """Per-unit greeks of an option hedge spec, marked off the desk model + chain smile."""
+    tau = max((spec["expiry"] - date.today()).days, 0) / 365.0
+    vol = _chain_vol(d, spec["strike"], spec["expiry"], spec["is_call"])
+    m = d["model"]
+    return vanilla_spot_greeks(d["spot"], spec["strike"], tau, vol, m["r"], m["q"], spec["is_call"])
+
 
 def _paper_hedge_greeks(d: dict) -> dict[str, float]:
     """Greeks carried by the paper hedge book (Σ position qty × per-unit greek)."""
@@ -902,16 +956,10 @@ def _paper_hedge_greeks(d: dict) -> dict[str, float]:
     with _desk_state_lock:
         positions = [(key, pos.qty) for key, pos in _paper.positions.items()]
         specs = dict(_hedge_specs)
-    spot, m = d["spot"], d["model"]
     for key, qty in positions:
         spec = specs.get(key, {"delta": 1.0, "vega": 0.0})
-        if spec.get("strike") is not None:
-            tau = max((spec["expiry"] - date.today()).days, 0) / 365.0
-            # ponytail: marked at ATM vol — switch to a chain-IV lookup if the desk hedges wings
-            g = vanilla_spot_greeks(spot, spec["strike"], tau, m["atm_vol"], m["r"], m["q"],
-                                    spec["is_call"])
-        else:
-            g = {"delta": spec["delta"], "vega": spec["vega"]}
+        g = _option_greeks(d, spec) if spec.get("strike") is not None else \
+            {"delta": spec["delta"], "vega": spec["vega"]}
         for name in totals:
             totals[name] += qty * g.get(name, 0.0)
     return totals
@@ -923,6 +971,34 @@ def _hedged_net_greeks(d: dict) -> dict:
     for name, value in _paper_hedge_greeks(d).items():
         greeks[name] = greeks.get(name, 0.0) + value
     return greeks
+
+
+def _hedge_mark(d: dict, spec: dict) -> float:
+    """Model mark of one hedge unit: options priced on the chain smile, futures at carry."""
+    spot, m = d["spot"], d["model"]
+    if spec.get("strike") is not None:
+        tau = max((spec["expiry"] - date.today()).days, 0) / 365.0
+        vol = _chain_vol(d, spec["strike"], spec["expiry"], spec["is_call"])
+        fwd = spot * exp((m["r"] - m["q"]) * tau)
+        return bs_price(fwd, spec["strike"], tau, vol, exp(-m["r"] * tau), spec["is_call"])
+    tau = max((spec["expiry"] - date.today()).days, 0) / 365.0 if spec.get("expiry") else 0.0
+    return spot * exp((m["r"] - m["q"]) * tau)
+
+
+def _paper_hedge_pnl(d: dict) -> dict[str, float]:
+    """The paper hedge book's P&L, marked on the desk model — folded into the desk NAV."""
+    realized = unrealized = fees = 0.0
+    with _desk_state_lock:
+        positions = [(key, pos.qty, pos.avg_price, pos.realized_pnl, pos.fees_paid)
+                     for key, pos in _paper.positions.items()]
+        specs = dict(_hedge_specs)
+    for key, qty, avg_price, position_realized, position_fees in positions:
+        realized += position_realized
+        fees += position_fees
+        if qty:
+            unrealized += qty * (_hedge_mark(d, specs.get(key, {})) - avg_price)
+    return {"realized": realized, "unrealized": unrealized, "fees": fees,
+            "total": realized + unrealized - fees}
 
 
 class InstrumentIn(BaseModel):
@@ -954,8 +1030,9 @@ class InstrumentIn(BaseModel):
             raise ValueError("bid must not exceed ask")
         if self.quote_timestamp.tzinfo is None:
             raise ValueError("quote_timestamp must include a timezone")
-        terms = (self.strike, self.expiry, self.option_type)
-        if any(t is not None for t in terms) and any(t is None for t in terms):
+        # expiry alone is fine (futures carry-mark); option-ness needs all three terms
+        if (self.strike is not None or self.option_type is not None) and \
+                None in (self.strike, self.expiry, self.option_type):
             raise ValueError("strike, expiry and option_type must be given together")
         return self
 
@@ -1362,10 +1439,8 @@ def hedge_recommend(req: HedgeRequest) -> dict:
     opt = req.option
     if opt is not None and opt.strike is not None and "vega" not in opt.model_fields_set:
         # terms given without explicit greeks → per-unit greeks from the desk's own model
-        m = d["model"]
-        tau = max((opt.expiry - date.today()).days, 0) / 365.0
-        g = vanilla_spot_greeks(d["spot"], opt.strike, tau, m["atm_vol"], m["r"], m["q"],
-                                opt.option_type == "CE")
+        g = _option_greeks(d, {"strike": opt.strike, "expiry": opt.expiry,
+                               "is_call": opt.option_type == "CE"})
         if g["vega"] == 0.0:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "option has no vega at this strike/expiry — not a vega hedge")
@@ -1386,6 +1461,8 @@ def hedge_recommend(req: HedgeRequest) -> dict:
             spec: dict = {"delta": leg.delta, "vega": leg.vega}
             if leg.strike is not None:
                 spec.update(strike=leg.strike, expiry=leg.expiry, is_call=leg.option_type == "CE")
+            elif leg.expiry is not None:
+                spec["expiry"] = leg.expiry  # future: carry-adjust its mark to expiry
             _hedge_specs[(leg.segment, leg.instrument_id)] = spec
         _recommendations[rec.recommendation_id] = _RecommendationState(
             recommendation=rec,
@@ -1452,6 +1529,7 @@ def execute_recommendation(req: ExecuteRequest) -> dict:
             response = {"recommendation_id": rec.recommendation_id, "orders": results}
             state.execution_result = response
             state.execution_state = "EXECUTED"
+            _save_paper_state()
             return response
         except Exception:
             state.execution_state = "FAILED"

@@ -16,7 +16,7 @@ import webapp.server as server
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _small_desk():
+def _small_desk(tmp_path_factory):
     original = server.build_desk_data
     server.build_desk_data = lambda **kw: original(n_notes=4, n_paths=4000, **kw)
     server._cache.payload = None
@@ -24,6 +24,8 @@ def _small_desk():
     server._paper = server.PaperBroker()
     server._alert_engine = server.AlertEngine()
     server._recommendations.clear()
+    server._hedge_specs.clear()
+    server._PAPER_STATE_PATH = str(tmp_path_factory.mktemp("paper") / "paper_state.pkl")
     yield
     server.build_desk_data = original
 
@@ -415,7 +417,8 @@ def test_option_hedges_are_remarked_off_the_desk_model(client):
     qty = client.get("/api/execution/blotter").json()["positions"]["2:880001"]["qty"]
     assert qty == -10.0  # -book_vega / option unit vega
     m = d["model"]
-    g = vanilla_spot_greeks(d["spot"], strike, 90 / 365, m["atm_vol"], m["r"], m["q"], True)
+    vol = server._chain_vol(d, strike, date.today() + timedelta(days=90), True)
+    g = vanilla_spot_greeks(d["spot"], strike, 90 / 365, vol, m["r"], m["q"], True)
     after = client.get("/api/desk").json()["net_greeks"]
     # Greeks come from the desk's own model, not the client's recommend-time numbers.
     assert after["gamma"] - before["gamma"] == pytest.approx(qty * g["gamma"], rel=1e-6)
@@ -445,7 +448,57 @@ def test_option_leg_greeks_default_from_desk_model(client):
         "book_delta": 0.0, "book_vega": -50000.0, "future": _future(), "option": option,
     }).json()
     m = d["model"]
-    g = vanilla_spot_greeks(d["spot"], strike, days / 365, m["atm_vol"], m["r"], m["q"], False)
+    vol = server._chain_vol(d, strike, date.today() + timedelta(days=days), False)
+    g = vanilla_spot_greeks(d["spot"], strike, days / 365, vol, m["r"], m["q"], False)
     opt_order = next(o for o in rec["orders"] if o["instrument_id"] == 880003)
     assert opt_order["side"] == "BUY"  # short vega book → buy the option
     assert opt_order["qty"] == round(50000.0 / g["vega"])  # sized on model vega, lot 1
+
+
+def test_chain_vol_picks_nearest_expiry_then_strike():
+    from datetime import date
+
+    d = {"model": {"atm_vol": 0.14}, "option_chain": [
+        {"expiry": "2026-08-27", "strike": 24000.0, "type": "CE", "iv": 0.16},
+        {"expiry": "2026-08-27", "strike": 25000.0, "type": "CE", "iv": 0.20},
+        {"expiry": "2026-09-24", "strike": 24000.0, "type": "CE", "iv": 0.18},
+        {"expiry": "2026-08-27", "strike": 24000.0, "type": "PE", "iv": 0.17},
+        {"expiry": "2026-08-27", "strike": 24100.0, "type": "CE", "iv": None},  # no IV → skipped
+    ]}
+    assert server._chain_vol(d, 24050.0, date(2026, 8, 25), True) == 0.16   # front expiry, near strike
+    assert server._chain_vol(d, 25200.0, date(2026, 8, 25), True) == 0.20   # wing strike
+    assert server._chain_vol(d, 24000.0, date(2026, 9, 20), True) == 0.18   # back expiry
+    assert server._chain_vol(d, 24000.0, date(2026, 8, 25), False) == 0.17  # puts use put IVs
+    assert server._chain_vol({"model": {"atm_vol": 0.14}}, 24000.0, date(2026, 8, 25), True) == 0.14
+
+
+def test_hedge_pnl_folds_into_nav(client):
+    d = client.get("/api/desk").json()
+    pnl = d["hedge_pnl"]
+    assert pnl["total"] == pytest.approx(pnl["realized"] + pnl["unrealized"] - pnl["fees"])
+    assert pnl["fees"] > 0  # this module has executed several paper hedges by now
+    raw = server._desk()  # engine payload, before the hedge fold-in
+    assert d["nav"] == pytest.approx(raw["nav"] + pnl["total"])
+    # open futures positions mark at spot (no expiry given) → unrealized moves the NAV
+    fut = client.get("/api/execution/blotter").json()["positions"]["2:101"]
+    assert fut["qty"] != 0
+    expected_unrealized_fut = fut["qty"] * (d["spot"] - fut["avg_price"])
+    assert pnl["unrealized"] != 0 or abs(expected_unrealized_fut) < 1e-9
+
+
+def test_paper_state_survives_restart(client):
+    """Kill the in-memory paper book, reload from disk — positions and specs come back."""
+    before = {k: p.qty for k, p in server._paper.positions.items()}
+    specs_before = dict(server._hedge_specs)
+    assert before and specs_before  # earlier tests executed hedges, which persisted
+
+    server._paper = server.PaperBroker()
+    server._hedge_specs.clear()
+    server._load_paper_state()
+
+    assert {k: p.qty for k, p in server._paper.positions.items()} == before
+    # specs persist for every held position (recommend-only specs die with the process)
+    held = {k: v for k, v in specs_before.items() if k in before}
+    assert {k: server._hedge_specs.get(k) for k in held} == held
+    # and the desk fold-in still works off the restored book
+    assert "delta" in server._paper_hedge_greeks(client.get("/api/desk").json())

@@ -141,6 +141,16 @@ class PaperBroker:
         self._seq = 0
         self._lock = RLock()
 
+    # picklable so a desk can persist its paper book across restarts (locks aren't)
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._lock = RLock()
+
     def submit(self, intent: OrderIntent, quote: Quote) -> Order:
         """Submit an order against the current quote; market orders fill immediately."""
         with self._lock:

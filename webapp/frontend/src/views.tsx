@@ -1369,6 +1369,7 @@ export function HedgeExecute({ desk, onExecuted }: { desk: Desk; onExecuted?: ()
           instrument_id: live.instrument_id, segment: live.segment, symbol: live.description,
           bid, ask, ltp: live.ltp ?? (bid + ask) / 2,
           quote_timestamp: live.timestamp ?? new Date().toISOString(), lot_size: lot,
+          expiry: live.expiry, // lets the server carry-adjust the position's mark
         } : {
           instrument_id: 1, segment: 2, symbol: `${desk.underlying}-FUT`, bid, ask,
           ltp: (bid + ask) / 2, quote_timestamp: new Date().toISOString(), lot_size: lot,
