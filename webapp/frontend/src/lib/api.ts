@@ -454,6 +454,59 @@ export interface ChainRow {
   iv: number | null;
 }
 
+export interface DeskHistoryRow {
+  t: string; spot: number; atm_vol: number; nav: number;
+  delta: number; gamma: number; vega: number; hedge_pnl: number;
+}
+
+export async function getDeskHistory(): Promise<{ rows: DeskHistoryRow[] }> {
+  const r = await fetch("/api/desk/history");
+  if (!r.ok) throw new Error("desk history fetch failed");
+  return r.json();
+}
+
+export interface ResidualResult {
+  n_notes: number; n_paths: number; dS: number; dvol: number;
+  predicted: number; actual: number; residual: number;
+  terms: Record<string, number>; note: string;
+}
+
+export async function getResidual(spotMult: number, dvol: number): Promise<ResidualResult> {
+  const r = await fetch(`/api/desk/residual?spot_mult=${spotMult}&dvol=${dvol}`);
+  if (!r.ok) throw new Error((await r.json()).detail ?? "residual check failed");
+  return r.json();
+}
+
+export interface AutohedgeStatus {
+  enabled: boolean;
+  delta_threshold: number;
+  interval_s: number;
+  last_proposal: { recommendation_id: string; book_delta: number; created_at: string;
+    orders: { symbol: string; side: string; qty: number }[] } | null;
+  last_error: string | null;
+}
+
+export async function getAutohedge(): Promise<AutohedgeStatus> {
+  const r = await fetch("/api/autohedge");
+  if (!r.ok) throw new Error("autohedge status fetch failed");
+  return r.json();
+}
+
+export async function setAutohedge(enabled: boolean, deltaThreshold?: number): Promise<AutohedgeStatus> {
+  const r = await apiFetch("/api/autohedge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled, ...(deltaThreshold ? { delta_threshold: deltaThreshold } : {}) }),
+  });
+  return r.json();
+}
+
+export async function getRecommendations(): Promise<HedgeRec[]> {
+  const r = await fetch("/api/hedges/recommendations");
+  if (!r.ok) throw new Error("recommendations fetch failed");
+  return r.json();
+}
+
 export interface VolTrackerData {
   n_samples: number;
   window_minutes: number;

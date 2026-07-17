@@ -26,6 +26,8 @@ def _small_desk(tmp_path_factory):
     server._recommendations.clear()
     server._hedge_specs.clear()
     server._PAPER_STATE_PATH = str(tmp_path_factory.mktemp("paper") / "paper_state.pkl")
+    server._DESK_HISTORY_PATH = str(tmp_path_factory.mktemp("history") / "desk_history.jsonl")
+    server._autohedge.update(enabled=False, last_proposal=None, last_error=None)
     yield
     server.build_desk_data = original
 
@@ -565,3 +567,61 @@ def test_vol_tracker_reports_realized_vs_implied(client, monkeypatch):
     if carry is not None and abs(gamma) > 1e-12:
         assert (carry > 0) == (gamma > 0)
     server._tick_history.clear()
+
+
+def test_desk_history_records_builds_and_executions(client):
+    body = client.get("/api/desk/history").json()
+    rows = body["rows"]
+    assert rows, "the module's desk build and executions must have left timeline rows"
+    assert {"t", "spot", "atm_vol", "nav", "delta", "gamma", "vega", "hedge_pnl"} <= set(rows[0])
+    assert [r["t"] for r in rows] == sorted(r["t"] for r in rows)
+    n_before = len(rows)
+    rec = client.post("/api/hedges/recommend",
+                      json={"book_delta": 5.0, "future": _future()}).json()
+    client.post("/api/execution/execute", json={"recommendation_id": rec["recommendation_id"]})
+    assert len(client.get("/api/desk/history").json()["rows"]) == n_before + 1
+
+
+def test_taylor_residual_full_reval_vs_greeks(client):
+    body = client.get("/api/desk/residual?spot_mult=1.02&dvol=0.0&n_paths=4000").json()
+    assert body["n_notes"] >= 1
+    assert body["predicted"] == pytest.approx(sum(body["terms"].values()))
+    assert body["residual"] == pytest.approx(body["actual"] - body["predicted"])
+    # a 2% move is second-order territory: greeks must explain most of the reval
+    assert abs(body["residual"]) <= max(0.25 * abs(body["actual"]), 1.0)
+    flat = client.get("/api/desk/residual?spot_mult=1.0&dvol=0.0&n_paths=4000").json()
+    assert flat["actual"] == pytest.approx(0.0, abs=1e-9)
+    assert client.get("/api/desk/residual?spot_mult=9.0").status_code == 422
+
+
+def test_autohedge_step_proposes_but_never_executes(client, monkeypatch):
+    from datetime import date as _date
+
+    def fake_quote(symbol):
+        return {"instrument_id": 555, "segment": 2, "description": f"{symbol}-FUT-LIVE",
+                "bid": 24000.0, "ask": 24001.0, "ltp": 24000.5, "lot_size": 5,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "expiry": (_date.today() + timedelta(days=10)).isoformat()}
+
+    monkeypatch.setattr(server, "_live_quote", fake_quote)
+    book_delta = server._hedged_net_greeks(server._desk())["delta"]
+    assert abs(book_delta) > 1.0  # the module's executions left the paper book unflat
+
+    server._autohedge.update(delta_threshold=abs(book_delta) * 2, last_proposal=None)
+    assert server._autohedge_step() is None  # below threshold → quiet
+
+    server._autohedge["delta_threshold"] = abs(book_delta) / 2
+    proposal = server._autohedge_step()
+    assert proposal is not None
+    assert proposal["orders"] and proposal["book_delta"] == pytest.approx(book_delta)
+    listed = client.get("/api/hedges/recommendations").json()
+    assert any(r["recommendation_id"] == proposal["recommendation_id"] for r in listed)
+    state = server._recommendations[proposal["recommendation_id"]]
+    assert state.execution_state == "PROPOSED"  # approval-gated: never auto-executed
+    assert server._autohedge_step() is None  # pending proposal → no spam
+
+    status = client.get("/api/autohedge").json()
+    assert status["last_proposal"]["recommendation_id"] == proposal["recommendation_id"]
+    toggled = client.post("/api/autohedge", json={"enabled": False}).json()
+    assert toggled["enabled"] is False
+    server._autohedge["last_proposal"] = None

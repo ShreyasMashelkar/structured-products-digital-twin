@@ -11,6 +11,7 @@ The heavy desk build is cached in-process so the first request pays for it once.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import pickle
 import threading
@@ -123,6 +124,7 @@ def _rebuild_desk() -> None:
         if _cache.payload is None or (time.time() - _cache.built_at) >= _DESK_TTL:
             _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE).payload
             _cache.built_at = time.time()
+            _record_desk_history(_cache.payload)
 
 
 def _desk(force: bool = False) -> dict:
@@ -138,6 +140,7 @@ def _desk(force: bool = False) -> dict:
             if force or _cache.payload is None:
                 _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE).payload
                 _cache.built_at = time.time()
+                _record_desk_history(_cache.payload)
         return _cache.payload
     if (time.time() - _cache.built_at) >= _DESK_TTL:
         if _rebuild_thread is None or not _rebuild_thread.is_alive():
@@ -193,6 +196,82 @@ def desk() -> dict:
     hedge_pnl = _paper_hedge_pnl(d)
     return {**d, "net_greeks": _hedged_net_greeks(d),
             "nav": d["nav"] + hedge_pnl["total"], "hedge_pnl": hedge_pnl}
+
+
+# --- desk timeline: an owned history of the marked desk, one row per build/execution -------
+_DESK_HISTORY_PATH = os.environ.get("SPDT_DESK_HISTORY", "dashboard_data/desk_history.jsonl")
+
+
+def _record_desk_history(d: dict) -> None:
+    """Append the desk's marked state — the raw material for the intraday replay."""
+    try:
+        greeks = _hedged_net_greeks(d)
+        hedge_pnl = _paper_hedge_pnl(d)
+        row = {"t": datetime.now(timezone.utc).isoformat(), "spot": d["spot"],
+               "atm_vol": d["model"]["atm_vol"], "nav": d["nav"] + hedge_pnl["total"],
+               "delta": greeks["delta"], "gamma": greeks["gamma"], "vega": greeks["vega"],
+               "hedge_pnl": hedge_pnl["total"]}
+        os.makedirs(os.path.dirname(_DESK_HISTORY_PATH) or ".", exist_ok=True)
+        with open(_DESK_HISTORY_PATH, "a") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception as exc:  # noqa: BLE001 — history is a bonus, never a failure path
+        print(f"spdt: desk history append failed: {exc}")
+
+
+@app.get("/api/desk/history")
+def desk_history(limit: int = 500) -> dict:
+    """The desk timeline: spot, vol, NAV and net greeks at every build and execution."""
+    try:
+        with open(_DESK_HISTORY_PATH) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return {"rows": []}
+    rows = [json.loads(line) for line in lines[-max(1, limit):] if line.strip()]
+    return {"rows": rows}
+
+
+@app.get("/api/desk/residual")
+def taylor_residual(spot_mult: float = 1.008, dvol: float = 0.003, n_paths: int = 12_000) -> dict:
+    """Model-risk check, live: full re-pricing of the booked notes at a shifted market
+    versus the greeks' Taylor prediction. Same MC seed on both marks (common random
+    numbers), so the difference is smooth. Worst-of notes are skipped — the Taylor side
+    uses only the greeks of the notes actually repriced, so the comparison stays honest.
+    """
+    if not 0.5 <= spot_mult <= 2.0:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "spot_mult out of range")
+    d = _desk()
+    spot0, m = d["spot"], d["model"]
+    n_paths = max(2000, min(n_paths, 40_000))
+    base = BlackScholes(spot=spot0, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    moved = BlackScholes(spot=spot0 * spot_mult, r=m["r"], q=m["q"],
+                         sigma=max(m["atm_vol"] + dvol, 1e-4))
+    actual = delta = gamma = vega = 0.0
+    n_notes = 0
+    for p in d["positions"]:
+        try:
+            req = PriceRequest(product_type=p["product_type"], notional=p.get("notional", 100.0),
+                               observation_times=p.get("observation_times"),
+                               maturity=p.get("maturity"), params=p.get("params") or {})
+            product = _build_product(req, p.get("initial_fixing") or spot0)
+        except (ValueError, KeyError, TypeError):
+            continue  # worst-of sub-book rows and other non-catalog shapes
+        pv0 = price_mc(product, base, n_paths=n_paths, seed=7).price
+        pv1 = price_mc(product, moved, n_paths=n_paths, seed=7).price
+        direction = p.get("direction", 1)
+        actual += direction * (pv1 - pv0)
+        delta += p.get("delta", 0.0)
+        gamma += p.get("gamma", 0.0)
+        vega += p.get("vega", 0.0)
+        n_notes += 1
+    dS = spot0 * (spot_mult - 1.0)
+    terms = {"delta": delta * dS, "gamma": 0.5 * gamma * dS * dS, "vega": vega * dvol}
+    predicted = sum(terms.values())
+    return {
+        "n_notes": n_notes, "n_paths": n_paths, "dS": dS, "dvol": dvol,
+        "predicted": predicted, "actual": actual, "residual": actual - predicted,
+        "terms": terms,
+        "note": "residual holds cross-greeks (vanna/volga) and everything beyond 2nd order",
+    }
 
 
 @app.post("/api/desk/refresh", dependencies=[Depends(require_token)])
@@ -1545,6 +1624,105 @@ def barrier_radar(spot: float | None = None) -> dict:
     return {"as_of": d["as_of"], "spot": s, "rows": rows}
 
 
+# --- auto-hedger: watch the hedged net delta, propose (never execute) when it drifts ------
+# Paper-only and approval-gated by design: proposals land in the normal recommendation
+# queue for a human to execute. SPDT_AUTOHEDGE=1 arms it at startup.
+_autohedge = {
+    "enabled": os.environ.get("SPDT_AUTOHEDGE", "").lower() in ("1", "true", "yes"),
+    "delta_threshold": float(os.environ.get("SPDT_AUTOHEDGE_DELTA", "500")),
+    "interval_s": float(os.environ.get("SPDT_AUTOHEDGE_INTERVAL_S", "30")),
+    "last_proposal": None,
+    "last_error": None,
+}
+_autohedge_thread: threading.Thread | None = None
+
+
+def _autohedge_step() -> dict | None:
+    """One watch cycle: propose a delta hedge if the hedged book has drifted past threshold."""
+    d = _desk()
+    delta = _hedged_net_greeks(d)["delta"]
+    if abs(delta) < _autohedge["delta_threshold"]:
+        return None
+    last = _autohedge["last_proposal"]
+    if last is not None:
+        state = _recommendations.get(last["recommendation_id"])
+        if (state is not None and state.execution_state == "PROPOSED"
+                and time.monotonic() - state.created_monotonic <= _RECOMMENDATION_TTL_S):
+            return None  # a live proposal is already waiting for approval
+    q = _live_quote(d["underlying"])  # raises off the feed — caught by the loop
+    future = _hedge_instrument(InstrumentIn(
+        instrument_id=q["instrument_id"], segment=q["segment"], symbol=q["description"],
+        bid=q["bid"], ask=q["ask"], ltp=q["ltp"],
+        quote_timestamp=datetime.fromisoformat(q["timestamp"]),
+        lot_size=q["lot_size"] or 1,
+    ))
+    rec = recommend_delta_hedge(delta, future)
+    with _desk_state_lock:
+        spec: dict = {"delta": 1.0, "vega": 0.0}
+        if q.get("expiry"):
+            spec["expiry"] = date.fromisoformat(q["expiry"])
+        _hedge_specs[(q["segment"], q["instrument_id"])] = spec
+        _recommendations[rec.recommendation_id] = _RecommendationState(
+            recommendation=rec,
+            quotes={(q["segment"], q["instrument_id"]): future.quote},
+            created_monotonic=time.monotonic(),
+        )
+        _alert_engine.update([
+            greek_limit_alert("delta", value=delta, limit=_autohedge["delta_threshold"]),
+        ])
+    proposal = {"recommendation_id": rec.recommendation_id, "book_delta": delta,
+                "created_at": rec.created_at.isoformat(),
+                "orders": [{"symbol": o.instrument.symbol, "side": o.side.name, "qty": o.qty}
+                           for o in rec.orders]}
+    _autohedge["last_proposal"] = proposal
+    return proposal
+
+
+def _autohedge_loop() -> None:  # pragma: no cover — thin timer; the step is tested
+    while True:
+        time.sleep(_autohedge["interval_s"])
+        if not _autohedge["enabled"] or not (_LIVE and _SOURCE == "xts"):
+            continue
+        try:
+            _autohedge_step()
+            _autohedge["last_error"] = None
+        except Exception as exc:  # noqa: BLE001 — the watcher must outlive feed hiccups
+            _autohedge["last_error"] = str(exc)
+
+
+def _ensure_autohedge_thread() -> None:
+    global _autohedge_thread
+    if _autohedge_thread is None or not _autohedge_thread.is_alive():
+        _autohedge_thread = threading.Thread(target=_autohedge_loop, daemon=True,
+                                             name="spdt-autohedge")
+        _autohedge_thread.start()
+
+
+if _autohedge["enabled"]:
+    _ensure_autohedge_thread()
+
+
+class AutohedgeIn(BaseModel):
+    enabled: bool
+    delta_threshold: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+
+@app.get("/api/autohedge")
+def autohedge_status() -> dict:
+    return {k: _autohedge[k] for k in
+            ("enabled", "delta_threshold", "interval_s", "last_proposal", "last_error")}
+
+
+@app.post("/api/autohedge", dependencies=[Depends(require_token)])
+def autohedge_configure(req: AutohedgeIn) -> dict:
+    _autohedge["enabled"] = req.enabled
+    if req.delta_threshold is not None:
+        _autohedge["delta_threshold"] = req.delta_threshold
+    if req.enabled:
+        _ensure_autohedge_thread()
+    return autohedge_status()
+
+
 @app.post("/api/hedges/recommend", dependencies=[Depends(require_token)])
 def hedge_recommend(req: HedgeRequest) -> dict:
     """Size a hedge for the book's (or the given) Greeks; also refreshes Greek-limit alerts."""
@@ -1646,6 +1824,8 @@ def execute_recommendation(req: ExecuteRequest) -> dict:
             state.execution_result = response
             state.execution_state = "EXECUTED"
             _save_paper_state()
+            if _cache.payload is not None:  # timeline row: the hedge moved the desk
+                _record_desk_history(_cache.payload)
             return response
         except Exception:
             state.execution_state = "FAILED"

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, StructureResult, VolTrackerData, XvaResult, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getOptionChain, getOutcomes, getRadar, getVolTracker, getSemiStatic, priceTrade, recommendHedge, solveStructure } from "./lib/api";
+import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, AutohedgeStatus, DeskHistoryRow, ResidualResult, StructureResult, VolTrackerData, XvaResult, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getAutohedge, getDeskHistory, getOptionChain, getOutcomes, getRadar, getRecommendations, getResidual, getVolTracker, setAutohedge, getSemiStatic, priceTrade, recommendHedge, solveStructure } from "./lib/api";
 import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trades";
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
 import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
@@ -211,6 +211,32 @@ function VolTracker() {
   );
 }
 
+/** Intraday desk replay: every build and paper execution leaves a timeline row. */
+function DeskTimeline() {
+  const [rows, setRows] = useState<DeskHistoryRow[]>([]);
+  useEffect(() => {
+    let dead = false;
+    const load = () => void getDeskHistory().then((r) => { if (!dead) setRows(r.rows); }).catch(() => {});
+    load();
+    const id = setInterval(load, 60_000);
+    return () => { dead = true; clearInterval(id); };
+  }, []);
+  if (rows.length < 3) return null;
+  const data = rows.map((r) => ({ time: r.t.slice(11, 16), nav: +r.nav.toFixed(1), spot: +r.spot.toFixed(0), delta: +r.delta.toFixed(1) }));
+  return (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <Panel className="p-3">
+        <SectionTitle>Desk replay · NAV</SectionTitle>
+        <Lines data={data} x="time" height={200} series={[{ key: "nav", name: "NAV (incl. hedge P&L)", color: C.up }]} />
+      </Panel>
+      <Panel className="p-3">
+        <SectionTitle>Desk replay · spot & net Δ</SectionTitle>
+        <Lines data={data} x="time" height={200} series={[{ key: "spot", name: "spot", color: C.accent }, { key: "delta", name: "net Δ", color: C.teal }]} />
+      </Panel>
+    </div>
+  );
+}
+
 export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: string) => void }) {
   const e = desk.pnl_explain;
   const waterfall = [
@@ -227,6 +253,7 @@ export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: 
   return (
     <div className="space-y-4">
       <VolTracker />
+      <DeskTimeline />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Panel className="p-3 lg:col-span-2">
           <SectionTitle>Overnight P&L explain</SectionTitle>
@@ -705,11 +732,64 @@ function BarrierRadar({ liveSpot }: { liveSpot: number }) {
 
 /* ======================= Validate ======================= */
 
+/** Taylor-vs-full-reval residual: how far the greeks' explanation stretches, on demand. */
+function ResidualMonitor() {
+  const [spotPct, setSpotPct] = useState(2);
+  const [dvolPt, setDvolPt] = useState(0.3);
+  const [busy, setBusy] = useState(false);
+  const [res, setRes] = useState<ResidualResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setRes(await getResidual(1 + spotPct / 100, dvolPt / 100));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Panel className="p-3">
+      <SectionTitle>Taylor vs full reval</SectionTitle>
+      <p className="mb-3 text-[12px] leading-relaxed text-muted">
+        Re-prices every booked note at a shifted market (same MC seed, so the difference is clean) and
+        compares against the greeks' Taylor prediction. The residual is what Δ/Γ/ν cannot explain.
+      </p>
+      <div className="mb-3 grid grid-cols-3 gap-3">
+        <NumField label="Spot move %" value={spotPct} onChange={setSpotPct} />
+        <NumField label="Vol move (pts)" value={dvolPt} onChange={setDvolPt} />
+        <div className="flex items-end">
+          <button onClick={() => void run()} disabled={busy}
+            className="ring-desk w-full rounded-lg border border-teal/60 bg-teal/10 px-4 py-1.5 text-[12px] font-bold uppercase tracking-[0.1em] text-teal transition-colors hover:bg-teal/20 disabled:opacity-40">
+            {busy ? "Repricing…" : "Run full reval"}
+          </button>
+        </div>
+      </div>
+      {error && <p className="text-[12px] text-down" role="alert">{error}</p>}
+      {res && (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+          <GreekStat label="Δ term" value={signed(res.terms.delta, 2)} />
+          <GreekStat label="½Γ term" value={signed(res.terms.gamma, 2)} />
+          <GreekStat label="ν term" value={signed(res.terms.vega, 2)} />
+          <GreekStat label="Taylor total" value={signed(res.predicted, 2)} />
+          <GreekStat label="Full reval" value={signed(res.actual, 2)} />
+          <GreekStat label="Residual" value={signed(res.residual, 2)}
+            tone={Math.abs(res.residual) <= 0.1 * Math.max(Math.abs(res.actual), 1e-9) ? "pos" : "neg"} />
+        </div>
+      )}
+      {res && <p className="mt-2 text-[11px] text-muted">{res.n_notes} notes · {res.n_paths.toLocaleString()} paths · {res.note}</p>}
+    </Panel>
+  );
+}
+
 export function Validate({ desk, selectedId }: { desk: Desk; selectedId: string | null }) {
   const rows = [...desk.reserves].sort((a, b) => b.lsv_minus_lv - a.lsv_minus_lv);
   const b = desk.backtest;
   return (
     <div className="space-y-5">
+      <ResidualMonitor />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         <Panel className="p-0 lg:col-span-2">
           <div className="px-3 pt-3"><SectionTitle>Model reserves · LSV − LV</SectionTitle></div>
@@ -1364,7 +1444,37 @@ export function HedgeExecute({ desk, onExecuted }: { desk: Desk; onExecuted?: ()
   const [busy, setBusy] = useState(false);
   const [executed, setExecuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [autohedge, setAutohedgeState] = useState<AutohedgeStatus | null>(null);
   const refreshSequence = useRef(0);
+
+  useEffect(() => {
+    let dead = false;
+    const load = () => void getAutohedge().then((s) => { if (!dead) setAutohedgeState(s); }).catch(() => {});
+    load();
+    const id = setInterval(load, 30_000);
+    return () => { dead = true; clearInterval(id); };
+  }, []);
+
+  const toggleAutohedge = async () => {
+    if (!autohedge) return;
+    try {
+      setAutohedgeState(await setAutohedge(!autohedge.enabled));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const loadProposal = async (id: string) => {
+    try {
+      const found = (await getRecommendations()).find((r) => r.recommendation_id === id);
+      if (found) {
+        setRec(found);
+        setExecuted(found.execution_state === "EXECUTED");
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   // Ref, not state: the mount-time refresh() runs from a closure where `live` is still
   // null, which used to send the placeholder mark key and leave the future "no mark".
@@ -1588,6 +1698,32 @@ export function HedgeExecute({ desk, onExecuted }: { desk: Desk; onExecuted?: ()
             {busy ? "…" : "Recommend"}
           </button>
           {error && <p className="mt-2 text-[12px] text-down" role="alert">{error}</p>}
+          {autohedge && (
+            <div className="mt-4 rounded-lg border border-border-soft bg-panel2/40 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2 text-[12px]">
+                <span className="font-semibold uppercase tracking-[0.07em] text-muted">Auto-hedger</span>
+                <Chip hot={autohedge.enabled}>{autohedge.enabled ? "ARMED" : "OFF"}</Chip>
+                <span className="tnum text-muted">|Δ| ≥ {fmt(autohedge.delta_threshold, 0)} · every {fmt(autohedge.interval_s, 0)}s · proposes only, never executes</span>
+                <button onClick={() => void toggleAutohedge()}
+                  className="ring-desk ml-auto rounded border border-border px-2 py-1 text-[10px] font-bold uppercase tracking-[0.08em] text-muted hover:text-ink">
+                  {autohedge.enabled ? "Disarm" : "Arm"}
+                </button>
+              </div>
+              {autohedge.last_proposal && (
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-[11.5px] text-muted">
+                  <span className="tnum">
+                    {autohedge.last_proposal.recommendation_id} · Δ {fmt(autohedge.last_proposal.book_delta, 0)} →{" "}
+                    {autohedge.last_proposal.orders.map((o) => `${o.side} ${fmt(o.qty, 0)} ${o.symbol}`).join(", ") || "no orders"}
+                  </span>
+                  <button onClick={() => void loadProposal(autohedge.last_proposal!.recommendation_id)}
+                    className="ring-desk rounded border border-accent/50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.08em] text-accent hover:bg-accent/10">
+                    Review
+                  </button>
+                </div>
+              )}
+              {autohedge.last_error && <p className="mt-1 text-[11px] text-down">watcher: {autohedge.last_error}</p>}
+            </div>
+          )}
         </Panel>
 
         {rec && (
