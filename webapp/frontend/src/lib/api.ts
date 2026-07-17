@@ -315,6 +315,10 @@ export interface HedgeInstrumentIn {
   lot_size?: number;
   delta?: number;
   vega?: number;
+  // option terms — send all three and the server prices the leg's greeks off the desk model
+  strike?: number;
+  expiry?: string;
+  option_type?: "CE" | "PE";
 }
 
 export interface HedgeRec {

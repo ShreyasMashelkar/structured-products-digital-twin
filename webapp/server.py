@@ -53,6 +53,7 @@ from spdt.hedging.recommend import (
     HedgeRecommendation,
     recommend_delta_hedge,
     recommend_delta_vega_hedge,
+    vanilla_spot_greeks,
 )
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
@@ -183,7 +184,8 @@ def health() -> dict:
 @app.get("/api/desk")
 def desk() -> dict:
     """The whole desk payload: positions, greeks, P&L explain, reserves, stress, surface, …."""
-    return _desk()
+    d = _desk()
+    return {**d, "net_greeks": _hedged_net_greeks(d)}
 
 
 @app.post("/api/desk/refresh", dependencies=[Depends(require_token)])
@@ -888,6 +890,40 @@ class _RecommendationState:
 
 _recommendations: dict[str, _RecommendationState] = {}
 
+# Every instrument we have hedged with, keyed like paper positions. Futures carry their
+# static per-unit greeks; options carry their terms so they can be re-marked off the desk
+# model on every read (a frozen option delta goes stale as spot moves — that's gamma).
+_hedge_specs: dict[tuple[int, int], dict] = {}
+
+
+def _paper_hedge_greeks(d: dict) -> dict[str, float]:
+    """Greeks carried by the paper hedge book (Σ position qty × per-unit greek)."""
+    totals = {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "vanna": 0.0, "volga": 0.0}
+    with _desk_state_lock:
+        positions = [(key, pos.qty) for key, pos in _paper.positions.items()]
+        specs = dict(_hedge_specs)
+    spot, m = d["spot"], d["model"]
+    for key, qty in positions:
+        spec = specs.get(key, {"delta": 1.0, "vega": 0.0})
+        if spec.get("strike") is not None:
+            tau = max((spec["expiry"] - date.today()).days, 0) / 365.0
+            # ponytail: marked at ATM vol — switch to a chain-IV lookup if the desk hedges wings
+            g = vanilla_spot_greeks(spot, spec["strike"], tau, m["atm_vol"], m["r"], m["q"],
+                                    spec["is_call"])
+        else:
+            g = {"delta": spec["delta"], "vega": spec["vega"]}
+        for name in totals:
+            totals[name] += qty * g.get(name, 0.0)
+    return totals
+
+
+def _hedged_net_greeks(d: dict) -> dict:
+    """The book's net greeks with executed paper hedges folded in — the desk's true risk."""
+    greeks = dict(d["net_greeks"])
+    for name, value in _paper_hedge_greeks(d).items():
+        greeks[name] = greeks.get(name, 0.0) + value
+    return greeks
+
 
 class InstrumentIn(BaseModel):
     """A tradable hedge instrument with its current quote and per-unit Greeks."""
@@ -904,6 +940,11 @@ class InstrumentIn(BaseModel):
     lot_size: int = Field(default=1, gt=0)
     delta: float = Field(default=1.0, allow_inf_nan=False)
     vega: float = Field(default=0.0, allow_inf_nan=False)
+    # Option terms — supply all three and the executed position is re-marked off the desk
+    # model on every desk read instead of carrying its recommend-time greeks forever.
+    strike: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    expiry: date | None = None
+    option_type: str | None = Field(default=None, pattern="^(CE|PE)$")
 
     @model_validator(mode="after")
     def validate_market(self):
@@ -913,6 +954,9 @@ class InstrumentIn(BaseModel):
             raise ValueError("bid must not exceed ask")
         if self.quote_timestamp.tzinfo is None:
             raise ValueError("quote_timestamp must include a timezone")
+        terms = (self.strike, self.expiry, self.option_type)
+        if any(t is not None for t in terms) and any(t is None for t in terms):
+            raise ValueError("strike, expiry and option_type must be given together")
         return self
 
 
@@ -927,7 +971,8 @@ class HedgeRequest(BaseModel):
     def validate_hedge_ratios(self):
         if self.future.delta == 0:
             raise ValueError("future delta must be non-zero")
-        if self.option is not None and self.option.vega == 0:
+        if self.option is not None and self.option.vega == 0 and self.option.strike is None:
+            # with option terms present the endpoint fills delta/vega from the desk model
             raise ValueError("option vega must be non-zero")
         return self
 
@@ -1310,9 +1355,21 @@ def live_snapshot() -> dict:
 @app.post("/api/hedges/recommend", dependencies=[Depends(require_token)])
 def hedge_recommend(req: HedgeRequest) -> dict:
     """Size a hedge for the book's (or the given) Greeks; also refreshes Greek-limit alerts."""
-    greeks = _desk()["net_greeks"]
+    d = _desk()
+    greeks = _hedged_net_greeks(d)
     delta = req.book_delta if req.book_delta is not None else greeks["delta"]
     vega = req.book_vega if req.book_vega is not None else greeks["vega"]
+    opt = req.option
+    if opt is not None and opt.strike is not None and "vega" not in opt.model_fields_set:
+        # terms given without explicit greeks → per-unit greeks from the desk's own model
+        m = d["model"]
+        tau = max((opt.expiry - date.today()).days, 0) / 365.0
+        g = vanilla_spot_greeks(d["spot"], opt.strike, tau, m["atm_vol"], m["r"], m["q"],
+                                opt.option_type == "CE")
+        if g["vega"] == 0.0:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "option has no vega at this strike/expiry — not a vega hedge")
+        opt.delta, opt.vega = g["delta"], g["vega"]
     future = _hedge_instrument(req.future)
     instruments = [future]
     if req.option is not None:
@@ -1323,6 +1380,13 @@ def hedge_recommend(req: HedgeRequest) -> dict:
     else:
         rec = recommend_delta_hedge(delta, future, max_notional=req.max_notional)
     with _desk_state_lock:
+        for leg in (req.future, req.option):
+            if leg is None:
+                continue
+            spec: dict = {"delta": leg.delta, "vega": leg.vega}
+            if leg.strike is not None:
+                spec.update(strike=leg.strike, expiry=leg.expiry, is_call=leg.option_type == "CE")
+            _hedge_specs[(leg.segment, leg.instrument_id)] = spec
         _recommendations[rec.recommendation_id] = _RecommendationState(
             recommendation=rec,
             quotes={

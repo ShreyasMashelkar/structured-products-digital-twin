@@ -6,6 +6,8 @@ recommendation and checks the position actually neutralizes the book delta.
 
 from datetime import datetime
 
+import pytest
+
 from spdt.data.ingest.xts import InstrumentRef, Quote
 from spdt.execution import CostModel, PaperBroker, Side
 from spdt.hedging.recommend import (
@@ -84,3 +86,44 @@ def test_recommendation_paper_executes_to_a_delta_neutral_position():
     for order in rec.orders:
         assert broker.submit(order, fut.quote).status.value == "FILLED"
     assert broker.positions[(2, 101)].qty == -150  # book +150 delta + hedge −150 → flat
+
+
+def test_vanilla_spot_greeks_match_finite_differences():
+    from math import exp
+
+    from spdt.data.curate.bs_inversion import bs_price
+    from spdt.hedging.recommend import vanilla_spot_greeks
+
+    spot, strike, tau, sigma, r, q = 24000.0, 24500.0, 0.25, 0.14, 0.065, 0.012
+
+    def price(s, vol, is_call):
+        fwd = s * exp((r - q) * tau)
+        return bs_price(fwd, strike, tau, vol, exp(-r * tau), is_call)
+
+    for is_call in (True, False):
+        g = vanilla_spot_greeks(spot, strike, tau, sigma, r, q, is_call)
+        h, dv = spot * 1e-4, 1e-4
+        fd_delta = (price(spot + h, sigma, is_call) - price(spot - h, sigma, is_call)) / (2 * h)
+        fd_gamma = (price(spot + h, sigma, is_call) - 2 * price(spot, sigma, is_call)
+                    + price(spot - h, sigma, is_call)) / (h * h)
+        fd_vega = (price(spot, sigma + dv, is_call) - price(spot, sigma - dv, is_call)) / (2 * dv)
+        fd_vanna = (
+            price(spot + h, sigma + dv, is_call) - price(spot + h, sigma - dv, is_call)
+            - price(spot - h, sigma + dv, is_call) + price(spot - h, sigma - dv, is_call)
+        ) / (4 * h * dv)
+        fd_volga = (price(spot, sigma + dv, is_call) - 2 * price(spot, sigma, is_call)
+                    + price(spot, sigma - dv, is_call)) / (dv * dv)
+        assert g["delta"] == pytest.approx(fd_delta, rel=1e-5)
+        assert g["gamma"] == pytest.approx(fd_gamma, rel=1e-4)
+        assert g["vega"] == pytest.approx(fd_vega, rel=1e-5)
+        assert g["vanna"] == pytest.approx(fd_vanna, rel=1e-4)
+        assert g["volga"] == pytest.approx(fd_volga, rel=1e-4)
+
+
+def test_vanilla_spot_greeks_degenerate_is_intrinsic_step():
+    from spdt.hedging.recommend import vanilla_spot_greeks
+
+    itm_call = vanilla_spot_greeks(110.0, 100.0, 0.0, 0.2, 0.05, 0.0, True)
+    otm_put = vanilla_spot_greeks(110.0, 100.0, 0.0, 0.2, 0.05, 0.0, False)
+    assert itm_call == {"delta": 1.0, "gamma": 0.0, "vega": 0.0, "vanna": 0.0, "volga": 0.0}
+    assert otm_put["delta"] == 0.0

@@ -246,7 +246,7 @@ export default function App() {
               }}
             />
           )}
-          {ws === "Hedge & Execute" && <HedgeExecute desk={desk} />}
+          {ws === "Hedge & Execute" && <HedgeExecute desk={desk} onExecuted={() => void getDesk().then(setDesk).catch(() => {})} />}
           {ws === "Payoff Explorer" && <PayoffExplorer desk={desk} />}
           {ws === "Option Chain" && <OptionChainView />}
           {ws === "Broker" && <BrokerView />}

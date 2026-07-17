@@ -1232,13 +1232,20 @@ export function SemiStaticHedging({
 /* ======================= Hedge & Execute (Phase 5) ======================= */
 
 function NumField({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => {
+    setText((t) => ((parseFloat(t) || 0) === value ? t : String(value)));
+  }, [value]);
   return (
     <label className="block">
       <span className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">{label}</span>
       <input
         type="number"
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          onChange(parseFloat(e.target.value) || 0);
+        }}
         className="ring-desk tnum mt-1 w-full rounded-lg border border-border bg-panel2 px-2.5 py-1.5 text-[13px] text-ink"
       />
     </label>
@@ -1251,11 +1258,18 @@ const SEVERITY_TONE: Record<string, string> = {
   INFO: "border-teal/50 bg-teal/10 text-teal",
 };
 
-export function HedgeExecute({ desk }: { desk: Desk }) {
+export function HedgeExecute({ desk, onExecuted }: { desk: Desk; onExecuted?: () => void }) {
   const [bid, setBid] = useState(Math.round(desk.spot) - 1);
   const [ask, setAsk] = useState(Math.round(desk.spot) + 1);
   const [lot, setLot] = useState(75); // NIFTY futures lot (overwritten by the live master)
   const [deltaOverride, setDeltaOverride] = useState(0); // 0 = hedge the actual book delta
+  const [optOn, setOptOn] = useState(false); // add an option leg → delta-vega hedge
+  const [optStrike, setOptStrike] = useState(0);
+  const [optExpiry, setOptExpiry] = useState("");
+  const [optType, setOptType] = useState<"CE" | "PE">("CE");
+  const [optBid, setOptBid] = useState(0);
+  const [optAsk, setOptAsk] = useState(0);
+  const [vegaOverride, setVegaOverride] = useState(0); // 0 = hedge the actual book vega
   const [live, setLive] = useState<LiveQuote | null>(null);
   const [rec, setRec] = useState<HedgeRec | null>(null);
   const [blotter, setBlotter] = useState<PaperBlotter | null>(null);
@@ -1266,12 +1280,16 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
   const [error, setError] = useState<string | null>(null);
   const refreshSequence = useRef(0);
 
-  const markKey = live ? `${live.segment}:${live.instrument_id}` : "2:1";
+  // Ref, not state: the mount-time refresh() runs from a closure where `live` is still
+  // null, which used to send the placeholder mark key and leave the future "no mark".
+  const liveRef = useRef<LiveQuote | null>(null);
 
   const refresh = async () => {
     const sequence = ++refreshSequence.current;
     try {
-      const mid = (bid + ask) / 2;
+      const q = liveRef.current;
+      const markKey = q ? `${q.segment}:${q.instrument_id}` : "2:1";
+      const mid = q?.bid != null && q?.ask != null ? (q.bid + q.ask) / 2 : q?.ltp ?? (bid + ask) / 2;
       const [nextBlotter, nextAlerts, nextAttribution] = await Promise.all([
         getBlotter(), getAlerts(), getAttribution({ [markKey]: mid }),
       ]);
@@ -1287,12 +1305,14 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
   const loadLiveQuote = async () => {
     try {
       const q = await getLiveQuote(desk.underlying);
+      liveRef.current = q;
       setLive(q);
       if (q.bid != null) setBid(q.bid);
       if (q.ask != null) setAsk(q.ask);
       if (q.bid == null && q.ask == null && q.ltp != null) { setBid(q.ltp); setAsk(q.ltp); }
       if (q.lot_size > 0) setLot(q.lot_size);
     } catch {
+      liveRef.current = null;
       setLive(null); // not on the XTS feed — the manual ticket still works
     }
   };
@@ -1306,6 +1326,27 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
     return () => clearInterval(id);
   }, [live]);
 
+  // First enable: prefill the ticket from the desk's own calibrated chain (nearest-ATM CE,
+  // front expiry). Everything stays editable; if the chain is unavailable, type it in.
+  const toggleOptionLeg = async () => {
+    const next = !optOn;
+    setOptOn(next);
+    if (!next || optStrike > 0) return;
+    try {
+      const chain = await getOptionChain();
+      const front = chain.rows.map((r) => r.expiry).sort()[0];
+      const calls = chain.rows.filter((r) => r.type === "CE" && r.expiry === front);
+      if (!calls.length) return;
+      const atm = calls.reduce((a, b) => (Math.abs(a.strike - chain.spot) < Math.abs(b.strike - chain.spot) ? a : b));
+      setOptStrike(atm.strike);
+      setOptExpiry(atm.expiry);
+      setOptBid(+(atm.price * 0.995).toFixed(2));
+      setOptAsk(+(atm.price * 1.005).toFixed(2));
+    } catch {
+      /* chain unavailable — manual entry still works */
+    }
+  };
+
   const recommend = async () => {
     setBusy(true);
     setExecuted(false);
@@ -1313,6 +1354,17 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
     try {
       setRec(await recommendHedge({
         ...(deltaOverride !== 0 ? { book_delta: deltaOverride } : {}),
+        ...(optOn ? {
+          // deterministic paper id: same option → same position, different options never collide
+          option: {
+            instrument_id: Number(optExpiry.replaceAll("-", "")) * 1e6 + Math.round(optStrike * 10) * 10 + (optType === "CE" ? 1 : 2),
+            segment: 2, symbol: `${desk.underlying} ${fmt(optStrike, 0)} ${optType}`,
+            bid: optBid || null, ask: optAsk || null, ltp: (optBid + optAsk) / 2 || null,
+            quote_timestamp: new Date().toISOString(), lot_size: lot,
+            strike: optStrike, expiry: optExpiry, option_type: optType,
+          },
+          ...(vegaOverride !== 0 ? { book_vega: vegaOverride } : {}),
+        } : {}),
         future: live ? {
           instrument_id: live.instrument_id, segment: live.segment, symbol: live.description,
           bid, ask, ltp: live.ltp ?? (bid + ask) / 2,
@@ -1337,6 +1389,7 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
     try {
       await executeRecommendation(rec.recommendation_id);
       setExecuted(true);
+      onExecuted?.();
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -1351,10 +1404,11 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
     <div className="grid gap-4 lg:grid-cols-2">
       <div className="space-y-4">
         <Panel>
-          <SectionTitle>Recommend a delta hedge</SectionTitle>
+          <SectionTitle>Recommend a hedge</SectionTitle>
           <p className="mb-3 text-[12px] leading-relaxed text-muted">
             Sizes a lot-rounded futures order against the book's net delta, estimates spread + fee cost, and
-            paper-executes it against the quote below.
+            paper-executes it against the quote below. Add an option leg to hedge vega too — the option is
+            sized on the desk model's own greeks and re-marked with the book after execution.
           </p>
           <div className="mb-3 flex items-center gap-2">
             {live ? (
@@ -1396,7 +1450,43 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
           </div>
           <div className="mb-3 grid grid-cols-3 gap-3">
             <NumField label="Δ to hedge (0 = book's own)" value={deltaOverride} onChange={setDeltaOverride} />
+            {optOn && <NumField label="ν to hedge (0 = book's own)" value={vegaOverride} onChange={setVegaOverride} />}
           </div>
+          <label className="mb-3 flex cursor-pointer items-center gap-2 text-[12px] text-muted">
+            <input type="checkbox" checked={optOn} onChange={() => void toggleOptionLeg()} />
+            Add an option leg — hedges vega too; leg greeks are priced off the desk model
+          </label>
+          {optOn && (
+            <>
+              <div className="mb-3 grid grid-cols-3 gap-3">
+                <NumField label="Strike" value={optStrike} onChange={setOptStrike} />
+                <label className="block">
+                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">Expiry</span>
+                  <input
+                    type="date"
+                    value={optExpiry}
+                    onChange={(e) => setOptExpiry(e.target.value)}
+                    className="ring-desk tnum mt-1 w-full rounded-lg border border-border bg-panel2 px-2.5 py-1.5 text-[13px] text-ink"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">Type</span>
+                  <select
+                    value={optType}
+                    onChange={(e) => setOptType(e.target.value as "CE" | "PE")}
+                    className="ring-desk mt-1 w-full rounded-lg border border-border bg-panel2 px-2.5 py-1.5 text-[13px] text-ink"
+                  >
+                    <option value="CE">CE (call)</option>
+                    <option value="PE">PE (put)</option>
+                  </select>
+                </label>
+              </div>
+              <div className="mb-3 grid grid-cols-3 gap-3">
+                <NumField label="Opt bid" value={optBid} onChange={setOptBid} />
+                <NumField label="Opt ask" value={optAsk} onChange={setOptAsk} />
+              </div>
+            </>
+          )}
           {Math.abs(desk.net_greeks.delta) < 1 && deltaOverride === 0 && (
             <p className="mb-3 text-[11px] text-muted">
               The book is currently delta-flat, so a recommendation will propose no orders.
@@ -1405,7 +1495,7 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
           )}
           <button
             onClick={recommend}
-            disabled={busy}
+            disabled={busy || (optOn && (optStrike <= 0 || !optExpiry))}
             className="ring-desk rounded-lg border border-accent/60 bg-accent/10 px-4 py-2 text-[12px] font-bold uppercase tracking-[0.1em] text-accent transition-colors hover:bg-accent/20 disabled:opacity-40"
           >
             {busy ? "…" : "Recommend"}
@@ -1438,6 +1528,12 @@ export function HedgeExecute({ desk }: { desk: Desk }) {
               <GreekStat label="Δ after" value={signed(rec.expected_greeks.delta, 1)} tone={Math.abs(rec.expected_greeks.delta) < Math.abs(rec.current_greeks.delta) ? "pos" : undefined} />
               <GreekStat label="Est. cost" value={fmt(rec.estimated_cost, 0)} />
             </div>
+            {rec.objective === "delta_vega_neutral" && (
+              <div className="mt-3 grid grid-cols-3 gap-3">
+                <GreekStat label="ν before" value={signed(rec.current_greeks.vega, 1)} />
+                <GreekStat label="ν after" value={signed(rec.expected_greeks.vega, 1)} tone={Math.abs(rec.expected_greeks.vega) < Math.abs(rec.current_greeks.vega) ? "pos" : undefined} />
+              </div>
+            )}
             {rec.orders.length > 0 && (
               <button
                 onClick={execute}

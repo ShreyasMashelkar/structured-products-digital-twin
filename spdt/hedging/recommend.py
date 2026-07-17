@@ -13,11 +13,41 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import count
+from math import erf, exp, log, pi, sqrt
 
 from spdt.data.ingest.xts import Quote
 from spdt.execution import CostModel, OrderIntent, Side
 
 _ids = count(1)
+
+
+def vanilla_spot_greeks(
+    spot: float, strike: float, tau: float, sigma: float, r: float, q: float, is_call: bool
+) -> dict[str, float]:
+    """Closed-form Black-Scholes spot greeks of one European vanilla, per unit of underlying.
+
+    Used to re-mark executed option hedges off the desk's model, so their greeks stay live
+    as spot and time move (a frozen per-unit delta goes stale — that's gamma). Vega/vanna/
+    volga are per unit vol; degenerate ``tau·sigma → 0`` collapses to the intrinsic step.
+    """
+    if tau <= 0.0 or sigma <= 0.0 or spot <= 0.0 or strike <= 0.0:
+        itm = spot >= strike if is_call else spot <= strike
+        return {"delta": (1.0 if is_call else -1.0) if itm else 0.0,
+                "gamma": 0.0, "vega": 0.0, "vanna": 0.0, "volga": 0.0}
+    vol = sigma * sqrt(tau)
+    d1 = (log(spot / strike) + (r - q + 0.5 * sigma * sigma) * tau) / vol
+    d2 = d1 - vol
+    dq = exp(-q * tau)
+    pdf = exp(-0.5 * d1 * d1) / sqrt(2.0 * pi)
+    cdf_d1 = 0.5 * (1.0 + erf(d1 / sqrt(2.0)))
+    vega = dq * spot * pdf * sqrt(tau)
+    return {
+        "delta": dq * (cdf_d1 if is_call else cdf_d1 - 1.0),
+        "gamma": dq * pdf / (spot * vol),
+        "vega": vega,
+        "vanna": -dq * pdf * d2 / sigma,
+        "volga": vega * d1 * d2 / sigma,
+    }
 
 
 @dataclass(frozen=True)

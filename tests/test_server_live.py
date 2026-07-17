@@ -378,3 +378,74 @@ def test_fetch_tick_inverts_live_atm_straddle_vol(monkeypatch):
     prices[45002] = bs_price(fwd, strike, tau, 0.18, disc, False)
     tick = server._fetch_tick()
     assert tick["dvol"] == pytest.approx(0.03, abs=1e-4)
+
+
+def test_executed_hedges_fold_into_desk_risk(client):
+    """Runs last on purpose: it moves the shared paper position, which the broker
+    reconciliation and attribution tests above pin at -150."""
+    before = client.get("/api/desk").json()["net_greeks"]["delta"]
+    rec = client.post("/api/hedges/recommend",
+                      json={"book_delta": 40.0, "future": _future()}).json()
+    client.post("/api/execution/execute",
+                json={"recommendation_id": rec["recommendation_id"]})
+    after = client.get("/api/desk").json()["net_greeks"]["delta"]
+    assert after == pytest.approx(before - 40.0)
+    # A fresh default-sized recommendation must see the hedged book, not re-hedge it.
+    rec2 = client.post("/api/hedges/recommend", json={"future": _future()}).json()
+    assert rec2["current_greeks"]["delta"] == pytest.approx(after)
+
+
+def test_option_hedges_are_remarked_off_the_desk_model(client):
+    from datetime import date
+
+    from spdt.hedging.recommend import vanilla_spot_greeks
+
+    d = client.get("/api/desk").json()
+    before = d["net_greeks"]
+    strike = d["spot"] * 1.02
+    option = {**_future(), "instrument_id": 880001, "symbol": "NIFTY-OPT",
+              "delta": 0.5, "vega": 40.0, "strike": strike,
+              "expiry": (date.today() + timedelta(days=90)).isoformat(),
+              "option_type": "CE"}
+    rec = client.post("/api/hedges/recommend", json={
+        "book_delta": 0.0, "book_vega": 400.0, "future": _future(), "option": option,
+    }).json()
+    client.post("/api/execution/execute", json={"recommendation_id": rec["recommendation_id"]})
+
+    qty = client.get("/api/execution/blotter").json()["positions"]["2:880001"]["qty"]
+    assert qty == -10.0  # -book_vega / option unit vega
+    m = d["model"]
+    g = vanilla_spot_greeks(d["spot"], strike, 90 / 365, m["atm_vol"], m["r"], m["q"], True)
+    after = client.get("/api/desk").json()["net_greeks"]
+    # Greeks come from the desk's own model, not the client's recommend-time numbers.
+    assert after["gamma"] - before["gamma"] == pytest.approx(qty * g["gamma"], rel=1e-6)
+    assert after["vanna"] - before["vanna"] == pytest.approx(qty * g["vanna"], rel=1e-6)
+
+
+def test_option_terms_must_come_together(client):
+    option = {**_future(), "instrument_id": 880002, "vega": 40.0, "strike": 24000.0}
+    r = client.post("/api/hedges/recommend", json={
+        "book_delta": 0.0, "book_vega": 400.0, "future": _future(), "option": option,
+    })
+    assert r.status_code == 422
+
+
+def test_option_leg_greeks_default_from_desk_model(client):
+    """The UI sends option terms without greeks — the server prices the leg itself."""
+    from datetime import date
+
+    from spdt.hedging.recommend import vanilla_spot_greeks
+
+    d = client.get("/api/desk").json()
+    strike, days = d["spot"] * 0.99, 45
+    option = {**_future(), "instrument_id": 880003, "symbol": "NIFTY-OPT-UI",
+              "strike": strike, "expiry": (date.today() + timedelta(days=days)).isoformat(),
+              "option_type": "PE"}  # note: no delta/vega supplied
+    rec = client.post("/api/hedges/recommend", json={
+        "book_delta": 0.0, "book_vega": -50000.0, "future": _future(), "option": option,
+    }).json()
+    m = d["model"]
+    g = vanilla_spot_greeks(d["spot"], strike, days / 365, m["atm_vol"], m["r"], m["q"], False)
+    opt_order = next(o for o in rec["orders"] if o["instrument_id"] == 880003)
+    assert opt_order["side"] == "BUY"  # short vega book → buy the option
+    assert opt_order["qty"] == round(50000.0 / g["vega"])  # sized on model vega, lot 1
