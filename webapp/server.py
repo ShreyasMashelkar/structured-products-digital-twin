@@ -15,6 +15,7 @@ import os
 import pickle
 import threading
 import time
+from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from math import exp, log, sqrt
 from typing import cast
@@ -57,6 +58,7 @@ from spdt.hedging.recommend import (
     vanilla_spot_greeks,
 )
 from spdt.analytics.barrier_radar import barrier_hit_probability, terminal_above_probability
+from spdt.analytics.realized_vol import realized_vol
 from spdt.data.curate.bs_inversion import bs_price
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
@@ -1386,9 +1388,67 @@ def _ticker_loop() -> None:  # pragma: no cover — thin poll loop; _fetch_tick 
                 return
         try:
             _latest_tick = _fetch_tick()
+            _record_tick(_latest_tick)
         except Exception as exc:  # noqa: BLE001 — a failed poll must not kill the feed
             print(f"spdt-ticker: poll failed: {exc}")
         time.sleep(_TICK_INTERVAL_S)
+
+
+# Rolling tick history for the realized-vol tracker (~3h of 2s ticks).
+# ponytail: accrues only while the app streams ticks — add a standalone session
+# sampler if headless realized vol ever matters.
+_tick_history: deque = deque(maxlen=int(os.environ.get("SPDT_VOL_HISTORY_MAX", "5400")))
+
+
+def _record_tick(tick: dict) -> None:
+    spot = tick.get("spot")
+    if spot:
+        _tick_history.append((time.time(), float(spot), tick.get("atm_iv")))
+
+
+@app.get("/api/live/vol-tracker")
+def vol_tracker() -> dict:
+    """Realized (tick quadratic variation) vs implied (live ATM straddle) volatility.
+
+    The spread is the desk's vol carry; with the book's gamma it prices what the
+    short-gamma book earns or bleeds per day at the current gap.
+    """
+    if not (_LIVE and _SOURCE == "xts"):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "the vol tracker needs SPDT_LIVE=1 and SPDT_SOURCE=xts")
+    samples = list(_tick_history)
+    spots = [(t, s) for t, s, _ in samples]
+    now = time.time()
+    rv_session = realized_vol(spots)
+    rv_30m = realized_vol([x for x in spots if x[0] >= now - 1800])
+    implied = next((iv for _, _, iv in reversed(samples) if iv is not None), None)
+    out: dict = {
+        "n_samples": len(samples),
+        "window_minutes": round((spots[-1][0] - spots[0][0]) / 60.0, 1) if len(spots) > 1 else 0.0,
+        "realized_vol": rv_session,
+        "realized_vol_30m": rv_30m,
+        "implied_atm_vol": implied,
+        "spread": implied - rv_session if implied is not None and rv_session is not None else None,
+    }
+    if out["spread"] is not None:
+        try:  # what the (hedged) book's gamma earns/bleeds per day at this vol gap
+            d = _desk()
+            gamma = _hedged_net_greeks(d)["gamma"]
+            spot = spots[-1][1]
+            out["gamma_carry_per_day"] = (
+                0.5 * gamma * spot * spot * (implied**2 - rv_session**2) / 252.0)
+        except Exception:  # noqa: BLE001 — carry is a bonus stat, never a 500
+            out["gamma_carry_per_day"] = None
+    # chart series, downsampled; each point carries its own trailing-30m realized vol
+    step = max(1, -(-len(samples) // 240))  # ceil-divide so the series stays ≤240 points
+    series = []
+    for i in range(0, len(samples), step):
+        t, s, iv = samples[i]
+        trailing = [x for x in spots if t - 1800 <= x[0] <= t]
+        series.append({"t": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
+                       "spot": s, "iv": iv, "rv": realized_vol(trailing)})
+    out["series"] = series
+    return out
 
 
 @app.get("/api/live/ticks")

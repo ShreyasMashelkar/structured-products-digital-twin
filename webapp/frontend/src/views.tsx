@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, StructureResult, XvaResult, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getOptionChain, getOutcomes, getRadar, getSemiStatic, priceTrade, recommendHedge, solveStructure } from "./lib/api";
+import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, StructureResult, VolTrackerData, XvaResult, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getOptionChain, getOutcomes, getRadar, getVolTracker, getSemiStatic, priceTrade, recommendHedge, solveStructure } from "./lib/api";
 import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trades";
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
 import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
@@ -174,6 +174,43 @@ export function HowToUse({ onGo }: { onGo: (tab: string) => void }) {
 
 /* ======================= Overview ======================= */
 
+/** Realized (tick QV) vs implied (live ATM straddle) vol — hidden off the XTS feed. */
+function VolTracker() {
+  const [v, setV] = useState<VolTrackerData | null>(null);
+  useEffect(() => {
+    let dead = false;
+    const load = () => void getVolTracker().then((r) => { if (!dead) setV(r); }).catch(() => { if (!dead) setV(null); });
+    load();
+    const id = setInterval(load, 30_000);
+    return () => { dead = true; clearInterval(id); };
+  }, []);
+  if (!v || v.realized_vol == null) return null;
+  const chart = v.series
+    .filter((p) => p.rv != null)
+    .map((p) => ({ time: p.t.slice(11, 16), realized: +(p.rv! * 100).toFixed(2), implied: p.iv != null ? +(p.iv * 100).toFixed(2) : null }));
+  const volPct = (x: number | null | undefined) => (x == null ? "—" : `${fmt(x * 100, 2)}%`);
+  return (
+    <Panel className="p-3">
+      <div className="flex items-baseline justify-between">
+        <SectionTitle>Realized vs implied vol</SectionTitle>
+        <span className="tnum text-[11px] text-muted">{v.n_samples} ticks · {fmt(v.window_minutes, 0)}m window · trading-clock annualized</span>
+      </div>
+      <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-5">
+        <GreekStat label="Realized (session)" value={volPct(v.realized_vol)} />
+        <GreekStat label="Realized (30m)" value={volPct(v.realized_vol_30m)} />
+        <GreekStat label="Implied ATM" value={volPct(v.implied_atm_vol)} />
+        <GreekStat label="IV − RV" value={volPct(v.spread)} tone={v.spread != null && v.spread >= 0 ? "pos" : "neg"} />
+        <GreekStat label="Γ carry / day" value={v.gamma_carry_per_day != null ? signed(v.gamma_carry_per_day, 0) : "—"}
+          tone={v.gamma_carry_per_day != null && v.gamma_carry_per_day >= 0 ? "pos" : "neg"} />
+      </div>
+      {chart.length > 3 && (
+        <Lines data={chart} x="time" height={220} yLabel="vol %"
+          series={[{ key: "realized", name: "realized (trailing 30m)", color: C.teal }, { key: "implied", name: "implied ATM", color: C.accent }]} />
+      )}
+    </Panel>
+  );
+}
+
 export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: string) => void }) {
   const e = desk.pnl_explain;
   const waterfall = [
@@ -189,6 +226,7 @@ export function Overview({ desk, onPickTrade }: { desk: Desk; onPickTrade: (id: 
 
   return (
     <div className="space-y-4">
+      <VolTracker />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Panel className="p-3 lg:col-span-2">
           <SectionTitle>Overnight P&L explain</SectionTitle>

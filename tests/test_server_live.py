@@ -528,3 +528,40 @@ def test_barrier_radar_ranks_notes_by_proximity(client):
         crashed_row = next(r for r in crashed["rows"] if r["trade_id"] == worst["trade_id"])
         assert crashed_row["ki_hit_prob_pct"] > worst["ki_hit_prob_pct"]
         assert crashed_row["severity"] == "CRITICAL"
+
+
+def test_vol_tracker_needs_the_xts_feed(client):
+    r = client.get("/api/live/vol-tracker")
+    assert r.status_code == 409
+
+
+def test_vol_tracker_reports_realized_vs_implied(client, monkeypatch):
+    import time as _time
+
+    import numpy as np
+
+    from spdt.analytics.realized_vol import TRADING_SECONDS_PER_YEAR
+
+    monkeypatch.setattr(server, "_LIVE", True)
+    monkeypatch.setattr(server, "_SOURCE", "xts")
+    sigma, iv, now = 0.12, 0.15, _time.time()
+    rng = np.random.default_rng(3)
+    dt = 2.0 / TRADING_SECONDS_PER_YEAR
+    spots = 24000.0 * np.exp(np.cumsum(sigma * np.sqrt(dt) * rng.standard_normal(1800)))
+    server._tick_history.clear()
+    for i, s in enumerate(spots):
+        server._tick_history.append((now - (1800 - i) * 2.0, float(s), iv))
+
+    body = client.get("/api/live/vol-tracker").json()
+    assert body["n_samples"] == 1800
+    assert body["realized_vol"] == pytest.approx(sigma, rel=0.08)
+    assert body["implied_atm_vol"] == iv
+    assert body["spread"] == pytest.approx(iv - body["realized_vol"])
+    assert body["series"] and {"t", "spot", "iv", "rv"} <= set(body["series"][0])
+    assert len(body["series"]) <= 241
+    # short-gamma book at IV > RV earns carry: sign must match the book's gamma
+    carry = body.get("gamma_carry_per_day")
+    gamma = client.get("/api/desk").json()["net_greeks"]["gamma"]
+    if carry is not None and abs(gamma) > 1e-12:
+        assert (carry > 0) == (gamma > 0)
+    server._tick_history.clear()

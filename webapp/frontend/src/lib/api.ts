@@ -454,6 +454,23 @@ export interface ChainRow {
   iv: number | null;
 }
 
+export interface VolTrackerData {
+  n_samples: number;
+  window_minutes: number;
+  realized_vol: number | null;
+  realized_vol_30m: number | null;
+  implied_atm_vol: number | null;
+  spread: number | null;
+  gamma_carry_per_day?: number | null;
+  series: { t: string; spot: number; iv: number | null; rv: number | null }[];
+}
+
+export async function getVolTracker(): Promise<VolTrackerData> {
+  const r = await fetch("/api/live/vol-tracker");
+  if (!r.ok) throw new Error("vol tracker unavailable"); // 409 off the XTS feed
+  return r.json();
+}
+
 export interface RadarRow {
   trade_id: string;
   product_type: string;
