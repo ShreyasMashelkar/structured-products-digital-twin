@@ -502,3 +502,29 @@ def test_paper_state_survives_restart(client):
     assert {k: server._hedge_specs.get(k) for k in held} == held
     # and the desk fold-in still works off the restored book
     assert "delta" in server._paper_hedge_greeks(client.get("/api/desk").json())
+
+
+def test_barrier_radar_ranks_notes_by_proximity(client):
+    d = client.get("/api/desk").json()
+    body = client.get("/api/desk/radar").json()
+    rows = body["rows"]
+    assert rows, "the mixed book always contains barrier products"
+    assert body["spot"] == pytest.approx(d["spot"])
+    for row in rows:
+        assert row["severity"] in ("CRITICAL", "WARNING", "INFO")
+        if "ki_level" in row:
+            assert 0.0 <= row["ki_hit_prob_pct"] <= 100.0
+            assert row["ki_level"] < d["spot"] * 1.5
+        if "autocall_level" in row:
+            assert 0.0 <= row["autocall_prob_pct"] <= 100.0
+            assert row["next_obs_days"] >= 0
+    hit_probs = [r.get("ki_hit_prob_pct", 0.0) for r in rows]
+    assert hit_probs == sorted(hit_probs, reverse=True)
+
+    # a spot override near the worst barrier must raise its touch odds
+    worst = next((r for r in rows if r.get("ki_level")), None)
+    if worst:
+        crashed = client.get(f"/api/desk/radar?spot={worst['ki_level'] * 1.01}").json()
+        crashed_row = next(r for r in crashed["rows"] if r["trade_id"] == worst["trade_id"])
+        assert crashed_row["ki_hit_prob_pct"] > worst["ki_hit_prob_pct"]
+        assert crashed_row["severity"] == "CRITICAL"

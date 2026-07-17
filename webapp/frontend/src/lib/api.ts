@@ -454,6 +454,27 @@ export interface ChainRow {
   iv: number | null;
 }
 
+export interface RadarRow {
+  trade_id: string;
+  product_type: string;
+  direction: string;
+  years_left: number;
+  ki_level?: number;
+  ki_distance_pct?: number;
+  ki_sigma_distance?: number;
+  ki_hit_prob_pct?: number;
+  autocall_level?: number;
+  next_obs_days?: number;
+  autocall_prob_pct?: number;
+  severity: "CRITICAL" | "WARNING" | "INFO";
+}
+
+export async function getRadar(spot?: number): Promise<{ as_of: string; spot: number; rows: RadarRow[] }> {
+  const r = await fetch(`/api/desk/radar${spot && spot > 0 ? `?spot=${spot}` : ""}`);
+  if (!r.ok) throw new Error("radar fetch failed");
+  return r.json();
+}
+
 export async function getOptionChain(): Promise<{
   as_of: string; data_source: string; underlying: string; spot: number; rows: ChainRow[];
 }> {

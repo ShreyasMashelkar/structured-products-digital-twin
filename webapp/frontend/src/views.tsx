@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, StructureResult, XvaResult, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getOptionChain, getOutcomes, getSemiStatic, priceTrade, recommendHedge, solveStructure } from "./lib/api";
+import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, StructureResult, XvaResult, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getOptionChain, getOutcomes, getRadar, getSemiStatic, priceTrade, recommendHedge, solveStructure } from "./lib/api";
 import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trades";
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
 import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
@@ -602,18 +602,66 @@ export function BookRisk({ desk, trades, selectedId, setSelectedId, tenorFilter,
 }) {
   const selected = trades.find((t) => t.trade_id === selectedId) ?? null;
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
-      <div className="lg:col-span-2">
-        <Blotter trades={trades} selectedId={selectedId} onSelect={(id) => setSelectedId(id === selectedId ? null : id)} tenorFilter={tenorFilter} onClearFilter={() => setTenorFilter(null)} mk={mk} />
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+        <div className="lg:col-span-2">
+          <Blotter trades={trades} selectedId={selectedId} onSelect={(id) => setSelectedId(id === selectedId ? null : id)} tenorFilter={tenorFilter} onClearFilter={() => setTenorFilter(null)} mk={mk} />
+        </div>
+        <Panel className="p-4 lg:col-span-3">
+          {selected ? (
+            <TradeDetail trade={selected} desk={desk} />
+          ) : (
+            <BookAggregate desk={desk} onPickTenor={setTenorFilter} mk={mk} />
+          )}
+        </Panel>
       </div>
-      <Panel className="p-4 lg:col-span-3">
-        {selected ? (
-          <TradeDetail trade={selected} desk={desk} />
-        ) : (
-          <BookAggregate desk={desk} onPickTenor={setTenorFilter} mk={mk} />
-        )}
-      </Panel>
+      <BarrierRadar liveSpot={mk.liveSpot} />
     </div>
+  );
+}
+
+/** Barrier proximity radar — re-ranked against the live (or simulated) spot every 30s. */
+function BarrierRadar({ liveSpot }: { liveSpot: number }) {
+  const [radar, setRadar] = useState<Awaited<ReturnType<typeof getRadar>> | null>(null);
+  const spotRef = useRef(liveSpot);
+  spotRef.current = liveSpot;
+  useEffect(() => {
+    let dead = false;
+    const load = () => void getRadar(spotRef.current).then((r) => { if (!dead) setRadar(r); }).catch(() => {});
+    load();
+    const id = setInterval(load, 30_000);
+    return () => { dead = true; clearInterval(id); };
+  }, []);
+  if (!radar || radar.rows.length === 0) return null;
+  const pct = (v?: number) => (v == null ? "—" : `${fmt(v, 1)}%`);
+  return (
+    <Panel className="p-0">
+      <div className="flex items-baseline justify-between px-3 pt-3">
+        <SectionTitle>Barrier radar</SectionTitle>
+        <span className="tnum text-[11px] text-muted">@ spot {fmt(radar.spot, 0)} · model-implied, continuous monitoring</span>
+      </div>
+      <DataTable
+        rows={radar.rows}
+        cols={[
+          { key: "trade_id", label: "Note" },
+          { key: "product_type", label: "Type", fmt: (r) => TYPE_ABBR[r.product_type] ?? r.product_type },
+          { key: "ki_level", label: "KI level", align: "right", fmt: (r) => (r.ki_level != null ? fmt(r.ki_level, 0) : "—") },
+          { key: "ki_distance_pct", label: "KI dist", align: "right", fmt: (r) => pct(r.ki_distance_pct) },
+          { key: "ki_sigma_distance", label: "σ away", align: "right", fmt: (r) => (r.ki_sigma_distance != null ? fmt(r.ki_sigma_distance, 1) : "—") },
+          {
+            key: "ki_hit_prob_pct", label: "P(touch KI)", align: "right",
+            fmt: (r) => pct(r.ki_hit_prob_pct),
+            className: (r) => (r.severity === "CRITICAL" ? "text-down" : r.severity === "WARNING" ? "text-accent" : ""),
+          },
+          { key: "next_obs_days", label: "Next obs", align: "right", fmt: (r) => (r.next_obs_days != null ? `${r.next_obs_days}d` : "—") },
+          { key: "autocall_prob_pct", label: "P(autocall)", align: "right", fmt: (r) => pct(r.autocall_prob_pct) },
+          {
+            key: "severity", label: "", align: "right",
+            fmt: (r) => <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold ${SEVERITY_TONE[r.severity]}`}>{r.severity}</span>,
+          },
+        ]}
+      />
+    </Panel>
   );
 }
 

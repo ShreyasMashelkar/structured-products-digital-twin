@@ -16,7 +16,7 @@ import pickle
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
-from math import exp
+from math import exp, log, sqrt
 from typing import cast
 
 import numpy as np
@@ -56,6 +56,7 @@ from spdt.hedging.recommend import (
     recommend_delta_vega_hedge,
     vanilla_spot_greeks,
 )
+from spdt.analytics.barrier_radar import barrier_hit_probability, terminal_above_probability
 from spdt.data.curate.bs_inversion import bs_price
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
@@ -1427,6 +1428,61 @@ def live_snapshot() -> dict:
         "underlying": d["underlying"], "spot": d["spot"],
         "desk_age_s": round(time.time() - _cache.built_at, 1),
     }
+
+
+@app.get("/api/desk/radar")
+def barrier_radar(spot: float | None = None) -> dict:
+    """Barrier proximity radar: distance and model-implied touch odds per booked note.
+
+    ``spot`` overrides the desk mark so the frontend can re-rank on live ticks. Vols come
+    from the calibrated chain at each barrier's own strike; probabilities are continuous-
+    monitoring GBM closed forms — conservative vs the notes' discrete observation dates.
+    """
+    d = _desk()
+    s = spot if spot is not None and spot > 0 else d["spot"]
+    m = d["model"]
+    rows = []
+    for p in d["positions"]:
+        if p.get("maturity") is None:
+            continue  # non-note rows (e.g. worst-of sub-book summaries) have no schedule
+        fixing = p.get("initial_fixing") or d["spot"]
+        elapsed = p.get("elapsed_years", 0.0)
+        tau = max(p["maturity"] - elapsed, 0.0)
+        row: dict = {"trade_id": p.get("trade_id"), "product_type": p.get("product_type"),
+                     "direction": p.get("direction", "short"), "years_left": round(tau, 3)}
+        if p.get("knock_in"):
+            level = p["knock_in"] * fixing
+            vol = _chain_vol(d, level, date.today() + timedelta(days=round(tau * 365)), False)
+            hit = 1.0 if p.get("barrier_breached") else \
+                barrier_hit_probability(s, level, tau, vol, m["r"], m["q"])
+            row.update(
+                ki_level=round(level, 1),
+                ki_distance_pct=round((s - level) / s * 100.0, 2),
+                ki_sigma_distance=round(log(s / level) / (vol * sqrt(tau)), 2)
+                if tau > 0 and vol > 0 and s > level else 0.0,
+                ki_hit_prob_pct=round(100.0 * hit, 1),
+            )
+        obs = [t - elapsed for t in (p.get("observation_times") or []) if t > elapsed]
+        if p.get("autocall") and obs:
+            level = p["autocall"] * fixing
+            next_obs = min(obs)
+            vol = _chain_vol(d, level, date.today() + timedelta(days=round(next_obs * 365)), True)
+            row.update(
+                autocall_level=round(level, 1),
+                next_obs_days=round(next_obs * 365),
+                autocall_prob_pct=round(
+                    100.0 * terminal_above_probability(s, level, next_obs, vol, m["r"], m["q"]), 1),
+            )
+        if "ki_level" not in row and "autocall_level" not in row:
+            continue
+        hit_prob = row.get("ki_hit_prob_pct", 0.0)
+        distance = row.get("ki_distance_pct")
+        row["severity"] = ("CRITICAL" if hit_prob >= 50.0 or (distance is not None and distance < 5.0)
+                           else "WARNING" if hit_prob >= 25.0 or (distance is not None and distance < 10.0)
+                           else "INFO")
+        rows.append(row)
+    rows.sort(key=lambda r_: (-r_.get("ki_hit_prob_pct", 0.0), r_.get("ki_distance_pct", 1e9)))
+    return {"as_of": d["as_of"], "spot": s, "rows": rows}
 
 
 @app.post("/api/hedges/recommend", dependencies=[Depends(require_token)])
