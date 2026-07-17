@@ -69,6 +69,26 @@ SPDT_BLOOMBERG_RATES_XLSX="/Users/shreyas/Downloads/Data for Intern's usage.xlsx
 
 Keep synthetic for reproducible runs and tests.
 
+### Replay mode (public deployments)
+
+Broker API terms and the exchanges' display licences don't allow republishing a live feed on
+a public site — so the public demo (Hugging Face Spaces) replays a **recorded** session
+instead. Same pipeline, same UI (the masthead badge reads **replay**), day-old data:
+
+```bash
+# during market hours, on the live feed — cut the day's tick tape
+SPDT_SOURCE=xts python3 -m tools.record_tape
+
+# near/after the close — save the desk payload (and history) the replay will serve
+SPDT_SOURCE=xts python3 -m tools.record_tape --desk
+
+# serve the recorded session (the Dockerfile ships data/replay/ and defaults to this)
+SPDT_SOURCE=replay uvicorn webapp.server:app --port 8077
+```
+
+The tape maps onto the wall clock by IST time-of-day — at 14:05 viewers see the 14:05 tick
+of the recorded session — and wraps modulo the tape length overnight so it never freezes.
+
 ## Workflow tabs
 
 `Structuring` (interactive client brief → solve-to-par → catalog + 3-D vol surface) ·

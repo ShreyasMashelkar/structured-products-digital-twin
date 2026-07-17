@@ -24,6 +24,7 @@ interface LiveTick {
   timestamp: string | null;
   age_s: number | null;
   stale: boolean;
+  replay?: boolean; // recorded session played back on the wall clock (public demo mode)
 }
 
 function Masthead({
@@ -41,14 +42,14 @@ function Masthead({
         </span>
         <button
           onClick={onToggle}
-          title={live ? `broker tick feed — ${quoteAge ?? "waiting for first tick"}` : "Toggle the simulated market tick"}
+          title={live ? (tick?.replay ? `replaying a recorded NSE session — ${desk.data_date ?? desk.as_of}` : `broker tick feed — ${quoteAge ?? "waiting for first tick"}`) : "Toggle the simulated market tick"}
           className={cn(
             "ml-2.5 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 align-middle text-[10px] font-bold uppercase tracking-[0.16em] transition-colors",
             sim ? (live ? "border-teal/50 bg-teal/10 text-teal" : "border-up/50 bg-up/10 text-up") : "border-border bg-panel2 text-muted",
           )}
         >
           <span className={cn("h-1.5 w-1.5 rounded-full", sim ? (live ? "animate-pulse bg-teal" : "animate-pulse bg-up") : "bg-muted")} />
-          {sim ? (live ? "live" : "sim") : "paused"}
+          {sim ? (live ? (tick?.replay ? "replay" : "live") : "sim") : "paused"}
         </button>
       </div>
       <div className="tnum text-right text-[12px] leading-relaxed text-muted">

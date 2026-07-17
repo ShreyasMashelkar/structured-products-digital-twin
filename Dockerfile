@@ -27,6 +27,11 @@ COPY integration/ ./integration/
 COPY xva/ ./xva/
 COPY webapp/ ./webapp/
 
+# recorded replay bundle (tick tape + desk payload, cut with tools/record_tape.py) — the
+# public demo serves this instead of a broker feed; override SPDT_SOURCE to run live.
+COPY data/replay/ ./data/replay/
+ENV SPDT_SOURCE=replay
+
 # built frontend from stage 1 (overlays the source tree's empty dist)
 COPY --from=frontend /app/webapp/frontend/dist ./webapp/frontend/dist
 

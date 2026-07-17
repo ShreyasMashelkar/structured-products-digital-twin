@@ -90,6 +90,16 @@ _CORS = os.environ.get("SPDT_CORS_ORIGINS", "http://localhost:5173,http://127.0.
 _DESK_TTL = float(os.environ.get("SPDT_DESK_TTL", "3600"))  # seconds before a rebuild
 _LIVE = os.environ.get("SPDT_LIVE", "").lower() in ("1", "true", "yes")
 _SOURCE = os.environ.get("SPDT_SOURCE", "bhavcopy")  # live engine: bhavcopy (EOD) | dhan (intraday)
+# replay: serve a recorded session (tick tape + saved desk payload) instead of a broker feed —
+# the public-deploy mode, since redistributing a live broker feed needs an exchange licence.
+_REPLAY = _SOURCE == "replay"
+_REPLAY_DIR = os.environ.get("SPDT_REPLAY_DIR", "data/replay")
+
+
+def _feed() -> bool:
+    """Whether the tick/quote endpoints have data to serve (evaluated per request, so
+    tests can monkeypatch ``_LIVE``/``_SOURCE``)."""
+    return (_LIVE and _SOURCE == "xts") or _SOURCE == "replay"
 # Book notes at real face (₹ per note) so note NAV/greeks share units with hedge P&L.
 _FACE_PER_NOTE = float(os.environ.get("SPDT_FACE_PER_NOTE", "50000000"))
 _API_TOKEN = os.environ.get("SPDT_API_TOKEN")  # when set, compute endpoints require it
@@ -121,10 +131,18 @@ _cache_lock = threading.Lock()
 _rebuild_thread: threading.Thread | None = None
 
 
+def _build_payload() -> dict:
+    if _REPLAY:  # a desk payload saved off a live build — no network, nothing to rebuild
+        from spdt.dashboard.desk_data import DeskData
+
+        return DeskData.load(os.path.join(_REPLAY_DIR, "desk.json")).payload
+    return build_desk_data(live=_LIVE, source=_SOURCE, face_per_note=_FACE_PER_NOTE).payload
+
+
 def _rebuild_desk() -> None:
     with _cache_lock:  # only one builder; others wait then see the fresh result
         if _cache.payload is None or (time.time() - _cache.built_at) >= _DESK_TTL:
-            _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE, face_per_note=_FACE_PER_NOTE).payload
+            _cache.payload = _build_payload()
             _cache.built_at = time.time()
             _record_desk_history(_cache.payload)
 
@@ -140,11 +158,11 @@ def _desk(force: bool = False) -> dict:
     if _cache.payload is None or force:
         with _cache_lock:
             if force or _cache.payload is None:
-                _cache.payload = build_desk_data(live=_LIVE, source=_SOURCE, face_per_note=_FACE_PER_NOTE).payload
+                _cache.payload = _build_payload()
                 _cache.built_at = time.time()
                 _record_desk_history(_cache.payload)
         return _cache.payload
-    if (time.time() - _cache.built_at) >= _DESK_TTL:
+    if not _REPLAY and (time.time() - _cache.built_at) >= _DESK_TTL:
         if _rebuild_thread is None or not _rebuild_thread.is_alive():
             _rebuild_thread = threading.Thread(
                 target=_rebuild_desk, daemon=True, name="spdt-desk-rebuild",
@@ -181,7 +199,7 @@ def _archive_loop() -> None:  # pragma: no cover — thin network loop; the piec
         time.sleep(_ARCHIVE_INTERVAL_S)
 
 
-if _LIVE and _ARCHIVE_INTERVAL_S > 0:
+if _LIVE and not _REPLAY and _ARCHIVE_INTERVAL_S > 0:
     threading.Thread(target=_archive_loop, daemon=True, name="spdt-archiver").start()
 
 
@@ -201,11 +219,17 @@ def desk() -> dict:
 
 
 # --- desk timeline: an owned history of the marked desk, one row per build/execution -------
-_DESK_HISTORY_PATH = os.environ.get("SPDT_DESK_HISTORY", "dashboard_data/desk_history.jsonl")
+_DESK_HISTORY_PATH = os.environ.get(
+    "SPDT_DESK_HISTORY",
+    # replay ships the recorded day's timeline read-only; live accrues its own
+    os.path.join(_REPLAY_DIR, "desk_history.jsonl") if _REPLAY else "dashboard_data/desk_history.jsonl",
+)
 
 
 def _record_desk_history(d: dict) -> None:
     """Append the desk's marked state — the raw material for the intraday replay."""
+    if _REPLAY:  # never write into the shipped recording
+        return
     try:
         greeks = _hedged_net_greeks(d)
         hedge_pnl = _paper_hedge_pnl(d)
@@ -1264,10 +1288,24 @@ def live_option_chain() -> dict:
 
 _xts_quote_client = None
 _xts_quote_lock = threading.Lock()
+_replay_tape: tuple[dict, list[dict]] | None = None  # (meta, tick rows), loaded once
+
+
+def _replay_state() -> tuple[dict, list[dict]]:
+    global _replay_tape
+    if _replay_tape is None:
+        from spdt.data.replay import load_tape
+
+        _replay_tape = load_tape(os.path.join(_REPLAY_DIR, "tick_tape.jsonl"))
+    return _replay_tape
 
 
 def _live_quote(symbol: str) -> dict:
     """Front-future touchline for ``symbol`` via the XTS market-data API (login cached)."""
+    if _REPLAY:  # the recorded day's static quote, re-marked at the current tape prices
+        from spdt.data.replay import replay_quote
+
+        return replay_quote(*_replay_state(), now=datetime.now(timezone.utc))
     from spdt.data.ingest.xts import XTSMarketDataClient
 
     global _xts_quote_client
@@ -1323,9 +1361,9 @@ def _live_quote(symbol: str) -> dict:
 @app.get("/api/live/quote")
 def live_quote(symbol: str = "NIFTY") -> dict:
     """Live front-future quote for the hedge ticket. Only meaningful on the XTS feed."""
-    if not (_LIVE and _SOURCE == "xts"):
+    if not _feed():
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            "live quotes need SPDT_LIVE=1 and SPDT_SOURCE=xts")
+                            "live quotes need SPDT_LIVE=1 and SPDT_SOURCE=xts (or =replay)")
     return _live_quote(symbol)
 
 
@@ -1412,6 +1450,10 @@ def _straddle_iv(quotes: dict, atm_ce, atm_pe, spot: float) -> float | None:
 
 def _fetch_tick() -> dict:
     """One tick: index spot, front-future touchline, and live ATM straddle vol."""
+    if _REPLAY:  # the recorded session's tick at this wall-clock position
+        from spdt.data.replay import replay_tick
+
+        return replay_tick(_replay_state()[1], datetime.now(timezone.utc))
     from spdt.data.ingest.xts import XTSMarketDataClient
 
     global _xts_quote_client, _tick_refs, _iv_baseline
@@ -1494,9 +1536,9 @@ def vol_tracker() -> dict:
     The spread is the desk's vol carry; with the book's gamma it prices what the
     short-gamma book earns or bleeds per day at the current gap.
     """
-    if not (_LIVE and _SOURCE == "xts"):
+    if not _feed():
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            "the vol tracker needs SPDT_LIVE=1 and SPDT_SOURCE=xts")
+                            "the vol tracker needs SPDT_LIVE=1 and SPDT_SOURCE=xts (or =replay)")
     samples = list(_tick_history)
     spots = [(t, s) for t, s, _ in samples]
     now = time.time()
@@ -1535,9 +1577,9 @@ def vol_tracker() -> dict:
 @app.get("/api/live/ticks")
 def live_ticks() -> StreamingResponse:
     """SSE stream of spot/front-future ticks. The poll loop runs only while someone listens."""
-    if not (_LIVE and _SOURCE == "xts"):
+    if not _feed():
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            "live ticks need SPDT_LIVE=1 and SPDT_SOURCE=xts")
+                            "live ticks need SPDT_LIVE=1 and SPDT_SOURCE=xts (or =replay)")
 
     def stream():
         global _tick_clients, _ticker_running
