@@ -2034,22 +2034,47 @@ _market_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 _market_lock = threading.Lock()
 
 # Which engine serves which market. CBOE is delayed and current-only, so it can never answer a
-# historical as_of; the Indian sources are whatever the deployment is configured for.
-_MARKETS: dict[str, dict[str, str]] = {
+# historical as_of; the Indian source is whatever the deployment is configured for.
+#
+# The fixed entries are the *index* underlyings. Single names are deliberately NOT enumerated
+# here: which single stocks matter is not a matter of taste, it is whatever the US shelf is
+# currently issuing against. Roughly two thirds of that shelf is worst-of on single stocks, and
+# each leg needs its own vol before the note can be priced or its implied correlation backed
+# out — so the single-name list is derived from the filings themselves (see ``_market_index``),
+# with these as the fallback when EDGAR has not been fetched yet.
+_INDEX_MARKETS: dict[str, dict[str, str]] = {
     "NIFTY": {"label": "NIFTY 50", "region": "India", "source": _SOURCE, "ccy": "INR"},
     "SPX": {"label": "S&P 500", "region": "US", "source": "cboe", "ccy": "USD"},
     "SPY": {"label": "SPDR S&P 500 ETF", "region": "US", "source": "cboe", "ccy": "USD"},
     "NDX": {"label": "Nasdaq 100", "region": "US", "source": "cboe", "ccy": "USD"},
-    "TSLA": {"label": "Tesla", "region": "US", "source": "cboe", "ccy": "USD"},
-    "NVDA": {"label": "NVIDIA", "region": "US", "source": "cboe", "ccy": "USD"},
-    "AAPL": {"label": "Apple", "region": "US", "source": "cboe", "ccy": "USD"},
 }
+_FALLBACK_NAMES = ("TSLA", "NVDA", "AAPL")
+
+
+def _market_index() -> dict[str, dict[str, str]]:
+    """Index markets plus the single names the current US shelf actually references.
+
+    Reading the names off the shelf rather than hardcoding a guess means the selector tracks
+    what is being issued: if dealers rotate from the AI complex into something else, the
+    underlyings follow without a code change, and the list is evidence rather than opinion.
+    """
+    out = dict(_INDEX_MARKETS)
+    shelf: list[str] = []
+    if _filings_cache:  # only if the shelf has already been fetched — never block on EDGAR here
+        shelf = [n["symbol"] for n in _shelf_stats(_filings_cache[1]).get("names", [])]
+    for symbol in (shelf or _FALLBACK_NAMES)[:8]:
+        if symbol not in out:
+            out[symbol] = {
+                "label": symbol, "region": "US", "source": "cboe", "ccy": "USD",
+                "why": "referenced by the current US note shelf" if shelf else "example single name",
+            }
+    return out
 
 
 @app.get("/api/markets")
 def markets() -> dict:
     """The underlyings this deployment can serve, and which engine serves each."""
-    return {"markets": [{"symbol": k, **v} for k, v in _MARKETS.items()]}
+    return {"markets": [{"symbol": k, **v} for k, v in _market_index().items()]}
 
 
 def _spread_expiries(points: list, as_of, *, max_expiries: int = 12, min_strikes: int = 8) -> list:
@@ -2127,7 +2152,7 @@ def _build_market(underlying: str, source: str) -> dict:
     return {
         "underlying": underlying,
         "source": source,
-        "meta": _MARKETS.get(underlying, {}),
+        "meta": _market_index().get(underlying, {}),
         "as_of": raw.date.isoformat(),
         "spot": round(raw.spot, 4),
         "contracts": len(raw.option_chain),
@@ -2154,12 +2179,13 @@ def _build_market(underlying: str, source: str) -> dict:
 def market(underlying: str = "NIFTY", source: str | None = None) -> dict:
     """Spot, chain statistics and the calibrated surface for one underlying."""
     underlying = underlying.upper()
-    if underlying not in _MARKETS:
+    index = _market_index()
+    if underlying not in index:
         raise HTTPException(
             status_code=404,
             detail=f"unknown market {underlying!r}; see /api/markets",
         )
-    source = source or _MARKETS[underlying]["source"]
+    source = source or index[underlying]["source"]
     key = (underlying, source)
     now = time.time()
     with _market_lock:
@@ -2175,6 +2201,128 @@ def market(underlying: str = "NIFTY", source: str | None = None) -> dict:
     with _market_lock:
         _market_cache[key] = (now, payload)
     return payload
+
+
+
+# --- US structured-note shelf: real filed products and the issuer's own valuation ----------
+# SEC 424B2 pricing supplements carry the complete terms *and* the issuer's disclosed initial
+# estimated value. That value is the only external price benchmark in the project: everything
+# else here is the model checked against itself.
+
+_FILINGS_TTL = float(os.environ.get("SPDT_FILINGS_TTL", "21600"))  # 6h; the shelf moves daily
+_filings_cache: tuple[float, list[dict]] | None = None
+_filings_lock = threading.Lock()
+
+
+def _filing_rows(days: int, limit: int) -> list[dict]:
+    from datetime import date as _date, timedelta as _td
+
+    from spdt.data.ingest.edgar import fetch_filing_text, parse_filing, search_filings
+
+    today = _date.today()
+    refs = search_filings(start=today - _td(days=days), end=today, limit=limit)
+    rows: list[dict] = []
+    seen: set = set()
+    for ref in refs:
+        try:
+            f = parse_filing(fetch_filing_text(ref), issuer=ref.issuer, url=ref.url, filed=ref.filed)
+        except Exception:  # noqa: BLE001 - one unreadable document must not sink the shelf
+            continue
+        if not f.is_benchmarkable:
+            continue
+        key = (f.cusip, tuple(sorted(t for t, _ in f.starting_values)), f.estimated_value,
+               f.coupon_per_period, f.maturity_date)
+        if key in seen:  # EDGAR returns the same supplement under several hits
+            continue
+        seen.add(key)
+        names = [t for t, _ in f.starting_values] or list(f.underlyings)
+        rows.append({
+            "issuer": f.issuer.split("(")[0].strip(),
+            "url": f.url,
+            "filed": f.filed.isoformat(),
+            "pricing_date": f.pricing_date.isoformat() if f.pricing_date else None,
+            "maturity": f.maturity_date.isoformat() if f.maturity_date else None,
+            "tenor_years": round(f.tenor_years, 2) if f.tenor_years else None,
+            # Three kinds, not two. A basket note ("Linked to a Basket of Three Stocks") pays on
+            # a weighted average and is *long* diversification; a worst-of pays on the least
+            # performer and is short it. They carry opposite correlation exposure, so collapsing
+            # both into "multi-asset" — or worse, calling a basket "single" because it lacks the
+            # worst-of wording — would invert the sign of the risk being described.
+            "kind": (
+                "worst-of" if f.is_worst_of
+                else "basket" if len(names) > 1
+                else "single"
+            ),
+            "underlyings": names,
+            "coupon_per_period_pct": round(100.0 * (f.coupon_per_period or 0.0) / f.denomination, 3),
+            "periods_per_year": f.periods_per_year,
+            "coupon_barrier": f.coupon_barrier,
+            "knock_in": f.knock_in,
+            "call_level": f.call_level,
+            "memory": f.memory,
+            # The number that makes this an external benchmark rather than a term-sheet viewer.
+            "estimated_value_pct": round(f.estimated_value_pct, 2) if f.estimated_value_pct else None,
+            "disclosed_load_pct": round(f.disclosed_load_pct, 2) if f.disclosed_load_pct else None,
+            "staleness_days": (today - f.pricing_date).days if f.pricing_date else None,
+        })
+    return rows
+
+
+@app.get("/api/us/filings")
+def us_filings(days: int = 120, limit: int = 300) -> dict:
+    """Recently priced US structured notes, with the terms and the issuer's own valuation.
+
+    Cached hard: each call is a full-text search plus one document fetch per hit, rate-limited
+    to stay inside SEC's published ceiling, so an uncached request takes minutes rather than
+    seconds.
+    """
+    global _filings_cache
+    now = time.time()
+    with _filings_lock:
+        if _filings_cache and (now - _filings_cache[0]) < _FILINGS_TTL:
+            rows = _filings_cache[1]
+            return {"filings": rows, "cached": True, **_shelf_stats(rows)}
+    try:
+        rows = _filing_rows(days, limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"EDGAR: {type(exc).__name__}: {exc}") from exc
+    with _filings_lock:
+        _filings_cache = (now, rows)
+    return {"filings": rows, "cached": False, **_shelf_stats(rows)}
+
+
+def _shelf_stats(rows: list[dict]) -> dict:
+    """Shape of the shelf — which is the finding, not a summary statistic.
+
+    Two thirds of current US issuance is worst-of on single stocks, which is why correlation
+    (an input with no liquid market) is the binding unknown for benchmarking this shelf at all.
+    """
+    if not rows:
+        return {"stats": {}, "names": []}
+    worst_of = sum(1 for r in rows if r["kind"] == "worst-of")
+    baskets = sum(1 for r in rows if r["kind"] == "basket")
+    loads = [r["disclosed_load_pct"] for r in rows if r["disclosed_load_pct"] is not None]
+    names: dict[str, int] = {}
+    for r in rows:
+        for t in r["underlyings"]:
+            names[t] = names.get(t, 0) + 1
+    return {
+        "stats": {
+            "n": len(rows),
+            "worst_of": worst_of,
+            "worst_of_pct": round(100.0 * worst_of / len(rows)),
+            "basket": baskets,
+            "single": len(rows) - worst_of - baskets,
+            "mean_load_pct": round(sum(loads) / len(loads), 2) if loads else None,
+            "mean_tenor": round(
+                sum(r["tenor_years"] or 0 for r in rows) / len(rows), 2
+            ),
+        },
+        "names": [
+            {"symbol": k, "notes": v}
+            for k, v in sorted(names.items(), key=lambda kv: -kv[1])[:20]
+        ],
+    }
 
 
 from pathlib import Path  # noqa: E402

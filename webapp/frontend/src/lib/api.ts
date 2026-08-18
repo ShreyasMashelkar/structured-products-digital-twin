@@ -641,3 +641,48 @@ export async function getMarkets(): Promise<{ markets: MarketMeta[] }> {
 export async function getMarket(underlying: string): Promise<Market> {
   return (await apiFetch(`/api/market?underlying=${encodeURIComponent(underlying)}`)).json();
 }
+
+// --- US structured-note shelf ------------------------------------------------------------
+
+export interface Filing {
+  issuer: string;
+  url: string;
+  filed: string;
+  pricing_date: string | null;
+  maturity: string | null;
+  tenor_years: number | null;
+  /** worst-of pays on the least performer (short correlation); a basket pays on the average
+   *  (long diversification). Opposite risk, so they are never merged. */
+  kind: "worst-of" | "basket" | "single";
+  underlyings: string[];
+  coupon_per_period_pct: number;
+  periods_per_year: number | null;
+  coupon_barrier: number | null;
+  knock_in: number | null;
+  call_level: number | null;
+  memory: boolean;
+  /** The issuer's own model value, in points of par — the external benchmark. */
+  estimated_value_pct: number | null;
+  /** Offering price minus estimated value: the dealer's fee and funding load. */
+  disclosed_load_pct: number | null;
+  staleness_days: number | null;
+}
+
+export interface Shelf {
+  filings: Filing[];
+  cached: boolean;
+  stats: {
+    n?: number;
+    worst_of?: number;
+    worst_of_pct?: number;
+    basket?: number;
+    single?: number;
+    mean_load_pct?: number | null;
+    mean_tenor?: number;
+  };
+  names: { symbol: string; notes: number }[];
+}
+
+export async function getShelf(): Promise<Shelf> {
+  return (await apiFetch("/api/us/filings")).json();
+}
