@@ -131,6 +131,9 @@ def invert_chain(
     *,
     moneyness_band: float | None = None,
     iv_bounds: tuple[float, float] | None = None,
+    otm_only: bool = False,
+    min_contracts: float | None = None,
+    min_open_interest: float | None = None,
 ) -> list[IVPoint]:
     """Invert every option settlement print in ``raw`` to an :class:`IVPoint`.
 
@@ -147,16 +150,53 @@ def invert_chain(
 
     Defaults are ``None`` (no filtering) so synthetic/offline runs are unchanged; the live desk path
     passes both.
+
+    A third filter addresses a different problem — not noise, but **inconsistency**:
+
+    * ``otm_only`` — keep calls only above the forward and puts only below it. Exchange
+      settlement prices are struck per-contract and do not enforce put-call parity, so the ITM
+      call and the OTM put at one strike routinely invert to implied vols 5–20 vol points
+      apart. Both cannot be right, and no smooth slice can pass through both: the calibration
+      is dragged to their midpoint and reports a large residual that is an artefact of the
+      input, not a failure of SVI. ITM settlements are the unreliable half (they carry the
+      full intrinsic value, so a stale print's error is amplified when divided by a small
+      vega), which is why the market convention — and this filter — keeps the OTM wing.
+
+    Defaults to ``False`` to preserve existing behaviour; historical calibration should set it.
+
+    Two further filters address the most dangerous failure mode of all — quotes that are not
+    quotes:
+
+    * ``min_contracts`` — require the contract to have actually traded that day.
+    * ``min_open_interest`` — require somebody to be holding a position in it.
+
+    The exchange publishes a settlement price for **every listed contract**, traded or not. On
+    NIFTY the long-dated expiries routinely print zero volume and zero open interest for
+    months at a time, yet still carry a settlement mark; inverted, those marks produce a smooth,
+    plausible-looking implied vol that is a pure exchange computation with no market behind it.
+    Measured on 2020-03-23, the far expiries had *literally zero* contracts traded, and the
+    resulting surface implied a flat ~80% vol out to five years — economically impossible,
+    since a crisis term structure is steeply inverted. Anything priced off that long end is
+    fiction stated to four decimal places, which is far worse than a visibly noisy quote.
+
+    Both default to ``None`` (no filtering), because a source that cannot supply volume reports
+    it as 0.0 and would otherwise have its entire chain discarded.
     """
     points: list[IVPoint] = []
     for q in raw.option_chain:
         tau = year_fraction(raw.date, q.expiry)
         if tau <= 0.0:
             continue
+        if min_contracts is not None and q.contracts_traded < min_contracts:
+            continue  # settlement mark on a contract nobody traded — not a market price
+        if min_open_interest is not None and q.open_interest < min_open_interest:
+            continue
         rate = ois_curve.zero_rate(q.expiry)
         forward = raw.spot * exp((rate - raw.dividend_yield) * tau)
         discount = ois_curve.discount_factor(q.expiry)
         log_moneyness = log(q.strike / forward)
+        if otm_only and (q.is_call != (log_moneyness >= 0.0)):
+            continue  # ITM print — its OTM twin at this strike is the reliable quote
         if moneyness_band is not None and abs(log_moneyness) > moneyness_band * sqrt(tau):
             continue  # deep wing — illiquid/stale settlement, drop before it pollutes the surface
         try:

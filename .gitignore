@@ -62,3 +62,9 @@ xva/**/*.sqlite*
 xva/**/__pycache__/
 xva/.pytest_cache/
 .env
+
+# Validation harness caches (regenerated on demand from the NSE archive)
+data/bhavcopy_cache/
+data/spot_history_cache/
+data/cboe_cache/
+data/edgar_cache/

@@ -118,6 +118,8 @@ def parse_fo_bhavcopy(
             strike=float(r.StrkPric),
             is_call=(r.OptnTp == "CE"),
             settlement_price=float(r.SttlmPric),
+            contracts_traded=float(getattr(r, "TtlTradgVol", 0.0) or 0.0),
+            open_interest=float(getattr(r, "OpnIntrst", 0.0) or 0.0),
         )
         for r in rows.itertuples(index=False)
     )
