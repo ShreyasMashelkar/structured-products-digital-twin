@@ -2022,6 +2022,161 @@ def acknowledge_alert(alert_id: str) -> dict:
 # the SPA and its relative /api/* calls are same-origin (no CORS, no token needed). Mounted
 # LAST so every /api/* route declared above still takes precedence over this catch-all. A no-op
 # in dev, where there is no dist and Vite serves the UI on :5173 and proxies /api back here.
+
+# --- cross-market surface: any underlying, any source -------------------------------------
+# Deliberately separate from /api/desk. That endpoint builds a whole *book* — positions, NAV,
+# P&L explain — denominated in one market; pointing it at SPX would fabricate an SPX book rather
+# than show US data. This serves the market itself (spot, chain, calibrated surface with its fit
+# quality) for any underlying, and touches none of the desk's cache, replay or history paths.
+
+_MARKET_TTL = float(os.environ.get("SPDT_MARKET_TTL", "900"))
+_market_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_market_lock = threading.Lock()
+
+# Which engine serves which market. CBOE is delayed and current-only, so it can never answer a
+# historical as_of; the Indian sources are whatever the deployment is configured for.
+_MARKETS: dict[str, dict[str, str]] = {
+    "NIFTY": {"label": "NIFTY 50", "region": "India", "source": _SOURCE, "ccy": "INR"},
+    "SPX": {"label": "S&P 500", "region": "US", "source": "cboe", "ccy": "USD"},
+    "SPY": {"label": "SPDR S&P 500 ETF", "region": "US", "source": "cboe", "ccy": "USD"},
+    "NDX": {"label": "Nasdaq 100", "region": "US", "source": "cboe", "ccy": "USD"},
+    "TSLA": {"label": "Tesla", "region": "US", "source": "cboe", "ccy": "USD"},
+    "NVDA": {"label": "NVIDIA", "region": "US", "source": "cboe", "ccy": "USD"},
+    "AAPL": {"label": "Apple", "region": "US", "source": "cboe", "ccy": "USD"},
+}
+
+
+@app.get("/api/markets")
+def markets() -> dict:
+    """The underlyings this deployment can serve, and which engine serves each."""
+    return {"markets": [{"symbol": k, **v} for k, v in _MARKETS.items()]}
+
+
+def _spread_expiries(points: list, as_of, *, max_expiries: int = 12, min_strikes: int = 8) -> list:
+    """Keep populated expiries spread across the whole term structure, not just the nearest ones.
+
+    The desk's own selector takes the *nearest* six expiries, which is right for a NIFTY book
+    whose risk sits in the front months. Applied to SPX it is exactly wrong: with 55 listed
+    expiries the nearest six span 17 days, discarding the five-year coverage that is the entire
+    reason for using US data. Sampling evenly in tenor keeps the long end, which is what a
+    three-year note needs to be priceable.
+    """
+    from spdt.core.types import year_fraction as _yf
+
+    by_expiry: dict = {}
+    for p in points:
+        if _yf(as_of, p.expiry) >= 10.0 / 365.0:  # same-day expiries are numerically unstable
+            by_expiry.setdefault(p.expiry, []).append(p)
+    populated = sorted(e for e, v in by_expiry.items() if len(v) >= min_strikes)
+    if not populated:
+        return []
+    if len(populated) <= max_expiries:
+        keep = populated
+    else:
+        step = (len(populated) - 1) / (max_expiries - 1)
+        keep = [populated[round(i * step)] for i in range(max_expiries)]
+    return [p for e in keep for p in by_expiry[e]]
+
+
+def _build_market(underlying: str, source: str) -> dict:
+    """Fetch, invert and calibrate one market, and report the fit honestly.
+
+    ``fit`` is the point of this endpoint as much as the surface is: it carries the per-slice
+    RMSE and the share of slices good enough to price against, so the UI can show *how much the
+    surface is worth trusting* rather than drawing a smooth sheet over quotes that never traded.
+    """
+    from datetime import date as _date
+
+    from spdt.core.types import year_fraction
+    from spdt.data import build_snapshot
+    from spdt.data.curate import invert_chain
+    from spdt.data.live import fetch_live_raw
+    from spdt.vol.surface import VolSurface
+
+    raw = fetch_live_raw(_date.today(), underlying, source=source)
+    snap = build_snapshot(raw)
+
+    has_liquidity = any(
+        q.contracts_traded > 0.0 or q.open_interest > 0.0 for q in raw.option_chain
+    )
+    inverted = invert_chain(
+        raw, snap.ois_curve,
+        moneyness_band=1.0, iv_bounds=(0.03, 3.0), otm_only=True,
+        min_contracts=1.0 if has_liquidity else None,
+        min_open_interest=1.0 if has_liquidity else None,
+    )
+    points = _spread_expiries(inverted, raw.date)
+    surface = VolSurface.calibrate(points, underlying, min_points_per_slice=8)
+    fit = surface.fit_status
+
+    ordered = sorted(surface.slices, key=lambda e: surface.taus[e])
+    smile = [
+        {
+            "tau": round(surface.taus[e], 4),
+            "expiry": e.isoformat(),
+            "atm_vol": round(surface.implied_vol_kt(0.0, surface.taus[e]), 4),
+            "points": [
+                {"k": round(k, 3), "vol": round(surface.implied_vol_kt(k, surface.taus[e]), 4)}
+                for k in (-0.30, -0.20, -0.10, 0.0, 0.10, 0.20, 0.30)
+            ],
+        }
+        for e in ordered
+    ]
+    reliable = [s for s in (fit.slices if fit else ()) if s.rmse_bps <= 200.0]
+
+    return {
+        "underlying": underlying,
+        "source": source,
+        "meta": _MARKETS.get(underlying, {}),
+        "as_of": raw.date.isoformat(),
+        "spot": round(raw.spot, 4),
+        "contracts": len(raw.option_chain),
+        "traded_today": sum(1 for q in raw.option_chain if q.contracts_traded > 0),
+        "with_open_interest": sum(1 for q in raw.option_chain if q.open_interest > 0),
+        "two_sided": sum(1 for q in raw.option_chain if q.bid is not None and q.ask is not None),
+        "calibrated_on": fit.n_points if fit else len(points),
+        "smile": smile,
+        "fit": {
+            "rmse_bps": round(fit.rmse_bps, 1) if fit and fit.n_points else None,
+            "slices": len(surface.slices),
+            "reliable_pct": round(100.0 * fit.reliable_fraction(200.0), 0) if fit else None,
+            "max_reliable_tenor": round(max((s.tau for s in reliable), default=0.0), 3),
+            "arbitrage_clean": surface.arb_status.is_clean,
+            "per_slice": [
+                {"tau": round(s.tau, 4), "n": s.n_points, "rmse_bps": round(s.rmse_bps, 1)}
+                for s in (fit.slices if fit else ())
+            ],
+        },
+    }
+
+
+@app.get("/api/market")
+def market(underlying: str = "NIFTY", source: str | None = None) -> dict:
+    """Spot, chain statistics and the calibrated surface for one underlying."""
+    underlying = underlying.upper()
+    if underlying not in _MARKETS:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown market {underlying!r}; see /api/markets",
+        )
+    source = source or _MARKETS[underlying]["source"]
+    key = (underlying, source)
+    now = time.time()
+    with _market_lock:
+        hit = _market_cache.get(key)
+        if hit and (now - hit[0]) < _MARKET_TTL:
+            return hit[1]
+    try:
+        payload = _build_market(underlying, source)
+    except Exception as exc:  # noqa: BLE001 - surface the reason rather than a bare 500
+        raise HTTPException(
+            status_code=502, detail=f"{underlying} via {source}: {type(exc).__name__}: {exc}"
+        ) from exc
+    with _market_lock:
+        _market_cache[key] = (now, payload)
+    return payload
+
+
 from pathlib import Path  # noqa: E402
 
 from fastapi.staticfiles import StaticFiles  # noqa: E402

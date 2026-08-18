@@ -4,9 +4,9 @@ import { Trade, bookTrades, priceReq } from "./lib/trades";
 import { Kpi, Tabs } from "./components/ui";
 import { cn } from "./lib/cn";
 import { compact, fmtAge, signed, signedCompact } from "./lib/format";
-import { BrokerView, HedgeExecute, OptionChainView, PayoffExplorer, OutcomeLab, SemiStaticHedging, BookRisk, CounterpartyXva, HowToUse, Originate, Overview, Validate } from "./views";
+import { BrokerView, HedgeExecute, OptionChainView, PayoffExplorer, OutcomeLab, SemiStaticHedging, BookRisk, CounterpartyXva, HowToUse, Markets, Originate, Overview, Validate } from "./views";
 
-const WORKSPACES = ["How to use", "Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Validate", "Semi-Static Hedging", "Hedge & Execute", "Payoff Explorer", "Option Chain", "Broker", "Outcome Lab"];
+const WORKSPACES = ["How to use", "Overview", "Originate", "Book & Risk", "Counterparty & XVA", "Markets", "Validate", "Semi-Static Hedging", "Hedge & Execute", "Payoff Explorer", "Option Chain", "Broker", "Outcome Lab"];
 
 // Rough standard normal (sum of uniforms) for the simulated tick.
 const gauss = () => Math.random() + Math.random() + Math.random() - 1.5;
@@ -229,6 +229,7 @@ export default function App() {
         <div className="pt-5">
           {ws === "How to use" && <HowToUse onGo={setWs} />}
           {ws === "Overview" && <Overview desk={desk} onPickTrade={pickTrade} />}
+          {ws === "Markets" && <Markets />}
           {ws === "Originate" && <Originate desk={desk} onStage={stageTrade} volShiftPct={Math.round((agg.liveVol - desk.model.atm_vol) * 1000) / 10} />}
           {ws === "Book & Risk" && (
             <BookRisk desk={desk} trades={trades} selectedId={selectedId} setSelectedId={setSelectedId} tenorFilter={tenorFilter} setTenorFilter={setTenorFilter} mk={{ dS: agg.dS, dVol: agg.dVol, liveSpot: agg.liveSpot, sim }} />

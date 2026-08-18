@@ -21,6 +21,14 @@ from spdt.data.snapshot_builder import build_snapshot
 _fbil_cache: dict[date, list] = {}  # per-process: FBIL's curve is published daily
 
 
+# US placeholders. A flat USD rate stands in for a bootstrapped SOFR curve, and the index
+# dividend yield is the broad-market level; a single stock gets 0.0 rather than an index yield it
+# does not pay. Both are approximations, recorded here rather than buried at the call site.
+_USD_RATE = 0.042
+_US_DIVIDEND_YIELD = 0.013
+_US_INDICES = frozenset({"SPX", "SPY", "NDX", "QQQ", "RUT", "DIA"})
+
+
 def fetch_live_raw(
     as_of: date,
     underlying: str = "NIFTY",
@@ -40,9 +48,32 @@ def fetch_live_raw(
       ``DHAN_ACCESS_TOKEN``); an authenticated broker feed, so it isn't IP-blocked like the public
       NSE endpoints.
 
-    Both pair with FBIL-bootstrapped rates. Exposed separately from :func:`build_live_snapshot` so
-    callers that also need the raw option chain (e.g. surface calibration) don't have to refetch.
+    * ``"xts"`` — Symphony XTS market data; the live intraday broker feed the desk runs on.
+    * ``"cboe"`` — **US** chains (SPX, SPY, or any listed single name) from CBOE's delayed-quote
+      feed. Two-sided markets with real open interest out past five years, which is the tenor
+      range Indian exchange data cannot reach: after screening for contracts that actually
+      traded, no NIFTY source supports a reliable quote past ~1.4 years, while SPX fits at
+      ~24bps out to 5.3. Tenor, not fit quality, is why this source exists.
+
+    The Indian sources pair with FBIL-bootstrapped rates. ``cboe`` does **not**: an INR
+    MIBOR-OIS curve has no business discounting a USD payoff, so it is dispatched before the
+    FBIL fetch and carries a flat USD rate instead. That is a real simplification — a proper
+    SOFR curve is the follow-up — but it is a defensible placeholder, whereas the INR curve
+    would be simply wrong.
+
+    Exposed separately from :func:`build_live_snapshot` so callers that also need the raw option
+    chain (e.g. surface calibration) don't have to refetch.
     """
+    if source == "cboe":
+        from spdt.data.ingest.cboe import CboeSource
+
+        return CboeSource(
+            risk_free_rate=_USD_RATE,
+            funding_spread=funding_spread,
+            dividend_yield=_US_DIVIDEND_YIELD if underlying in _US_INDICES else 0.0,
+            timeout=max(timeout, 40.0),
+        ).fetch(as_of, underlying)
+
     if as_of not in _fbil_cache:  # FBIL publishes a daily curve — one fetch per day is plenty
         _fbil_cache.clear()
         _fbil_cache[as_of] = fetch_fbil_ois_instruments(anchor=as_of, timeout=timeout)[1]
@@ -69,7 +100,9 @@ def fetch_live_raw(
             rate_instruments=rate_instruments,
         )
     else:
-        raise ValueError(f"unknown live source {source!r} (use 'bhavcopy', 'dhan' or 'xts')")
+        raise ValueError(
+            f"unknown live source {source!r} (use 'bhavcopy', 'dhan', 'xts' or 'cboe')"
+        )
     return engine.fetch(as_of, underlying)
 
 

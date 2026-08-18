@@ -588,3 +588,56 @@ export async function getAttribution(marks: Record<string, number>): Promise<{
   if (!r.ok) throw new Error("attribution failed");
   return r.json();
 }
+
+// --- cross-market surfaces -------------------------------------------------------------
+// Separate from the desk payload on purpose: /api/desk builds a whole book in one market,
+// while these describe the *market* — so a US chain can be inspected without fabricating a
+// US book to hang it on.
+
+export interface MarketMeta {
+  symbol: string;
+  label: string;
+  region: string;
+  source: string;
+  ccy: string;
+}
+
+export interface MarketSlice {
+  tau: number;
+  expiry: string;
+  atm_vol: number;
+  points: { k: number; vol: number }[];
+}
+
+export interface MarketFit {
+  rmse_bps: number | null;
+  slices: number;
+  reliable_pct: number | null;
+  /** Longest tenor whose slice fits inside the 200bps tolerance — the tenor a note can reach. */
+  max_reliable_tenor: number;
+  arbitrage_clean: boolean;
+  per_slice: { tau: number; n: number; rmse_bps: number }[];
+}
+
+export interface Market {
+  underlying: string;
+  source: string;
+  meta: Partial<MarketMeta>;
+  as_of: string;
+  spot: number;
+  contracts: number;
+  traded_today: number;
+  with_open_interest: number;
+  two_sided: number;
+  calibrated_on: number;
+  smile: MarketSlice[];
+  fit: MarketFit;
+}
+
+export async function getMarkets(): Promise<{ markets: MarketMeta[] }> {
+  return (await apiFetch("/api/markets")).json();
+}
+
+export async function getMarket(underlying: string): Promise<Market> {
+  return (await apiFetch(`/api/market?underlying=${encodeURIComponent(underlying)}`)).json();
+}
