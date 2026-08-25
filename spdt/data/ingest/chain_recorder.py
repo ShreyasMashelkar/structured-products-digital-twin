@@ -30,7 +30,8 @@ _DEFAULT_BATCH = 25  # instruments per quotes() call — keep requests small and
 class ChainRecord:
     """One option contract's two-sided market at one instant."""
 
-    as_of_ts: datetime
+    as_of_ts: datetime  # exchange LastUpdateTime — stale for quiet strikes, and that's data
+    poll_ts: datetime  # when WE polled — group snapshots by this, never by as_of_ts
     underlying: str
     expiry: date
     strike: float
@@ -83,6 +84,9 @@ def record_chain(
     Quote payloads come back keyed by instrument id only, so contract terms are joined
     from the master refs. Stale quotes are recorded with their flag, never dropped.
     """
+    from datetime import timezone
+
+    poll_ts = now or datetime.now(timezone.utc)
     by_id = {r.exchange_instrument_id: r for r in refs}
     records: list[ChainRecord] = []
     for start in range(0, len(refs), batch_size):
@@ -92,6 +96,7 @@ def record_chain(
                 continue
             records.append(ChainRecord(
                 as_of_ts=q.timestamp,
+                poll_ts=poll_ts,
                 underlying=ref.symbol,
                 expiry=ref.expiry,
                 strike=float(ref.strike or 0.0),
@@ -109,7 +114,7 @@ def write_records(records: list[ChainRecord], root: Path) -> Path:
     if not records:
         raise ValueError("no records to write")
     root.mkdir(parents=True, exist_ok=True)
-    path = root / f"chain_{records[0].as_of_ts.date().isoformat()}.parquet"
+    path = root / f"chain_{records[0].poll_ts.date().isoformat()}.parquet"
     frame = pd.DataFrame([asdict(r) for r in records])
     if path.exists():
         frame = pd.concat([pd.read_parquet(path), frame], ignore_index=True)
@@ -127,5 +132,6 @@ def read_records(root: Path) -> list[ChainRecord]:
     rows = pd.concat(frames, ignore_index=True).to_dict("records")
     for row in rows:  # parquet round-trips dates as pandas timestamps
         row["as_of_ts"] = pd.Timestamp(row["as_of_ts"]).to_pydatetime()
+        row["poll_ts"] = pd.Timestamp(row["poll_ts"]).to_pydatetime()
         row["expiry"] = pd.Timestamp(row["expiry"]).date()
     return [ChainRecord(**row) for row in rows]

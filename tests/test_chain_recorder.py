@@ -69,8 +69,9 @@ def test_select_chain_limits_to_nearest_expiries() -> None:
 
 def test_record_chain_captures_the_two_sided_market() -> None:
     refs = select_chain(_MASTER, underlying="NIFTY", n_expiries=2)
-    records = record_chain(_FakeClient(), refs)
+    records = record_chain(_FakeClient(), refs, now=_TS)
     assert len(records) == 3
+    assert all(r.poll_ts == _TS for r in records)
     call = next(r for r in records if r.is_call and r.strike == 24000.0
                 and r.expiry == date(2026, 8, 27))
     assert (call.bid, call.ask) == (99.0, 101.0)
@@ -96,8 +97,8 @@ def test_stale_quotes_are_flagged_not_dropped() -> None:
 
 def test_records_round_trip_through_parquet(tmp_path: Path) -> None:
     records = [ChainRecord(
-        as_of_ts=_TS, underlying="NIFTY", expiry=date(2026, 8, 27), strike=24000.0,
-        is_call=True, bid=99.0, ask=101.0, bid_qty=65.0, ask_qty=130.0,
+        as_of_ts=_TS, poll_ts=_TS, underlying="NIFTY", expiry=date(2026, 8, 27),
+        strike=24000.0, is_call=True, bid=99.0, ask=101.0, bid_qty=65.0, ask_qty=130.0,
         ltp=100.0, stale=False,
     )]
     path = write_records(records, tmp_path)
@@ -107,7 +108,7 @@ def test_records_round_trip_through_parquet(tmp_path: Path) -> None:
 
 
 def test_write_appends_within_a_day(tmp_path: Path) -> None:
-    rec = ChainRecord(_TS, "NIFTY", date(2026, 8, 27), 24000.0, True,
+    rec = ChainRecord(_TS, _TS, "NIFTY", date(2026, 8, 27), 24000.0, True,
                       99.0, 101.0, 65.0, 130.0, 100.0, False)
     write_records([rec], tmp_path)
     write_records([rec], tmp_path)
