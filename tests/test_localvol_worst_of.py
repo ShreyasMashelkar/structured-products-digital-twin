@@ -131,3 +131,26 @@ def test_surface_total_variance_accepts_arrays():
     assert isinstance(vector, np.ndarray) and vector.shape == ks.shape
     assert surface.total_variance(0.0, tau) == pytest.approx(float(np.interp(0.0, ks, vector)), rel=0.05)
     assert isinstance(surface.total_variance(0.0, tau), float)  # scalars still return scalars
+
+
+def test_lv_pricer_routes_funding_by_leg_like_the_constant_vol_pricer():
+    """The LV path was the one place the benchmark still fell back to a whole-PV funding
+    discount; both pricers must now agree on what funding costs under a flat surface."""
+    from spdt.validation.edgar_benchmark import funding_discounter
+
+    d = funding_discounter(0.03, 0.015)
+    const = price_worst_of(
+        _note(), SPOTS, np.array([0.25, 0.25]), CORR, r=R, q=Q,
+        n_paths=40_000, seed=4, discount=d,
+    ).price
+    lv = price_worst_of_lv(
+        _note(), SPOTS, [_flat_lv(0.25), _flat_lv(0.25)], CORR,
+        r=R, q=Q, n_paths=40_000, seed=4, steps_per_year=104, discount=d,
+    ).price
+    assert lv == pytest.approx(const, abs=1.5)
+    # And funding must lower the LV price, same direction as everywhere else.
+    lv_flat = price_worst_of_lv(
+        _note(), SPOTS, [_flat_lv(0.25), _flat_lv(0.25)], CORR,
+        r=R, q=Q, n_paths=40_000, seed=4, steps_per_year=104,
+    ).price
+    assert lv < lv_flat

@@ -295,6 +295,7 @@ def price_worst_of_filing(
         coupon_barrier=filing.coupon_barrier or 0.8,
         knock_in=filing.knock_in or 0.6,
         memory=filing.memory,
+        buffer=filing.buffer,
         underlyings=tuple(names),
         initial_fixings=tuple(spots),
     )
@@ -309,9 +310,8 @@ def price_worst_of_filing(
         pv = price_worst_of_lv(
             note, spots, [local_vols[t] for t in names], corr,
             r=r, q=q, n_paths=n_paths, seed=seed, steps_per_year=steps_per_year,
+            discount=discount,
         ).price
-        if funding_spread:  # the LV pricer has no discount hook yet; keep the old approximation
-            pv *= exp(-funding_spread * (filing.tenor_years or 0.0))
     else:
         pv = price_worst_of(
             note, spots, sigma, corr, r=r, q=q, n_paths=n_paths, seed=seed, discount=discount
@@ -547,6 +547,7 @@ def implied_correlation_scale(
             coupon_barrier=filing.coupon_barrier or 0.8,
             knock_in=filing.knock_in or 0.6,
             memory=filing.memory,
+        buffer=filing.buffer,
             underlyings=tuple(names),
             initial_fixings=tuple(spots),
         )

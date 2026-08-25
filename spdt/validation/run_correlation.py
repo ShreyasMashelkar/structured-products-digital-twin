@@ -166,13 +166,27 @@ def main() -> None:
             f"EV={ev:6.2f} vols={[round(v,2) for v in vols.values()]} rho={rho_s} scale={scale_s:>5s} stale={stale}d{direction}"
         )
 
+    # An unreachable note whose vols are months newer than its pricing date is not evidence
+    # about the model — the market moved. Only fresh unreachables indict the pricing; stale
+    # ones indict the free data (current-only CBOE), and the two must not be pooled.
+    STALE_D = 45
     solved = [(f, v, rho, s) for f, v, rho, s, _ in rows if rho is not None]
+    unreach_fresh = sum(
+        1 for f, _, rho, st, _ in rows if rho is None and st is not None and st <= STALE_D
+    )
+    unreach_stale = sum(
+        1 for f, _, rho, st, _ in rows if rho is None and (st is None or st > STALE_D)
+    )
     too_high = sum(
         1 for f, _, rho, _, fl in rows
         if rho is None and f.estimated_value_pct is not None and fl > f.estimated_value_pct
     )
     print(f"\nworst-of notes priced: {len(rows)}   correlation solved: {len(solved)}")
-    print(f"unreachable: {len(rows)-len(solved)}  of which model too HIGH at every rho: {too_high}")
+    print(
+        f"unreachable: {len(rows)-len(solved)}  "
+        f"(fresh, a model question: {unreach_fresh}; vol-stale >{STALE_D}d, a data question: {unreach_stale}; "
+        f"model too HIGH at every rho: {too_high})"
+    )
     if scales:
         print(
             f"realised-shape scale: solved {len(scales)}, mean {np.mean(scales):.2f} "

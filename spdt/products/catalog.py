@@ -42,6 +42,13 @@ class Autocallable(Product):
     knock_in: float = 0.6
     memory: bool = False
     initial_fixing: float | None = None  # struck reference; None ⇒ float with the path start
+    # Downside buffer, as a fraction of the initial fixing. With ``buffer = 0.10`` an investor
+    # below the knock-in loses only the decline *beyond* 10%: redemption is
+    # ``notional · min(1, S_T/S₀ + buffer)``. At the standard structure — threshold set at
+    # 100% − buffer — the payoff is continuous through the threshold, unlike a hard barrier.
+    # US "Buffer" notes (a large slice of the BofA shelf) are exactly this; a plain barrier
+    # note is the ``buffer = 0`` special case, so the default preserves every existing note.
+    buffer: float = 0.0
 
     def monitoring_times(self) -> tuple[float, ...]:
         return self.observation_times
@@ -78,8 +85,9 @@ class Autocallable(Product):
                 alive = alive & ~called
             else:
                 ki_breached = spot <= self.knock_in * s0
+                downside = np.minimum(1.0, spot / s0 + self.buffer)
                 principal = np.where(
-                    alive, np.where(ki_breached, n * spot / s0, n), 0.0
+                    alive, np.where(ki_breached, n * downside, n), 0.0
                 )
                 # The whole note is the issuer's liability: coupons, early redemption and final
                 # principal (including the embedded knock-in downside, which only pays if the
@@ -305,6 +313,7 @@ class WorstOfAutocallable(Product):
     memory: bool = False
     underlyings: tuple[str, ...] = ()
     initial_fixings: tuple[float, ...] | None = None  # struck per-asset references; None ⇒ float
+    buffer: float = 0.0  # downside buffer on the worst performer, as on the single-name note
 
     def monitoring_times(self) -> tuple[float, ...]:
         return self.observation_times
@@ -321,5 +330,6 @@ class WorstOfAutocallable(Product):
         inner = Autocallable(
             self.notional, self.observation_times, self.coupon_rate, self.autocall_level,
             self.coupon_barrier, self.knock_in, self.memory, initial_fixing=1.0,
+            buffer=self.buffer,
         )
         return inner.cashflows(PathSet(times=paths.times, spots=basket))
