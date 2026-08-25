@@ -211,3 +211,49 @@ def test_differing_per_name_barriers_are_not_collapsed_to_the_first():
 def test_single_underlying_filings_are_not_flagged_worst_of():
     assert not parse_filing(BOFA).is_worst_of
     assert parse_filing(BOFA).starting_values == ()
+
+
+def test_buffer_notes_are_parsed_and_priced_as_buffers():
+    """'with a 10% Buffer' caps the loss at (decline − 10%). Ignoring it undervalues the note
+    by the buffer's put-spread — which is exactly how it surfaced: buffered notes sat
+    'unreachable, model too LOW at every correlation' in the benchmark."""
+    buffered = WORST_OF.replace(
+        "Autocallable Contingent Coupon (with Memory) Barrier Notes Linked",
+        "Autocallable Contingent Coupon (with Memory) Barrier Notes with a 10% Buffer Linked",
+    )
+    f = parse_filing(buffered, issuer="BofA Finance LLC")
+    assert f.buffer == pytest.approx(0.10)
+    assert parse_filing(WORST_OF).buffer == 0.0  # unbuffered filings stay unbuffered
+
+    note = f.to_autocallable(initial_fixing=100.0)
+    assert note.buffer == pytest.approx(0.10)
+
+
+def test_buffer_softens_the_downside_without_touching_the_upside():
+    import numpy as np
+
+    from spdt.pricing.engine import price_mc
+    from spdt.pricing.models.bs import BlackScholes
+    from spdt.products.catalog import Autocallable
+
+    kwargs = dict(
+        notional=100.0, observation_times=(0.5, 1.0), coupon_rate=0.02,
+        autocall_level=1.5, coupon_barrier=0.95, knock_in=0.90, memory=True,
+        initial_fixing=100.0,
+    )
+    model = BlackScholes(spot=100.0, r=0.04, q=0.0, sigma=0.35)
+    plain = price_mc(Autocallable(**kwargs), model, n_paths=60_000, seed=1).price
+    buffered = price_mc(Autocallable(**kwargs, buffer=0.10), model, n_paths=60_000, seed=1).price
+    assert buffered > plain  # the buffer is worth something …
+    # … and its value is bounded by the buffer itself on the knocked-in mass.
+    assert buffered - plain < 10.0
+
+    # Deterministic check of the payoff at maturity: at S_T = 70 with a 10% buffer the
+    # investor loses 20, not 30.
+    from spdt.products.graph import PathSet
+
+    note = Autocallable(**kwargs, buffer=0.10)
+    paths = PathSet(times=np.array([0.0, 0.5, 1.0]),
+                    spots=np.array([[100.0, 80.0, 70.0]]))
+    total = sum(float(cf.amount[0]) for cf in note.cashflows(paths))
+    assert total == pytest.approx(80.0)

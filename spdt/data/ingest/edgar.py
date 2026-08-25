@@ -216,6 +216,10 @@ class NoteFiling:
     periods_per_year: int | None = None
     memory: bool = False
     non_call_months: float = 0.0
+    # Downside buffer fraction (0.10 for "with a 10% Buffer"). A buffered note loses only the
+    # decline beyond the buffer, so ignoring it undervalues the note by the buffer's put-spread
+    # — which showed up in the benchmark as buffered notes "unreachable, model too LOW".
+    buffer: float = 0.0
     pricing_date: date | None = None
     maturity_date: date | None = None
     underlyings: tuple[str, ...] = ()
@@ -318,6 +322,7 @@ class NoteFiling:
             knock_in=self.knock_in or 0.6,
             memory=self.memory,
             initial_fixing=initial_fixing,
+            buffer=self.buffer,
         )
 
 
@@ -525,6 +530,11 @@ def parse_filing(text: str, *, issuer: str = "", url: str = "", filed: date | No
 
     cusip_match = re.search(r"CUSIP\s*(?:No\.?)?\s*:?\s*([0-9A-Z]{9})", text, re.I)
 
+    buffer_match = re.search(r"with a\s*([\d.]+)\s*%\s*Buffer", text, re.I) or re.search(
+        r"Buffer\s*(?:Amount|Percentage)?\s*:\s*([\d.]+)\s*%", text, re.I
+    )
+    buffer = float(buffer_match.group(1)) / 100.0 if buffer_match else 0.0
+
     # Levels: prefer the definitive terms table, fall back to the summary prose. Single-stock
     # Goldman notes in particular state "...is greater than or equal to 60% of the Starting
     # Value" in the summary and never repeat it as a labelled table row, so a table-only parser
@@ -588,6 +598,7 @@ def parse_filing(text: str, *, issuer: str = "", url: str = "", filed: date | No
         periods_per_year=periods,
         memory=bool(re.search(r"with Memory", text, re.I)),
         non_call_months=non_call,
+        buffer=buffer,
         pricing_date=pricing_date,
         maturity_date=maturity_date,
         underlyings=tuple(names) if names else _underlyings(text),

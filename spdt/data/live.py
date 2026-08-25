@@ -21,11 +21,30 @@ from spdt.data.snapshot_builder import build_snapshot
 _fbil_cache: dict[date, list] = {}  # per-process: FBIL's curve is published daily
 
 
-# US placeholders. A flat USD rate stands in for a bootstrapped SOFR curve, and the index
-# dividend yield is the broad-market level; a single stock gets 0.0 rather than an index yield it
-# does not pay. Both are approximations, recorded here rather than buried at the call site.
-_USD_RATE = 0.042
+# US parameters. The rate is no longer a typed-in constant: it is read from the Treasury daily
+# par-yield curve, bootstrapped to zeros, at the tenor most representative of the notes priced
+# here (~2y). Still a single number into a source that models one flat rate — the curve *shape*
+# is carried by spdt.data.ingest.ust for consumers that can use it (BlackScholesHW takes the
+# full zero curve) — but the level now tracks the market instead of the day the constant was
+# written. The dividend yield remains the broad-market level for indices; a single stock gets
+# 0.0 rather than an index yield it does not pay.
 _US_DIVIDEND_YIELD = 0.013
+_usd_rate_cache: dict[date, float] = {}
+
+
+def _usd_rate(as_of: date) -> float:
+    """The ~2y USD zero, fetched once per day; falls back to the old constant offline."""
+    if as_of not in _usd_rate_cache:
+        try:
+            from spdt.data.ingest.ust import usd_zero_curve
+
+            curve = usd_zero_curve(as_of)
+            pillar = min(curve, key=lambda t: abs(t - 2.0))
+            _usd_rate_cache.clear()
+            _usd_rate_cache[as_of] = curve[pillar]
+        except Exception:  # noqa: BLE001 - offline runs still price, on the documented fallback
+            _usd_rate_cache[as_of] = 0.042
+    return _usd_rate_cache[as_of]
 _US_INDICES = frozenset({"SPX", "SPY", "NDX", "QQQ", "RUT", "DIA"})
 
 
@@ -68,7 +87,7 @@ def fetch_live_raw(
         from spdt.data.ingest.cboe import CboeSource
 
         return CboeSource(
-            risk_free_rate=_USD_RATE,
+            risk_free_rate=_usd_rate(as_of),
             funding_spread=funding_spread,
             dividend_yield=_US_DIVIDEND_YIELD if underlying in _US_INDICES else 0.0,
             timeout=max(timeout, 40.0),

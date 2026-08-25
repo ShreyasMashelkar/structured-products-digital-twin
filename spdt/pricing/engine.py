@@ -180,6 +180,7 @@ def price_worst_of_lv(
     n_paths: int = 60_000,
     seed: int = 0,
     steps_per_year: int = 52,
+    discount: Discount | None = None,
 ) -> PriceResult:
     """Price a worst-of autocallable under **per-name local volatility**.
 
@@ -200,4 +201,8 @@ def price_worst_of_lv(
         spots0, local_vols, corr, grid, r=r, q=q, n_paths=n_paths, rng=rng
     )
     paths = PathSet(times=grid, spots=asset_paths)
-    return present_value(product.cashflows(paths), lambda t: exp(-r * t), n_paths)
+    # Same leg-routing hook as the constant-vol pricer: the note's bond leg is the issuer's
+    # debt and belongs on the funding curve. Without this the LV path was the one place the
+    # benchmark still fell back to a whole-PV funding discount, which over-penalises notes
+    # that autocall early.
+    return present_value(product.cashflows(paths), discount or (lambda t: exp(-r * t)), n_paths)
