@@ -2112,7 +2112,6 @@ def _build_market(underlying: str, source: str) -> dict:
     """
     from datetime import date as _date
 
-    from spdt.core.types import year_fraction
     from spdt.data import build_snapshot
     from spdt.data.curate import invert_chain
     from spdt.data.live import fetch_live_raw
