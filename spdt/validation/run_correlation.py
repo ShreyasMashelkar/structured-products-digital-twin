@@ -36,7 +36,12 @@ from spdt.data import build_snapshot
 from spdt.data.curate import invert_chain
 from spdt.data.ingest.cboe import CboeSource
 from spdt.data.ingest.edgar import fetch_filing_text, parse_filing, search_filings
-from spdt.validation.edgar_benchmark import implied_correlation, price_worst_of_filing
+from spdt.validation.edgar_benchmark import (
+    implied_correlation,
+    implied_correlation_scale,
+    price_worst_of_filing,
+    realised_correlation,
+)
 from spdt.vol.surface import VolSurface
 
 R, Q, FUNDING = 0.042, 0.010, 0.012
@@ -69,11 +74,34 @@ def atm_vol(ticker: str, tau: float) -> float | None:
         return None
 
 
+@lru_cache(maxsize=None)
+def closes(ticker: str) -> tuple:
+    """Six months of daily closes from Yahoo's chart endpoint — the realised-shape input.
+
+    The bare endpoint rather than yfinance, whose session-level rate limiting blocks whole
+    runs; one request per name with an lru_cache is comfortably inside the public allowance.
+    """
+    import json
+    import ssl
+    import urllib.request
+
+    import certifi
+
+    ctx = ssl.create_default_context(cafile=certifi.where())
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range=6mo&interval=1d"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+        payload = json.load(r)
+    vals = payload["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+    return tuple(c for c in vals if c)
+
+
 def main() -> None:
     refs = search_filings(start=TODAY - timedelta(days=120), end=TODAY, limit=600)
     print(f"filings scanned: {len(refs)}")
 
     rows = []
+    scales: list[float] = []
     seen = set()
     for r in refs:
         try:
@@ -113,13 +141,29 @@ def main() -> None:
             f" model>{floor_pv:.1f} vs EV {ev:.1f} (too HIGH at every rho)"
             if floor_pv > ev else " (too LOW at every rho)"
         )
+        # The shaped pass: same one-parameter identification, but scaling the market's own
+        # realised correlation structure instead of a flat matrix. scale < 1 reads directly as
+        # "the issuer marked correlation above realised", which is the checkable claim.
+        scale = None
+        try:
+            series = {t: np.array(closes(t)) for t in vols}
+            base = realised_correlation(series)
+        except Exception:
+            base = None
+        if base is not None:
+            scale = implied_correlation_scale(
+                f, vols=vols, base_corr=base, r=R, q=Q, funding_spread=FUNDING, n_paths=40_000
+            )
         stale = (TODAY - f.pricing_date).days if f.pricing_date else None
         rows.append((f, vols, rho, stale, floor_pv))
+        if scale is not None:
+            scales.append(scale)
         names = "/".join(vols)
         rho_s = f"{rho:.3f}" if rho is not None else "unreachable"
+        scale_s = f"{scale:.2f}" if scale is not None else "n/a"
         print(
             f"  {names:24s} T={tau:.2f}y ki={f.knock_in or 0:.2f} cpn/q={100 * (f.coupon_per_period or 0.0) / f.denomination:5.2f}% "
-            f"EV={ev:6.2f} vols={[round(v,2) for v in vols.values()]} rho={rho_s} stale={stale}d{direction}"
+            f"EV={ev:6.2f} vols={[round(v,2) for v in vols.values()]} rho={rho_s} scale={scale_s:>5s} stale={stale}d{direction}"
         )
 
     solved = [(f, v, rho, s) for f, v, rho, s, _ in rows if rho is not None]
@@ -129,6 +173,11 @@ def main() -> None:
     )
     print(f"\nworst-of notes priced: {len(rows)}   correlation solved: {len(solved)}")
     print(f"unreachable: {len(rows)-len(solved)}  of which model too HIGH at every rho: {too_high}")
+    if scales:
+        print(
+            f"realised-shape scale: solved {len(scales)}, mean {np.mean(scales):.2f} "
+            f"(< 1 means the street marks correlation above realised)"
+        )
     if solved:
         rhos = np.array([rho for _, _, rho, _ in solved])
         print(f"implied correlation: mean={rhos.mean():.3f} median={np.median(rhos):.3f} "

@@ -298,21 +298,24 @@ def price_worst_of_filing(
         underlyings=tuple(names),
         initial_fixings=tuple(spots),
     )
-    # The worst-of pricer discounts on a single flat rate; the funding spread is applied to the
-    # note's bond-like value afterwards rather than leg by leg. Crude next to the two-curve
-    # treatment used for single-underlying notes, and it is why funding is held fixed here
-    # instead of being inverted for.
+    # Funding is applied leg by leg, exactly as on the single-underlying path: the note's
+    # bond-like cashflows (principal, coupons) discount on the issuer curve, the embedded
+    # optionality on OIS. The earlier multiplicative shortcut — discounting the *whole* PV by
+    # the spread over the full tenor — over-penalised autocalling notes, whose expected life is
+    # far shorter than their stated maturity; on a typical 2y note that error was ~40bps of par,
+    # inside the range this benchmark is trying to resolve.
+    discount = funding_discounter(r, funding_spread) if funding_spread else None
     if local_vols is not None and all(t in local_vols for t in names):
         pv = price_worst_of_lv(
             note, spots, [local_vols[t] for t in names], corr,
             r=r, q=q, n_paths=n_paths, seed=seed, steps_per_year=steps_per_year,
         ).price
+        if funding_spread:  # the LV pricer has no discount hook yet; keep the old approximation
+            pv *= exp(-funding_spread * (filing.tenor_years or 0.0))
     else:
         pv = price_worst_of(
-            note, spots, sigma, corr, r=r, q=q, n_paths=n_paths, seed=seed
+            note, spots, sigma, corr, r=r, q=q, n_paths=n_paths, seed=seed, discount=discount
         ).price
-    if funding_spread:
-        pv *= exp(-funding_spread * (filing.tenor_years or 0.0))
     return float(pv)
 
 
@@ -444,3 +447,119 @@ def gap_by_tenor(results: list[BenchmarkResult]) -> dict[str, float]:
         key = "<=1y" if tenor <= 1.25 else ("1-2y" if tenor <= 2.25 else ">2y")
         buckets[key].append(r.gap)
     return {k: float(np.mean(v)) for k, v in buckets.items() if v}
+
+
+def shaped_correlation(names: list[str], base: np.ndarray, scale: float) -> np.ndarray:
+    """A realised-shape correlation matrix moved by one scale factor.
+
+    Equicorrelation assumes META–AAPL and AAPL–TSLA are equally correlated, which they are not,
+    and on a worst-of that assumption is not neutral: the *least* correlated pair dominates the
+    dispersion and therefore the price. This keeps the relative shape of an observed (realised)
+    correlation matrix and moves the whole thing toward or away from 1 with a single parameter:
+
+        rho_ij(scale) = 1 - scale * (1 - base_ij)        for i != j
+
+    ``scale = 1`` returns the base matrix; ``scale -> 0`` approaches perfect correlation;
+    ``scale > 1`` pushes pairs further apart than realised. One disclosed value still identifies
+    exactly one parameter — the same identification argument as equicorrelation — but what is
+    being scaled is now the market's own shape rather than a flat guess.
+
+    Two degeneracies are handled *here* rather than left to the caller, because both failed
+    silently once: at ``scale = 0`` the matrix is all ones — positive semi-definite but
+    singular, and ``np.linalg.cholesky`` raises ``LinAlgError``, which subclasses ``ValueError``
+    and so vanished into the solver's except-clause, making every inversion read "unreachable".
+    Off-diagonals are therefore capped at 0.995. And for large scales on a weakly-correlated
+    basket the matrix can leave the PSD cone entirely; eigenvalues are clipped and the result
+    renormalised to unit diagonal, the standard nearest-correlation repair.
+    """
+    base = np.asarray(base, dtype=float)
+    if base.shape != (len(names), len(names)):
+        raise ValueError(f"base correlation is {base.shape}, need {(len(names), len(names))}")
+    off = 1.0 - scale * (1.0 - base)
+    out = np.where(np.eye(len(names), dtype=bool), 1.0, np.clip(off, -0.99, 0.995))
+    vals, vecs = np.linalg.eigh(out)
+    if vals.min() < 1e-8:
+        repaired = vecs @ np.diag(np.maximum(vals, 1e-8)) @ vecs.T
+        d = np.sqrt(np.diag(repaired))
+        out = repaired / np.outer(d, d)
+        np.fill_diagonal(out, 1.0)
+    return out
+
+
+def realised_correlation(
+    series: dict[str, "np.ndarray"], *, min_overlap: int = 60
+) -> np.ndarray | None:
+    """Pairwise correlation of log returns from aligned price series, or ``None`` if too short.
+
+    The *shape* input to :func:`shaped_correlation`. Estimated from history, so it is a
+    real-world-measure quantity standing in for a risk-neutral one — a known abuse, shared by
+    every desk that marks correlation off realised plus a spread. The scale factor solved
+    downstream absorbs exactly that spread, which is what makes it interpretable: scale < 1
+    means the disclosed value needs *higher-than-realised* correlation to reconcile.
+    """
+    names = list(series)
+    length = min(len(series[t]) for t in names)
+    if length < min_overlap + 1:
+        return None
+    returns = np.column_stack(
+        [np.diff(np.log(np.asarray(series[t], dtype=float)[-length:])) for t in names]
+    )
+    return np.corrcoef(returns, rowvar=False)
+
+
+def implied_correlation_scale(
+    filing: NoteFiling,
+    *,
+    vols: dict[str, float],
+    base_corr: np.ndarray,
+    r: float,
+    q: float,
+    funding_spread: float = 0.012,
+    n_paths: int = 60_000,
+    seed: int = 0,
+    bracket: tuple[float, float] = (0.0, 1.8),
+) -> float | None:
+    """Solve for the scale on a realised-shape correlation that reproduces the disclosed value.
+
+    The refinement over :func:`implied_correlation`: same single-parameter identification, but
+    the parameter now *means* something checkable — ``scale = 1`` says the issuer priced at
+    realised correlation, ``scale < 1`` says they marked correlation above realised (the
+    expected dealer behaviour, since higher correlation raises a worst-of's value), and a
+    solution outside the bracket says the disagreement is not a correlation mark at all.
+    """
+    target = filing.estimated_value_pct
+    if target is None or not filing.is_worst_of:
+        return None
+    names = [t for t, _ in filing.starting_values if t in vols]
+    if len(names) < 2:
+        return None
+
+    def gap(scale: float) -> float:
+        corr = shaped_correlation(names, base_corr, scale)
+        starts = dict(filing.starting_values)
+        spots = np.array([starts[t] for t in names])
+        sigma = np.array([vols[t] for t in names])
+        wo = WorstOfAutocallable(
+            notional=100.0,
+            observation_times=filing.observation_times(),
+            coupon_rate=(filing.coupon_per_period or 0.0) / filing.denomination,
+            autocall_level=filing.call_level or 1.0,
+            coupon_barrier=filing.coupon_barrier or 0.8,
+            knock_in=filing.knock_in or 0.6,
+            memory=filing.memory,
+            underlyings=tuple(names),
+            initial_fixings=tuple(spots),
+        )
+        discount = funding_discounter(r, funding_spread) if funding_spread else None
+        pv = price_worst_of(
+            wo, spots, sigma, corr, r=r, q=q, n_paths=n_paths, seed=seed, discount=discount
+        ).price
+        return float(pv) - target
+
+    lo, hi = bracket
+    try:
+        if gap(lo) * gap(hi) > 0:
+            return None
+        return float(brentq(gap, lo, hi, xtol=1e-4, maxiter=60))
+    except (ValueError, RuntimeError):
+        return None

@@ -112,6 +112,7 @@ def price_worst_of(
     q: float = 0.0,
     n_paths: int = 100_000,
     seed: int = 0,
+    discount: Discount | None = None,
 ) -> PriceResult:
     """Price a first-class :class:`WorstOfAutocallable` on correlated GBM paths.
 
@@ -123,7 +124,11 @@ def price_worst_of(
     rng = np.random.default_rng(seed)
     asset_paths = correlated_gbm_paths(spots0, vols, corr, grid, r=r, q=q, n_paths=n_paths, rng=rng)
     paths = PathSet(times=grid, spots=asset_paths)
-    return present_value(product.cashflows(paths), lambda t: exp(-r * t), n_paths)
+    # The worst-of's cashflows carry the same FUNDING/OPTION leg tags as the single-name note,
+    # but this pricer used to flatten them onto one curve — so the principal (the issuer's own
+    # debt) was discounted risk-free, overvaluing the note by roughly spread x duration. Pass a
+    # Discounter to route each leg to its curve; the flat lambda remains the default.
+    return present_value(product.cashflows(paths), discount or (lambda t: exp(-r * t)), n_paths)
 
 
 def worst_of_greeks(

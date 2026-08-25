@@ -282,3 +282,114 @@ def test_pricing_needs_a_vol_for_every_leg():
 
     with pytest.raises(ValueError, match="at least two underlyings"):
         price_worst_of_filing(_wo(), vols={"META": 0.43}, rho=0.5, r=R, q=Q, n_paths=5_000)
+
+
+# --- shaped correlation & leg-based worst-of funding ---------------------------------------
+
+
+def test_shaped_correlation_interpolates_between_realised_and_unity():
+    from spdt.validation.edgar_benchmark import shaped_correlation
+
+    base = np.array([[1.0, 0.3, 0.5], [0.3, 1.0, 0.7], [0.5, 0.7, 1.0]])
+    names = ["A", "B", "C"]
+    at_one = shaped_correlation(names, base, 1.0)
+    assert np.allclose(at_one, base)
+    near_zero = shaped_correlation(names, base, 0.01)
+    assert near_zero[0, 1] > 0.98  # approaches perfect correlation …
+    assert near_zero[0, 1] <= 0.995  # … but never reaches the singular all-ones matrix
+
+
+def test_shaped_correlation_is_always_choleskyable():
+    """The failure this guards against was silent: LinAlgError subclasses ValueError, so a
+    singular endpoint vanished into the solver's except-clause and every inversion read
+    'unreachable'."""
+    from spdt.validation.edgar_benchmark import shaped_correlation
+
+    base = np.array([[1.0, 0.09, 0.1], [0.09, 1.0, 0.12], [0.1, 0.12, 1.0]])
+    for scale in (0.0, 0.5, 1.0, 1.8):  # includes both degenerate regimes
+        m = shaped_correlation(["A", "B", "C"], base, scale)
+        np.linalg.cholesky(m)  # must not raise
+        assert np.allclose(np.diag(m), 1.0)
+
+
+def test_realised_correlation_recovers_a_known_structure():
+    from spdt.validation.edgar_benchmark import realised_correlation
+
+    rng = np.random.default_rng(3)
+    common = rng.standard_normal(300)
+    a = np.exp(np.cumsum(0.01 * common))
+    b = np.exp(np.cumsum(0.01 * (0.9 * common + np.sqrt(1 - 0.81) * rng.standard_normal(300))))
+    c = np.exp(np.cumsum(0.01 * rng.standard_normal(300)))
+    corr = realised_correlation({"A": a, "B": b, "C": c})
+    assert corr is not None
+    assert corr[0, 1] > 0.8  # A and B share a driver
+    assert abs(corr[0, 2]) < 0.25  # C does not
+
+
+def test_realised_correlation_refuses_short_series():
+    from spdt.validation.edgar_benchmark import realised_correlation
+
+    short = {"A": np.ones(10), "B": np.ones(10)}
+    assert realised_correlation(short, min_overlap=60) is None
+
+
+def test_worst_of_leg_funding_lowers_the_value_like_the_single_name_path():
+    """The bond leg is the issuer's debt; discounting it risk-free overvalues the note. The
+    multiplicative shortcut this replaces also over-penalised autocalling notes, whose expected
+    life is far shorter than their stated maturity."""
+    from spdt.pricing.engine import price_worst_of
+    from spdt.products.catalog import WorstOfAutocallable
+    from spdt.validation.edgar_benchmark import funding_discounter
+
+    note = WorstOfAutocallable(
+        notional=100.0, observation_times=(0.5, 1.0, 1.5, 2.0), coupon_rate=0.02,
+        autocall_level=1.0, coupon_barrier=0.8, knock_in=0.6, memory=True,
+        underlyings=("A", "B"), initial_fixings=(100.0, 100.0),
+    )
+    spots = np.array([100.0, 100.0])
+    vols = np.array([0.3, 0.4])
+    corr = np.array([[1.0, 0.5], [0.5, 1.0]])
+    flat = price_worst_of(note, spots, vols, corr, r=0.04, q=0.0, n_paths=40_000, seed=2).price
+    funded = price_worst_of(
+        note, spots, vols, corr, r=0.04, q=0.0, n_paths=40_000, seed=2,
+        discount=funding_discounter(0.04, 0.015),
+    ).price
+    assert funded < flat
+    # And by less than spread x full tenor: the note autocalls early with high probability,
+    # which is exactly what the old whole-PV discount ignored.
+    assert flat - funded < flat * 0.015 * 2.0
+
+
+def test_implied_scale_recovers_a_synthetic_target():
+    from spdt.validation.edgar_benchmark import implied_correlation_scale, shaped_correlation
+
+    f = _wo()
+    base = np.array([[1.0, 0.3, 0.5], [0.3, 1.0, 0.7], [0.5, 0.7, 1.0]])
+    names = [t for t, _ in f.starting_values]
+    known = 0.6
+    # Price at the shaped matrix for the known scale, then invert for it.
+    from spdt.pricing.engine import price_worst_of
+    from spdt.products.catalog import WorstOfAutocallable
+    from spdt.validation.edgar_benchmark import funding_discounter
+
+    starts = dict(f.starting_values)
+    spots = np.array([starts[t] for t in names])
+    sigma = np.array([VOLS[t] for t in names])
+    wo = WorstOfAutocallable(
+        notional=100.0, observation_times=f.observation_times(),
+        coupon_rate=(f.coupon_per_period or 0.0) / f.denomination,
+        autocall_level=f.call_level or 1.0, coupon_barrier=f.coupon_barrier or 0.8,
+        knock_in=f.knock_in or 0.6, memory=f.memory,
+        underlyings=tuple(names), initial_fixings=tuple(spots),
+    )
+    target = price_worst_of(
+        wo, spots, sigma, shaped_correlation(names, base, known),
+        r=R, q=Q, n_paths=40_000, seed=0, discount=funding_discounter(R, 0.012),
+    ).price
+    synthetic = parse_filing(
+        WORST_OF_TEXT.replace("is $9.62 per unit", f"is ${target / 10.0:.4f} per unit")
+    )
+    solved = implied_correlation_scale(
+        synthetic, vols=VOLS, base_corr=base, r=R, q=Q, funding_spread=0.012, n_paths=40_000
+    )
+    assert solved == pytest.approx(known, abs=0.08)

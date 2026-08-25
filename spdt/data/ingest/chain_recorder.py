@@ -60,12 +60,15 @@ def select_chain(
     All strikes are kept deliberately: the far wings' (absent) markets are exactly the
     liquidity evidence a cost model needs.
     """
-    options = [
-        r for r in master
+    # The expiry travels with the ref so the not-None filter is carried in the value: the
+    # comprehension's narrowing does not survive into the later set, and an undated contract
+    # must never reach sorted().
+    dated = [
+        (r.expiry, r) for r in master
         if r.symbol == underlying and r.option_type in ("CE", "PE") and r.expiry is not None
     ]
-    keep = sorted({r.expiry for r in options})[:n_expiries]
-    return [r for r in options if r.expiry in keep]
+    keep = set(sorted({e for e, _ in dated})[:n_expiries])
+    return [r for e, r in dated if e in keep]
 
 
 def record_chain(
