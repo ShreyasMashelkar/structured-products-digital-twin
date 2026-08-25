@@ -19,7 +19,7 @@ import time
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from math import exp, log, sqrt
-from typing import cast
+from typing import Any, TypedDict, cast
 
 import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -1319,15 +1319,17 @@ def _live_quote(symbol: str) -> dict:
         def fetch() -> dict:
             if not client.token:
                 client.login()
-            futures = [
-                r for r in client.instruments("NSEFO")
+            # Pair each ref with its expiry so the not-None filter is carried in the value
+            # rather than re-derived: an undated contract must never reach min() or isoformat().
+            dated = [
+                (r.expiry, r) for r in client.instruments("NSEFO")
                 if r.symbol == symbol and r.instrument_type == "FUTIDX"
                 and r.expiry is not None and r.expiry >= date.today()
             ]
-            if not futures:
+            if not dated:
                 raise HTTPException(status.HTTP_404_NOT_FOUND,
                                     f"no live future found for {symbol!r}")
-            front = min(futures, key=lambda r: r.expiry)
+            front_expiry, front = min(dated, key=lambda pair: pair[0])
             now = datetime.now(timezone.utc)
             quotes = client.quotes([front], now=now, max_age_s=_QUOTE_MAX_AGE_S)
             if not quotes:
@@ -1340,7 +1342,7 @@ def _live_quote(symbol: str) -> dict:
                 "instrument_id": front.exchange_instrument_id,
                 "symbol": front.symbol,
                 "description": front.description,
-                "expiry": front.expiry.isoformat(),
+                "expiry": front_expiry.isoformat(),
                 "lot_size": front.lot_size,
                 "ltp": q.ltp, "bid": q.bid, "ask": q.ask,
                 "bid_qty": q.bid_qty, "ask_qty": q.ask_qty,
@@ -1553,7 +1555,7 @@ def vol_tracker() -> dict:
         "implied_atm_vol": implied,
         "spread": implied - rv_session if implied is not None and rv_session is not None else None,
     }
-    if out["spread"] is not None:
+    if out["spread"] is not None and implied is not None and rv_session is not None:
         try:  # what the (hedged) book's gamma earns/bleeds per day at this vol gap
             d = _desk()
             gamma = _hedged_net_greeks(d)["gamma"]
@@ -1671,7 +1673,23 @@ def barrier_radar(spot: float | None = None) -> dict:
 # --- auto-hedger: watch the hedged net delta, propose (never execute) when it drifts ------
 # Paper-only and approval-gated by design: proposals land in the normal recommendation
 # queue for a human to execute. SPDT_AUTOHEDGE=1 arms it at startup.
-_autohedge = {
+class _AutohedgeState(TypedDict):
+    """Auto-hedger state, typed field by field.
+
+    As a bare dict literal this infers as ``dict[str, float | bool | None]`` — the union of its
+    five value types — so every read is that union and every use downstream fails: the threshold
+    cannot be compared, the interval cannot be slept on, and the proposal cannot be indexed.
+    Naming the fields keeps the dict syntax and gives each key back its own type.
+    """
+
+    enabled: bool
+    delta_threshold: float
+    interval_s: float
+    last_proposal: dict[str, Any] | None
+    last_error: str | None
+
+
+_autohedge: _AutohedgeState = {
     "enabled": os.environ.get("SPDT_AUTOHEDGE", "").lower() in ("1", "true", "yes"),
     "delta_threshold": float(os.environ.get("SPDT_AUTOHEDGE_DELTA", "500")),
     "interval_s": float(os.environ.get("SPDT_AUTOHEDGE_INTERVAL_S", "30")),
@@ -1753,8 +1771,13 @@ class AutohedgeIn(BaseModel):
 
 @app.get("/api/autohedge")
 def autohedge_status() -> dict:
-    return {k: _autohedge[k] for k in
-            ("enabled", "delta_threshold", "interval_s", "last_proposal", "last_error")}
+    return {
+        "enabled": _autohedge["enabled"],
+        "delta_threshold": _autohedge["delta_threshold"],
+        "interval_s": _autohedge["interval_s"],
+        "last_proposal": _autohedge["last_proposal"],
+        "last_error": _autohedge["last_error"],
+    }
 
 
 @app.post("/api/autohedge", dependencies=[Depends(require_token)])
