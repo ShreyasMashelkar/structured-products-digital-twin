@@ -59,12 +59,16 @@ Two things to get right in the framing:
 >
 > Following that through, about two thirds of current US issuance is worst-of on single stocks,
 > where per-leg vols are observable and correlation isn't — so correlation becomes the one free
-> parameter and you can back it out of notes that actually priced. Across the notes I could
-> solve, the disclosed values imply correlations of 0.74–0.95, and for most of them they sit at
-> or above what my model reaches even at correlation ≈ 1. Directionally that matches dealers
-> marking correlation high when they sell worst-of, but I'd treat it as an upper bound rather
-> than a measurement: I'm using flat ATM vol with no skew, and my vols are current while the
-> notes were priced weeks or months ago. Both push the number up.
+> parameter and you can back it out of notes that actually priced. Getting that inversion to
+> work taught me the most: at first most notes were unreachable at any correlation, and the
+> culprit turned out to be my own funding treatment — I was discounting the whole PV by the
+> issuer spread over the stated tenor, which over-penalises exactly the notes most likely to
+> autocall early. Discounting leg by leg (bond leg on the issuer curve, optionality on OIS)
+> fixed most of it: 6 of 10 notes now solve, mean implied correlation ~0.71. I also replaced
+> the flat-correlation assumption with the realised correlation matrix moved by one scale
+> factor, which makes the answer directly interpretable — the solved scales say the street
+> marks worst-of correlation at roughly 0.85–0.93 against realised 0.25–0.42. Still an upper
+> bound (my vols are current while the notes priced weeks ago), but now a quantified one.
 >
 > Still weak, and I'd rather say so: no skew in the pricing (the knock-in sits in the put wing,
 > which is exactly where flat ATM is worst), a constant rate on the equity side, and the sample
@@ -99,7 +103,11 @@ Use if the thread has gone quiet or you'd rather not send a wall of text.
 > vol against a listed 48.1%.
 >
 > On your rates point: the HW2F swap raised CVA ~90%, but variance-matched the real curve-shape
-> effect is only +3.4%. Reporting the 3.4%.
+> effect is only +3.4%. Reporting the 3.4%. The note itself now also prices under stochastic
+> rates (1F Hull-White, pathwise deflators, validated against the sigma->0 limit and bond
+> repricing) — and the honest result is that a 3y autocallable moves by basis points at 100bp
+> rate vol, so the note's genuine rate-vol exposure was never large. Your instinct that the
+> *exposure* side is where the rate model matters was right.
 >
 > Repo: github.com/ShreyasMashelkar/structured-products-digital-twin (public — I never sent the
 > link, which is probably why you couldn't access it).
