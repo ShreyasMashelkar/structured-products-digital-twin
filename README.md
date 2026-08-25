@@ -116,7 +116,12 @@ Stated because a validation section without them is marketing:
   wrong and is deliberately not reported.
 * **Regime.** Indian equity spent most of the study period rising, which mechanically produces
   high autocall rates — that is not evidence the pricing was right.
-* **Constant rate on the equity leg** (only the XVA engine has stochastic rates).
+* **Stochastic rates on the note are one-factor and flat-curve.** The note itself can now be
+  priced under Hull-White rates (`spdt.pricing.models.bshw`, pathwise deflators, validated
+  against the sigma_r → 0 limit, bond repricing and the martingale property) — but off a flat
+  initial curve, with one factor. The measured effect on a 3y autocallable at 100bp rate vol is
+  basis points, which is itself the finding: the note is mostly a funding-leg instrument, and
+  its genuine rate exposure was never large. A bootstrapped initial curve is the remaining gap.
 * **The CBOE feed is delayed and current-only**, so historical US point-in-time work needs a paid
   dataset; benchmark staleness is recorded per note.
 * **The realised hedge path is sampled, not daily**, which biases discretisation cost
