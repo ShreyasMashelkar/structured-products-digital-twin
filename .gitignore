@@ -68,3 +68,4 @@ data/bhavcopy_cache/
 data/spot_history_cache/
 data/cboe_cache/
 data/edgar_cache/
+data/chain_archive/
