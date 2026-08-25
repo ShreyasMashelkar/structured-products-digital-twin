@@ -49,7 +49,10 @@ def test_funding_curve_sits_above_ois(raw):
 
 
 def test_bloomberg_mifor_overlay_does_not_replace_ois_curve(raw, tmp_path):
-    from openpyxl import Workbook
+    # The Bloomberg overlay is an optional source and openpyxl its optional reader; the
+    # production code raises a clear error without it, and this test should skip on the same
+    # boundary rather than hard-fail an environment that never installed the extra.
+    Workbook = pytest.importorskip("openpyxl").Workbook
 
     wb = Workbook()
     ws = wb.active

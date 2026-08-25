@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 
 from spdt.products.catalog import Autocallable, WorstOfAutocallable
 from spdt.products.graph import Discount, PathSet, PriceResult, Product, present_value
-from spdt.pricing.mc.paths import correlated_gbm_paths
+from spdt.pricing.mc.paths import correlated_gbm_paths, correlated_local_vol_paths
 from spdt.pricing.mc.rng import standard_normals
 
 
@@ -112,6 +112,7 @@ def price_worst_of(
     q: float = 0.0,
     n_paths: int = 100_000,
     seed: int = 0,
+    discount: Discount | None = None,
 ) -> PriceResult:
     """Price a first-class :class:`WorstOfAutocallable` on correlated GBM paths.
 
@@ -123,7 +124,11 @@ def price_worst_of(
     rng = np.random.default_rng(seed)
     asset_paths = correlated_gbm_paths(spots0, vols, corr, grid, r=r, q=q, n_paths=n_paths, rng=rng)
     paths = PathSet(times=grid, spots=asset_paths)
-    return present_value(product.cashflows(paths), lambda t: exp(-r * t), n_paths)
+    # The worst-of's cashflows carry the same FUNDING/OPTION leg tags as the single-name note,
+    # but this pricer used to flatten them onto one curve — so the principal (the issuer's own
+    # debt) was discounted risk-free, overvaluing the note by roughly spread x duration. Pass a
+    # Discounter to route each leg to its curve; the flat lambda remains the default.
+    return present_value(product.cashflows(paths), discount or (lambda t: exp(-r * t)), n_paths)
 
 
 def worst_of_greeks(
@@ -162,3 +167,37 @@ def worst_of_greeks(
         "corr_delta": (corr_up - base) / 0.05,
         "pv": base,
     }
+
+
+def price_worst_of_lv(
+    product: WorstOfAutocallable,
+    spots0: NDArray,
+    local_vols: list,
+    corr: NDArray,
+    *,
+    r: float,
+    q: float = 0.0,
+    n_paths: int = 60_000,
+    seed: int = 0,
+    steps_per_year: int = 52,
+) -> PriceResult:
+    """Price a worst-of autocallable under **per-name local volatility**.
+
+    The constant-vol sibling :func:`price_worst_of` prices every barrier at a single ATM number.
+    That is the wrong number where it matters most: the knock-in sits 30–50% below spot, in the
+    put wing, where the fitted surface is materially higher than ATM. Using local vol makes the
+    barrier see the skew the market actually quotes.
+
+    ``steps_per_year`` refines the simulation grid while keeping every observation date exactly
+    on it. Local vol has no exact transition, so this is a genuine accuracy knob rather than a
+    formality — too coarse and the vol is frozen between observations, which reintroduces the
+    constant-vol error this function exists to remove.
+    """
+    obs = sorted(set(product.monitoring_times()))
+    grid = _simulation_grid(tuple(obs), steps_per_year)
+    rng = np.random.default_rng(seed)
+    asset_paths = correlated_local_vol_paths(
+        spots0, local_vols, corr, grid, r=r, q=q, n_paths=n_paths, rng=rng
+    )
+    paths = PathSet(times=grid, spots=asset_paths)
+    return present_value(product.cashflows(paths), lambda t: exp(-r * t), n_paths)

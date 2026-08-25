@@ -2,6 +2,8 @@
 
 from datetime import date
 
+import numpy as np
+
 import pytest
 
 from spdt.data import build_snapshot
@@ -97,3 +99,46 @@ def test_ssvi_to_svi_slices_round_trip_atm(iv_points):
     assert ssvi.is_butterfly_free()  # GJ enforcement held
     for tau, svi in ssvi.to_svi_slices().items():
         assert svi.total_variance(0.0) == pytest.approx(ssvi.theta_pillars[tau], rel=1e-9)
+
+
+def test_joint_fit_survives_a_poisoned_atm_read():
+    """θ used to be *read* off a linear interpolation of the two ATM-straddling quotes and
+    frozen; one bad print there biased the whole expiry's level. The joint fit lets every
+    strike on the slice vote, so the same poison must now be outvoted."""
+    from spdt.data.curate.bs_inversion import IVPoint
+    from spdt.vol.ssvi import SSVISurface
+
+    tau = 0.5
+    expiry = date(2026, 7, 1)
+    ks = np.linspace(-0.4, 0.4, 21)
+    pts = []
+    for k in ks:
+        iv = 0.22 - 0.08 * k + 0.15 * k * k
+        if abs(k) < 0.025:  # poison exactly the quotes the old ATM interpolation used
+            iv += 0.06
+        pts.append(IVPoint(expiry, 100.0 * float(np.exp(k)), k >= 0, float(k), tau, float(iv)))
+
+    surf = SSVISurface.calibrate(pts)
+    fitted_atm = surf.implied_vol(0.0, tau)
+    # The clean smile's ATM is 0.22; the poisoned prints say 0.28. A frozen pillar sits at the
+    # poison; the joint fit must land much nearer the smile the other 19 quotes describe.
+    assert abs(fitted_atm - 0.22) < 0.02
+
+
+def test_theta_projection_restores_calendar_freeness():
+    """The joint fit is unconstrained in θ ordering; the running-max projection is what makes
+    the calendar guarantee unconditional rather than an accident of the data."""
+    from spdt.data.curate.bs_inversion import IVPoint
+    from spdt.vol.ssvi import SSVISurface
+
+    pts = []
+    # Second tenor engineered with LOWER total variance than the first (0.35²·0.6 < 0.5²·0.3).
+    for tau, expiry, vol in ((0.3, date(2026, 5, 1), 0.50), (0.6, date(2026, 8, 1), 0.35)):
+        for k in np.linspace(-0.3, 0.3, 15):
+            pts.append(
+                IVPoint(expiry, 100.0 * float(np.exp(k)), k >= 0, float(k), tau,
+                        float(vol - 0.05 * k))
+            )
+    surf = SSVISurface.calibrate(pts)
+    assert surf.is_calendar_free()
+    assert surf.is_butterfly_free()
