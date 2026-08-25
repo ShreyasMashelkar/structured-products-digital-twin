@@ -137,7 +137,7 @@ class VolSurface:
         such a slice is the honest outcome, and the surface's tenor interpolation then spans
         the gap from the liquid expiries on either side instead of inventing a smile.
         """
-        if param_model not in ("SVI", "SSVI"):
+        if param_model not in ("SVI", "SSVI", "eSSVI"):
             raise NotImplementedError(f"param_model {param_model!r} not supported")
 
         by_expiry: dict[date, list[IVPoint]] = {}
@@ -149,6 +149,14 @@ class VolSurface:
             from spdt.vol.ssvi import SSVISurface
 
             ssvi_slices = SSVISurface.calibrate(iv_points).to_svi_slices()
+        elif param_model == "eSSVI":
+            # Per-tenor skew under the Hendriks–Martini adjacency conditions: the middle
+            # ground the other two bracket. SVI fits best and guarantees nothing across
+            # tenors; SSVI guarantees everything with one global shape and pays ~55bps for
+            # it; eSSVI keeps the guarantees per-pair and lets each tenor carry its own rho.
+            from spdt.vol.essvi import ESSVISurface
+
+            ssvi_slices = ESSVISurface.calibrate(iv_points).to_svi_slices()
 
         slices: dict[date, SVIParams] = {}
         taus: dict[date, float] = {}
@@ -157,7 +165,7 @@ class VolSurface:
             if len(pts) < min_points_per_slice:
                 continue  # too few liquid quotes to identify five SVI parameters
             tau = pts[0].tau
-            if param_model == "SSVI":
+            if param_model in ("SSVI", "eSSVI"):
                 if tau not in ssvi_slices:
                     continue  # expiry with non-positive ATM variance — skip
                 slices[expiry] = ssvi_slices[tau]
