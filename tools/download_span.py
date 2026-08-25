@@ -35,15 +35,20 @@ def fetch_day(d: date) -> str:
     if out.exists() and out.stat().st_size > 0:
         return "have"
     request = urllib.request.Request(f"{ARCHIVE}/{name}", headers=UA)
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
-            data = response.read()
-    except urllib.error.HTTPError as exc:
-        return "holiday" if exc.code == 404 else f"http {exc.code}"
-    except (urllib.error.URLError, TimeoutError) as exc:
-        return f"error {exc}"
-    out.write_bytes(data)
-    return "ok"
+    for attempt in (1, 2):  # a long run WILL hit mid-stream resets; one retry, then move on
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
+                data = response.read()
+        except urllib.error.HTTPError as exc:
+            return "holiday" if exc.code == 404 else f"http {exc.code}"
+        except Exception as exc:  # noqa: BLE001 — URLError, IncompleteRead, resets: skip, not crash
+            if attempt == 2:
+                return f"error {type(exc).__name__}: {exc}"
+            time.sleep(3.0)
+            continue
+        out.write_bytes(data)  # only after a complete read — no partial files on disk
+        return "ok"
+    return "error unreachable"
 
 
 def main() -> None:
