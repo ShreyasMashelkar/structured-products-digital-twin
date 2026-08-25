@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, AutohedgeStatus, DeskHistoryRow, ResidualResult, StructureResult, VolTrackerData, XvaResult, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getAutohedge, getDeskHistory, getOptionChain, getOutcomes, getRadar, getRecommendations, getResidual, getVolTracker, setAutohedge, getSemiStatic, priceTrade, recommendHedge, solveStructure } from "./lib/api";
+import { Blotter as PaperBlotter, BrokerState, ChainRow, Decision, Desk, DeskAlert, ExplorerResult, HedgeRec, LiveQuote, OutcomeResult, PriceResult, SemiStaticResult, AutohedgeStatus, DeskHistoryRow, ResidualResult, StructureResult, VolTrackerData, XvaResult, Market, MarketMeta, Shelf, ackAlert, computeXva, executeRecommendation, explore, getAlerts, getAttribution, getBlotter, getBrokerState, getLiveQuote, getAutohedge, getDeskHistory, getOptionChain, getOutcomes, getRadar, getRecommendations, getResidual, getVolTracker, setAutohedge, getSemiStatic, priceTrade, recommendHedge, solveStructure, getMarket, getMarkets, getShelf } from "./lib/api";
 import { TYPE_ABBR, Trade, bookTrades, priceReq, productLabel } from "./lib/trades";
 import { Chip, DataTable, Kpi, Panel, SectionTitle } from "./components/ui";
 import { AreaSpark, Bars, Histogram, Lines, Surface3D, Waterfall } from "./components/charts";
@@ -2163,6 +2163,353 @@ export function BrokerView() {
         ) : (
           <p className="text-[12px] text-muted">No broker orders today.</p>
         )}
+      </Panel>
+    </div>
+  );
+}
+
+/* ======================= Markets: what each source can actually support ======================= */
+
+/** Cross-market surface comparison.
+ *
+ * The point of this view is not to draw a prettier smile — it is to make the *limit* of each
+ * data source visible. A surface plotted alone always looks authoritative; plotted next to its
+ * fit error and its longest trustworthy tenor, it tells you which products it can price. The
+ * Indian broker feed fits beautifully and spans weeks; the US chain fits slightly worse and
+ * spans years. That difference decides whether a 3-year note is priceable at all, and it is
+ * invisible on any single-market screen.
+ */
+export function Markets() {
+  const [markets, setMarkets] = useState<MarketMeta[]>([]);
+  const [symbol, setSymbol] = useState("SPX");
+  const [data, setData] = useState<Market | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    getMarkets().then((r) => setMarkets(r.markets)).catch((e) => setErr(String(e)));
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    setBusy(true);
+    setErr(null);
+    getMarket(symbol)
+      .then((m) => live && setData(m))
+      .catch((e) => live && setErr(String(e.message ?? e)))
+      .finally(() => live && setBusy(false));
+    return () => {
+      live = false;
+    };
+  }, [symbol]);
+
+  const fit = data?.fit;
+  // A tenor the surface cannot reach is the binding constraint on the product shelf, so it is
+  // shown as a headline number rather than buried in the per-slice table.
+  const reachTone: "" | "pos" | "neg" = !fit
+    ? ""
+    : fit.max_reliable_tenor >= 2
+      ? "pos"
+      : fit.max_reliable_tenor >= 0.75
+        ? ""
+        : "neg";
+  const smileRows = (data?.smile ?? []).flatMap((s) =>
+    s.points.map((p) => ({ k: p.k, [`T${s.tau.toFixed(2)}`]: p.vol * 100 })),
+  );
+  const merged = Object.values(
+    smileRows.reduce<Record<string, any>>((acc, row) => {
+      const key = String(row.k);
+      acc[key] = { ...(acc[key] ?? { k: row.k }), ...row };
+      return acc;
+    }, {}),
+  ).sort((a: any, b: any) => a.k - b.k);
+  const tenorKeys = (data?.smile ?? []).map((s) => `T${s.tau.toFixed(2)}`);
+
+  return (
+    <div className="space-y-4">
+      <Panel>
+        <SectionTitle>Market</SectionTitle>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {markets.map((m) => (
+            <button
+              key={m.symbol}
+              onClick={() => setSymbol(m.symbol)}
+              className={cn(
+                "rounded-lg border px-3 py-1.5 text-small transition-colors",
+                m.symbol === symbol
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-border text-muted hover:border-accent/50",
+              )}
+            >
+              <span className="font-semibold">{m.symbol}</span>
+              <span className="ml-2 opacity-70">{m.region} · {m.source}</span>
+            </button>
+          ))}
+        </div>
+        {busy && <div className="mt-3 text-small text-muted">calibrating {symbol}…</div>}
+        {err && <div className="mt-3 text-small text-down">{err}</div>}
+      </Panel>
+
+      {data && fit && (
+        <>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <Kpi label="Spot" value={fmt(data.spot, 2)} sub={`${data.meta.ccy ?? ""} · ${data.as_of}`} />
+            <Kpi
+              label="Longest reliable tenor"
+              value={`${data.fit.max_reliable_tenor.toFixed(2)}y`}
+              sub="slice still inside 200bps"
+              tone={reachTone}
+            />
+            <Kpi
+              label="Surface fit"
+              value={fit.rmse_bps == null ? "—" : `${fit.rmse_bps.toFixed(0)} bps`}
+              sub={`${fit.slices} slices · ${fit.reliable_pct ?? 0}% usable`}
+            />
+            <Kpi
+              label="Quotes used"
+              value={compact(data.calibrated_on)}
+              sub={`of ${compact(data.contracts)} listed`}
+            />
+          </div>
+
+          <Panel>
+            <SectionTitle>Chain quality</SectionTitle>
+            <div className="mt-3 grid grid-cols-2 gap-4 text-small lg:grid-cols-4">
+              <div>
+                <div className="text-muted">Traded today</div>
+                <div className="tnum mt-1 text-[15px]">
+                  {compact(data.traded_today)}{" "}
+                  <span className="text-muted">({Math.round((100 * data.traded_today) / Math.max(data.contracts, 1))}%)</span>
+                </div>
+              </div>
+              <div>
+                <div className="text-muted">With open interest</div>
+                <div className="tnum mt-1 text-[15px]">
+                  {compact(data.with_open_interest)}{" "}
+                  <span className="text-muted">({Math.round((100 * data.with_open_interest) / Math.max(data.contracts, 1))}%)</span>
+                </div>
+              </div>
+              <div>
+                <div className="text-muted">Two-sided quotes</div>
+                <div className="tnum mt-1 text-[15px]">
+                  {compact(data.two_sided)}{" "}
+                  <span className="text-muted">({Math.round((100 * data.two_sided) / Math.max(data.contracts, 1))}%)</span>
+                </div>
+              </div>
+              <div>
+                <div className="text-muted">Arbitrage-free</div>
+                <div className={cn("mt-1 text-[15px]", fit.arbitrage_clean ? "text-up" : "text-down")}>
+                  {fit.arbitrage_clean ? "clean" : "violations"}
+                </div>
+              </div>
+            </div>
+            <p className="mt-3 text-small text-muted">
+              A settlement price is published for every listed contract whether or not it traded.
+              The gap between “listed” and “traded / with open interest” is how much of this chain
+              is an exchange computation rather than a market — those quotes are screened out
+              before calibration.
+            </p>
+          </Panel>
+
+          <Panel>
+            <SectionTitle>Smile by tenor</SectionTitle>
+            {merged.length > 0 ? (
+              <Lines
+                data={merged}
+                x="k"
+                xLabel="log-moneyness  k = log(K/F)"
+                yLabel="implied vol (%)"
+                height={320}
+                series={tenorKeys.slice(0, 6).map((key, i) => ({
+                  key,
+                  name: `${key.slice(1)}y`,
+                  color: [C.accent, C.teal, C.violet, C.up, C.down, C.muted][i] ?? C.accent,
+                }))}
+              />
+            ) : (
+              <div className="mt-3 text-small text-muted">no calibrated slices</div>
+            )}
+          </Panel>
+
+          <Panel>
+            <SectionTitle>Per-slice fit</SectionTitle>
+            <DataTable
+              rows={fit.per_slice.map((s) => ({
+                tenor: `${s.tau.toFixed(3)}y`,
+                quotes: s.n,
+                rmse: `${s.rmse_bps.toFixed(0)} bps`,
+                usable: s.rmse_bps <= 200 ? "yes" : "no",
+              }))}
+              cols={[
+                { key: "tenor", label: "Tenor" },
+                { key: "quotes", label: "Quotes", align: "right" },
+                { key: "rmse", label: "Fit RMSE", align: "right" },
+                { key: "usable", label: "Priceable" },
+              ]}
+            />
+          </Panel>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ======================= US shelf: real filed notes and the issuer's own price ======================= */
+
+/** Products actually issued in the US market, from SEC 424B2 pricing supplements.
+ *
+ * Every other screen in this app shows the model's own output. This one shows somebody else's:
+ * since 2012 an issuer must disclose the note's *initial estimated value* — its own model price
+ * — alongside the price it sold at. That single number is the only external benchmark the
+ * project has, and the gap between it and the offering price is the dealer's fee and funding
+ * load, typically 2–5 points of par.
+ *
+ * The shelf's *shape* matters as much as any individual note: most issuance is worst-of on
+ * single stocks, which is short correlation — an input with no liquid market. That is why
+ * correlation, not volatility, is the binding unknown when pricing this shelf.
+ */
+export function UsShelf() {
+  const [shelf, setShelf] = useState<Shelf | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [kind, setKind] = useState<"all" | "worst-of" | "basket" | "single">("all");
+
+  useEffect(() => {
+    getShelf()
+      .then(setShelf)
+      .catch((e) => setErr(String(e.message ?? e)));
+  }, []);
+
+  if (err) {
+    return (
+      <Panel>
+        <SectionTitle>US shelf</SectionTitle>
+        <div className="mt-3 text-small text-down">{err}</div>
+        <p className="mt-2 text-small text-muted">
+          Needs network access to SEC EDGAR, and SPDT_SEC_USER_AGENT set to a contact string —
+          SEC asks automated clients to identify themselves.
+        </p>
+      </Panel>
+    );
+  }
+  if (!shelf) {
+    return (
+      <Panel>
+        <SectionTitle>US shelf</SectionTitle>
+        <div className="mt-3 text-small text-muted">
+          reading SEC filings… the first fetch walks the full-text index and one document per hit,
+          rate-limited to SEC's ceiling, so it takes a few minutes.
+        </div>
+      </Panel>
+    );
+  }
+
+  const s = shelf.stats;
+  const rows = shelf.filings.filter((f) => kind === "all" || f.kind === kind);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Kpi label="Notes on the shelf" value={String(s.n ?? 0)} sub="benchmarkable, deduped" />
+        <Kpi
+          label="Worst-of"
+          value={`${s.worst_of_pct ?? 0}%`}
+          sub={`${s.worst_of ?? 0} of ${s.n ?? 0} — short correlation`}
+        />
+        <Kpi
+          label="Mean disclosed load"
+          value={s.mean_load_pct == null ? "—" : `${s.mean_load_pct.toFixed(2)} pts`}
+          sub="offering price − issuer's own value"
+        />
+        <Kpi label="Mean tenor" value={`${(s.mean_tenor ?? 0).toFixed(2)}y`} sub="to maturity" />
+      </div>
+
+      <Panel>
+        <SectionTitle>Why this is a benchmark</SectionTitle>
+        <p className="mt-2 text-small text-muted">
+          The <span className="text-ink">estimated value</span> is the issuer's own model price,
+          published in the prospectus. A model that reproduces the <em>offering</em> price of 100
+          has not validated — it has absorbed the dealer's fee into a risk-neutral value. Matching
+          the estimated value is the real test, and the gap between the two columns is the fee and
+          funding load being charged.
+        </p>
+        <p className="mt-2 text-small text-muted">
+          Most of these are worst-of, whose value turns on correlation between the legs. Each leg's
+          volatility is observable from listed options; correlation is not — so it is the one free
+          parameter, and it can be solved for from the disclosed value. That is what
+          <span className="text-ink"> spdt.validation.run_correlation</span> does.
+        </p>
+      </Panel>
+
+      <Panel>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <SectionTitle>Filed notes</SectionTitle>
+          <div className="flex gap-1.5">
+            {(["all", "worst-of", "basket", "single"] as const).map((k) => (
+              <button
+                key={k}
+                onClick={() => setKind(k)}
+                className={cn(
+                  "rounded-lg border px-2.5 py-1 text-small transition-colors",
+                  k === kind
+                    ? "border-accent bg-accent/10 text-accent"
+                    : "border-border text-muted hover:border-accent/50",
+                )}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="mt-3">
+          <DataTable
+            rows={rows.map((f) => ({
+              issuer: f.issuer.replace(/\s+(INC|LLC|CORP).*$/i, ""),
+              kind: f.kind,
+              names: f.underlyings.slice(0, 3).join("/") || "—",
+              tenor: f.tenor_years == null ? "—" : `${f.tenor_years.toFixed(2)}y`,
+              barrier: f.knock_in == null ? "—" : `${Math.round(f.knock_in * 100)}%`,
+              coupon: `${f.coupon_per_period_pct.toFixed(2)}%`,
+              ev: f.estimated_value_pct == null ? "—" : f.estimated_value_pct.toFixed(2),
+              load: f.disclosed_load_pct == null ? "—" : f.disclosed_load_pct.toFixed(2),
+              _url: f.url,
+            }))}
+            cols={[
+              { key: "issuer", label: "Issuer" },
+              { key: "kind", label: "Type" },
+              { key: "names", label: "Underlyings" },
+              { key: "tenor", label: "Tenor", align: "right" },
+              { key: "barrier", label: "Knock-in", align: "right" },
+              { key: "coupon", label: "Coupon / period", align: "right" },
+              { key: "ev", label: "Issuer value", align: "right" },
+              { key: "load", label: "Load (pts)", align: "right" },
+              {
+                key: "_url",
+                label: "Filing",
+                fmt: (r: any) => (
+                  <a className="text-accent hover:underline" href={r._url} target="_blank" rel="noreferrer">
+                    SEC
+                  </a>
+                ),
+              },
+            ]}
+          />
+        </div>
+      </Panel>
+
+      <Panel>
+        <SectionTitle>Most-referenced underlyings</SectionTitle>
+        <p className="mt-2 text-small text-muted">
+          These drive the single-name entries in the Markets tab — the list is read off the shelf
+          rather than chosen, so it follows whatever dealers are currently issuing against.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          {shelf.names.map((n) => (
+            <span key={n.symbol} className="rounded-lg border border-border px-2.5 py-1 text-small">
+              <span className="font-semibold text-ink">{n.symbol}</span>
+              <span className="ml-1.5 text-muted">{n.notes}</span>
+            </span>
+          ))}
+        </div>
       </Panel>
     </div>
   );

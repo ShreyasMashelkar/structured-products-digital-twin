@@ -588,3 +588,101 @@ export async function getAttribution(marks: Record<string, number>): Promise<{
   if (!r.ok) throw new Error("attribution failed");
   return r.json();
 }
+
+// --- cross-market surfaces -------------------------------------------------------------
+// Separate from the desk payload on purpose: /api/desk builds a whole book in one market,
+// while these describe the *market* — so a US chain can be inspected without fabricating a
+// US book to hang it on.
+
+export interface MarketMeta {
+  symbol: string;
+  label: string;
+  region: string;
+  source: string;
+  ccy: string;
+}
+
+export interface MarketSlice {
+  tau: number;
+  expiry: string;
+  atm_vol: number;
+  points: { k: number; vol: number }[];
+}
+
+export interface MarketFit {
+  rmse_bps: number | null;
+  slices: number;
+  reliable_pct: number | null;
+  /** Longest tenor whose slice fits inside the 200bps tolerance — the tenor a note can reach. */
+  max_reliable_tenor: number;
+  arbitrage_clean: boolean;
+  per_slice: { tau: number; n: number; rmse_bps: number }[];
+}
+
+export interface Market {
+  underlying: string;
+  source: string;
+  meta: Partial<MarketMeta>;
+  as_of: string;
+  spot: number;
+  contracts: number;
+  traded_today: number;
+  with_open_interest: number;
+  two_sided: number;
+  calibrated_on: number;
+  smile: MarketSlice[];
+  fit: MarketFit;
+}
+
+export async function getMarkets(): Promise<{ markets: MarketMeta[] }> {
+  return (await apiFetch("/api/markets")).json();
+}
+
+export async function getMarket(underlying: string): Promise<Market> {
+  return (await apiFetch(`/api/market?underlying=${encodeURIComponent(underlying)}`)).json();
+}
+
+// --- US structured-note shelf ------------------------------------------------------------
+
+export interface Filing {
+  issuer: string;
+  url: string;
+  filed: string;
+  pricing_date: string | null;
+  maturity: string | null;
+  tenor_years: number | null;
+  /** worst-of pays on the least performer (short correlation); a basket pays on the average
+   *  (long diversification). Opposite risk, so they are never merged. */
+  kind: "worst-of" | "basket" | "single";
+  underlyings: string[];
+  coupon_per_period_pct: number;
+  periods_per_year: number | null;
+  coupon_barrier: number | null;
+  knock_in: number | null;
+  call_level: number | null;
+  memory: boolean;
+  /** The issuer's own model value, in points of par — the external benchmark. */
+  estimated_value_pct: number | null;
+  /** Offering price minus estimated value: the dealer's fee and funding load. */
+  disclosed_load_pct: number | null;
+  staleness_days: number | null;
+}
+
+export interface Shelf {
+  filings: Filing[];
+  cached: boolean;
+  stats: {
+    n?: number;
+    worst_of?: number;
+    worst_of_pct?: number;
+    basket?: number;
+    single?: number;
+    mean_load_pct?: number | null;
+    mean_tenor?: number;
+  };
+  names: { symbol: string; notes: number }[];
+}
+
+export async function getShelf(): Promise<Shelf> {
+  return (await apiFetch("/api/us/filings")).json();
+}

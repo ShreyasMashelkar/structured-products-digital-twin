@@ -157,7 +157,7 @@ def _liquid_iv_points(raw, ois_curve: Curve):
     return [p for e in keep for p in liquid[e]]
 
 
-def _fetch_raw(as_of: date, *, live: bool, source: str = "bhavcopy"):
+def _fetch_raw(as_of: date, *, live: bool, source: str = "bhavcopy", underlying: str = "NIFTY"):
     """Raw market data for ``as_of`` — live NSE/FBIL when ``live``, else the synthetic source.
 
     ``source`` selects the live option-chain engine (``"bhavcopy"`` EOD or ``"dhan"`` intraday);
@@ -168,18 +168,18 @@ def _fetch_raw(as_of: date, *, live: bool, source: str = "bhavcopy"):
     if live:
         from spdt.data import fetch_live_raw
 
-        base = fetch_live_raw(as_of, "NIFTY", source=source)
+        base = fetch_live_raw(as_of, underlying, source=source)
         if bloomberg_rates:
             return BloombergRatesOverlaySource(
                 _FrozenRawSource(base), bloomberg_rates
-            ).fetch(base.date, "NIFTY")
+            ).fetch(base.date, underlying)
         return base
 
     base_source = SyntheticSource()
     if source in {"bloomberg-rates", "bloomberg_rates"} or bloomberg_rates:
         path = bloomberg_rates or "/Users/shreyas/Downloads/Data for Intern's usage.xlsx"
-        return BloombergRatesOverlaySource(base_source, path).fetch(as_of, "NIFTY")
-    return base_source.fetch(as_of, "NIFTY")
+        return BloombergRatesOverlaySource(base_source, path).fetch(as_of, underlying)
+    return base_source.fetch(as_of, underlying)
 
 
 def _uses_bloomberg_funding(live: bool, source: str) -> bool:  # noqa: ARG001
@@ -548,6 +548,7 @@ def build_desk_data(
     as_of: date | None = None,
     live: bool = False,
     source: str = "bhavcopy",
+    underlying: str = "NIFTY",
     face_per_note: float | None = None,
 ) -> DeskData:
     """Compute the full desk snapshot for the dashboard.
@@ -561,19 +562,21 @@ def build_desk_data(
     # L1/L2 — market and arbitrage-free surface. Live EOD chains carry noisy deep-wing settlement
     # quotes that inject static arbitrage, so the live path filters to a liquid moneyness band with
     # sane IV bounds; synthetic data is clean by construction and needs no filter.
-    raw = _fetch_raw(as_of, live=live, source=source)
+    raw = _fetch_raw(as_of, live=live, source=source, underlying=underlying)
     snap = build_snapshot(raw)
     # Live: liquid quotes + the arbitrage-free SSVI calibration (real settlement data needs both).
     # Synthetic: per-slice SVI on the clean generated smile (already arb-free, keeps the fast path).
     if live:
-        surface = VolSurface.calibrate(_liquid_iv_points(raw, snap.ois_curve), "NIFTY", param_model="SSVI")
+        surface = VolSurface.calibrate(
+            _liquid_iv_points(raw, snap.ois_curve), underlying, param_model="SSVI"
+        )
     else:
-        surface = VolSurface.calibrate(invert_chain(raw, snap.ois_curve), "NIFTY")
-    spot = snap.spots["NIFTY"]
+        surface = VolSurface.calibrate(invert_chain(raw, snap.ois_curve), underlying)
+    spot = snap.spots[underlying]
     longest = max(surface.taus, key=lambda e: surface.taus[e])
     atm_vol = surface.implied_vol_kt(0.0, surface.taus[longest])
     r = snap.ois_curve.zero_rate(longest)
-    q = snap.dividends["NIFTY"].continuous_yield
+    q = snap.dividends[underlying].continuous_yield
 
     # Today's market (D-1) and a small overnight move (D) for the P&L explain.
     model0 = BlackScholes(spot=spot, r=r, q=q, sigma=atm_vol)
@@ -751,7 +754,7 @@ def build_desk_data(
             "fx_vol": "available in workbook; not used for NIFTY equity vol"
             if _uses_bloomberg_funding(live, source) else None,
         },
-        "underlying": "NIFTY",
+        "underlying": underlying,
         "note_face": note_face,
         "spot": spot,
         "model": {"r": r, "q": q, "atm_vol": atm_vol},

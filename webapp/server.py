@@ -2022,6 +2022,308 @@ def acknowledge_alert(alert_id: str) -> dict:
 # the SPA and its relative /api/* calls are same-origin (no CORS, no token needed). Mounted
 # LAST so every /api/* route declared above still takes precedence over this catch-all. A no-op
 # in dev, where there is no dist and Vite serves the UI on :5173 and proxies /api back here.
+
+# --- cross-market surface: any underlying, any source -------------------------------------
+# Deliberately separate from /api/desk. That endpoint builds a whole *book* — positions, NAV,
+# P&L explain — denominated in one market; pointing it at SPX would fabricate an SPX book rather
+# than show US data. This serves the market itself (spot, chain, calibrated surface with its fit
+# quality) for any underlying, and touches none of the desk's cache, replay or history paths.
+
+_MARKET_TTL = float(os.environ.get("SPDT_MARKET_TTL", "900"))
+_market_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+_market_lock = threading.Lock()
+
+# Which engine serves which market. CBOE is delayed and current-only, so it can never answer a
+# historical as_of; the Indian source is whatever the deployment is configured for.
+#
+# The fixed entries are the *index* underlyings. Single names are deliberately NOT enumerated
+# here: which single stocks matter is not a matter of taste, it is whatever the US shelf is
+# currently issuing against. Roughly two thirds of that shelf is worst-of on single stocks, and
+# each leg needs its own vol before the note can be priced or its implied correlation backed
+# out — so the single-name list is derived from the filings themselves (see ``_market_index``),
+# with these as the fallback when EDGAR has not been fetched yet.
+_INDEX_MARKETS: dict[str, dict[str, str]] = {
+    "NIFTY": {"label": "NIFTY 50", "region": "India", "source": _SOURCE, "ccy": "INR"},
+    "SPX": {"label": "S&P 500", "region": "US", "source": "cboe", "ccy": "USD"},
+    "SPY": {"label": "SPDR S&P 500 ETF", "region": "US", "source": "cboe", "ccy": "USD"},
+    "NDX": {"label": "Nasdaq 100", "region": "US", "source": "cboe", "ccy": "USD"},
+}
+_FALLBACK_NAMES = ("TSLA", "NVDA", "AAPL")
+
+
+def _market_index() -> dict[str, dict[str, str]]:
+    """Index markets plus the single names the current US shelf actually references.
+
+    Reading the names off the shelf rather than hardcoding a guess means the selector tracks
+    what is being issued: if dealers rotate from the AI complex into something else, the
+    underlyings follow without a code change, and the list is evidence rather than opinion.
+    """
+    out = dict(_INDEX_MARKETS)
+    shelf: list[str] = []
+    if _filings_cache:  # only if the shelf has already been fetched — never block on EDGAR here
+        shelf = [n["symbol"] for n in _shelf_stats(_filings_cache[1]).get("names", [])]
+    for symbol in (shelf or _FALLBACK_NAMES)[:8]:
+        if symbol not in out:
+            out[symbol] = {
+                "label": symbol, "region": "US", "source": "cboe", "ccy": "USD",
+                "why": "referenced by the current US note shelf" if shelf else "example single name",
+            }
+    return out
+
+
+@app.get("/api/markets")
+def markets() -> dict:
+    """The underlyings this deployment can serve, and which engine serves each."""
+    return {"markets": [{"symbol": k, **v} for k, v in _market_index().items()]}
+
+
+def _spread_expiries(points: list, as_of, *, max_expiries: int = 12, min_strikes: int = 8) -> list:
+    """Keep populated expiries spread across the whole term structure, not just the nearest ones.
+
+    The desk's own selector takes the *nearest* six expiries, which is right for a NIFTY book
+    whose risk sits in the front months. Applied to SPX it is exactly wrong: with 55 listed
+    expiries the nearest six span 17 days, discarding the five-year coverage that is the entire
+    reason for using US data. Sampling evenly in tenor keeps the long end, which is what a
+    three-year note needs to be priceable.
+    """
+    from spdt.core.types import year_fraction as _yf
+
+    by_expiry: dict = {}
+    for p in points:
+        if _yf(as_of, p.expiry) >= 10.0 / 365.0:  # same-day expiries are numerically unstable
+            by_expiry.setdefault(p.expiry, []).append(p)
+    populated = sorted(e for e, v in by_expiry.items() if len(v) >= min_strikes)
+    if not populated:
+        return []
+    if len(populated) <= max_expiries:
+        keep = populated
+    else:
+        step = (len(populated) - 1) / (max_expiries - 1)
+        keep = [populated[round(i * step)] for i in range(max_expiries)]
+    return [p for e in keep for p in by_expiry[e]]
+
+
+def _build_market(underlying: str, source: str) -> dict:
+    """Fetch, invert and calibrate one market, and report the fit honestly.
+
+    ``fit`` is the point of this endpoint as much as the surface is: it carries the per-slice
+    RMSE and the share of slices good enough to price against, so the UI can show *how much the
+    surface is worth trusting* rather than drawing a smooth sheet over quotes that never traded.
+    """
+    from datetime import date as _date
+
+    from spdt.data import build_snapshot
+    from spdt.data.curate import invert_chain
+    from spdt.data.live import fetch_live_raw
+    from spdt.vol.surface import VolSurface
+
+    raw = fetch_live_raw(_date.today(), underlying, source=source)
+    snap = build_snapshot(raw)
+
+    has_liquidity = any(
+        q.contracts_traded > 0.0 or q.open_interest > 0.0 for q in raw.option_chain
+    )
+    inverted = invert_chain(
+        raw, snap.ois_curve,
+        moneyness_band=1.0, iv_bounds=(0.03, 3.0), otm_only=True,
+        min_contracts=1.0 if has_liquidity else None,
+        min_open_interest=1.0 if has_liquidity else None,
+    )
+    points = _spread_expiries(inverted, raw.date)
+    surface = VolSurface.calibrate(points, underlying, min_points_per_slice=8)
+    fit = surface.fit_status
+
+    ordered = sorted(surface.slices, key=lambda e: surface.taus[e])
+    smile = [
+        {
+            "tau": round(surface.taus[e], 4),
+            "expiry": e.isoformat(),
+            "atm_vol": round(surface.implied_vol_kt(0.0, surface.taus[e]), 4),
+            "points": [
+                {"k": round(k, 3), "vol": round(surface.implied_vol_kt(k, surface.taus[e]), 4)}
+                for k in (-0.30, -0.20, -0.10, 0.0, 0.10, 0.20, 0.30)
+            ],
+        }
+        for e in ordered
+    ]
+    reliable = [s for s in (fit.slices if fit else ()) if s.rmse_bps <= 200.0]
+
+    return {
+        "underlying": underlying,
+        "source": source,
+        "meta": _market_index().get(underlying, {}),
+        "as_of": raw.date.isoformat(),
+        "spot": round(raw.spot, 4),
+        "contracts": len(raw.option_chain),
+        "traded_today": sum(1 for q in raw.option_chain if q.contracts_traded > 0),
+        "with_open_interest": sum(1 for q in raw.option_chain if q.open_interest > 0),
+        "two_sided": sum(1 for q in raw.option_chain if q.bid is not None and q.ask is not None),
+        "calibrated_on": fit.n_points if fit else len(points),
+        "smile": smile,
+        "fit": {
+            "rmse_bps": round(fit.rmse_bps, 1) if fit and fit.n_points else None,
+            "slices": len(surface.slices),
+            "reliable_pct": round(100.0 * fit.reliable_fraction(200.0), 0) if fit else None,
+            "max_reliable_tenor": round(max((s.tau for s in reliable), default=0.0), 3),
+            "arbitrage_clean": surface.arb_status.is_clean,
+            "per_slice": [
+                {"tau": round(s.tau, 4), "n": s.n_points, "rmse_bps": round(s.rmse_bps, 1)}
+                for s in (fit.slices if fit else ())
+            ],
+        },
+    }
+
+
+@app.get("/api/market")
+def market(underlying: str = "NIFTY", source: str | None = None) -> dict:
+    """Spot, chain statistics and the calibrated surface for one underlying."""
+    underlying = underlying.upper()
+    index = _market_index()
+    if underlying not in index:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown market {underlying!r}; see /api/markets",
+        )
+    source = source or index[underlying]["source"]
+    key = (underlying, source)
+    now = time.time()
+    with _market_lock:
+        hit = _market_cache.get(key)
+        if hit and (now - hit[0]) < _MARKET_TTL:
+            return hit[1]
+    try:
+        payload = _build_market(underlying, source)
+    except Exception as exc:  # noqa: BLE001 - surface the reason rather than a bare 500
+        raise HTTPException(
+            status_code=502, detail=f"{underlying} via {source}: {type(exc).__name__}: {exc}"
+        ) from exc
+    with _market_lock:
+        _market_cache[key] = (now, payload)
+    return payload
+
+
+
+# --- US structured-note shelf: real filed products and the issuer's own valuation ----------
+# SEC 424B2 pricing supplements carry the complete terms *and* the issuer's disclosed initial
+# estimated value. That value is the only external price benchmark in the project: everything
+# else here is the model checked against itself.
+
+_FILINGS_TTL = float(os.environ.get("SPDT_FILINGS_TTL", "21600"))  # 6h; the shelf moves daily
+_filings_cache: tuple[float, list[dict]] | None = None
+_filings_lock = threading.Lock()
+
+
+def _filing_rows(days: int, limit: int) -> list[dict]:
+    from datetime import date as _date, timedelta as _td
+
+    from spdt.data.ingest.edgar import fetch_filing_text, parse_filing, search_filings
+
+    today = _date.today()
+    refs = search_filings(start=today - _td(days=days), end=today, limit=limit)
+    rows: list[dict] = []
+    seen: set = set()
+    for ref in refs:
+        try:
+            f = parse_filing(fetch_filing_text(ref), issuer=ref.issuer, url=ref.url, filed=ref.filed)
+        except Exception:  # noqa: BLE001 - one unreadable document must not sink the shelf
+            continue
+        if not f.is_benchmarkable:
+            continue
+        key = (f.cusip, tuple(sorted(t for t, _ in f.starting_values)), f.estimated_value,
+               f.coupon_per_period, f.maturity_date)
+        if key in seen:  # EDGAR returns the same supplement under several hits
+            continue
+        seen.add(key)
+        names = [t for t, _ in f.starting_values] or list(f.underlyings)
+        rows.append({
+            "issuer": f.issuer.split("(")[0].strip(),
+            "url": f.url,
+            "filed": f.filed.isoformat(),
+            "pricing_date": f.pricing_date.isoformat() if f.pricing_date else None,
+            "maturity": f.maturity_date.isoformat() if f.maturity_date else None,
+            "tenor_years": round(f.tenor_years, 2) if f.tenor_years else None,
+            # Three kinds, not two. A basket note ("Linked to a Basket of Three Stocks") pays on
+            # a weighted average and is *long* diversification; a worst-of pays on the least
+            # performer and is short it. They carry opposite correlation exposure, so collapsing
+            # both into "multi-asset" — or worse, calling a basket "single" because it lacks the
+            # worst-of wording — would invert the sign of the risk being described.
+            "kind": (
+                "worst-of" if f.is_worst_of
+                else "basket" if len(names) > 1
+                else "single"
+            ),
+            "underlyings": names,
+            "coupon_per_period_pct": round(100.0 * (f.coupon_per_period or 0.0) / f.denomination, 3),
+            "periods_per_year": f.periods_per_year,
+            "coupon_barrier": f.coupon_barrier,
+            "knock_in": f.knock_in,
+            "call_level": f.call_level,
+            "memory": f.memory,
+            # The number that makes this an external benchmark rather than a term-sheet viewer.
+            "estimated_value_pct": round(f.estimated_value_pct, 2) if f.estimated_value_pct else None,
+            "disclosed_load_pct": round(f.disclosed_load_pct, 2) if f.disclosed_load_pct else None,
+            "staleness_days": (today - f.pricing_date).days if f.pricing_date else None,
+        })
+    return rows
+
+
+@app.get("/api/us/filings")
+def us_filings(days: int = 120, limit: int = 300) -> dict:
+    """Recently priced US structured notes, with the terms and the issuer's own valuation.
+
+    Cached hard: each call is a full-text search plus one document fetch per hit, rate-limited
+    to stay inside SEC's published ceiling, so an uncached request takes minutes rather than
+    seconds.
+    """
+    global _filings_cache
+    now = time.time()
+    with _filings_lock:
+        if _filings_cache and (now - _filings_cache[0]) < _FILINGS_TTL:
+            rows = _filings_cache[1]
+            return {"filings": rows, "cached": True, **_shelf_stats(rows)}
+    try:
+        rows = _filing_rows(days, limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"EDGAR: {type(exc).__name__}: {exc}") from exc
+    with _filings_lock:
+        _filings_cache = (now, rows)
+    return {"filings": rows, "cached": False, **_shelf_stats(rows)}
+
+
+def _shelf_stats(rows: list[dict]) -> dict:
+    """Shape of the shelf — which is the finding, not a summary statistic.
+
+    Two thirds of current US issuance is worst-of on single stocks, which is why correlation
+    (an input with no liquid market) is the binding unknown for benchmarking this shelf at all.
+    """
+    if not rows:
+        return {"stats": {}, "names": []}
+    worst_of = sum(1 for r in rows if r["kind"] == "worst-of")
+    baskets = sum(1 for r in rows if r["kind"] == "basket")
+    loads = [r["disclosed_load_pct"] for r in rows if r["disclosed_load_pct"] is not None]
+    names: dict[str, int] = {}
+    for r in rows:
+        for t in r["underlyings"]:
+            names[t] = names.get(t, 0) + 1
+    return {
+        "stats": {
+            "n": len(rows),
+            "worst_of": worst_of,
+            "worst_of_pct": round(100.0 * worst_of / len(rows)),
+            "basket": baskets,
+            "single": len(rows) - worst_of - baskets,
+            "mean_load_pct": round(sum(loads) / len(loads), 2) if loads else None,
+            "mean_tenor": round(
+                sum(r["tenor_years"] or 0 for r in rows) / len(rows), 2
+            ),
+        },
+        "names": [
+            {"symbol": k, "notes": v}
+            for k, v in sorted(names.items(), key=lambda kv: -kv[1])[:20]
+        ],
+    }
+
+
 from pathlib import Path  # noqa: E402
 
 from fastapi.staticfiles import StaticFiles  # noqa: E402
