@@ -88,3 +88,30 @@ def test_stochastic_rates_price_the_note_close_to_flat_for_short_tenors():
     hw = price_mc_hw(_note(), BlackScholesHW(spot=100.0, r0=0.042, q=0.013, sigma=0.2,
                                              sigma_r=0.010, rho=-0.15), n_paths=100_000).price
     assert abs(hw - flat) < 0.10
+
+
+def test_a_sloped_initial_curve_is_reprice_by_the_deflators():
+    """With a real curve the deflators must reprice *that curve's* bonds, tenor by tenor —
+    the whole point of taking a curve instead of a level."""
+    curve = ((0.25, 0.038), (1.0, 0.040), (2.0, 0.042), (3.0, 0.0435), (5.0, 0.044))
+    m = BlackScholesHW(spot=100.0, r0=0.042, q=0.013, sigma=0.2, sigma_r=0.012,
+                       zero_curve=curve)
+    grid = np.linspace(0.0, 3.0, 25)
+    z = np.random.default_rng(4).standard_normal((100_000, 24))
+    _, deflators = m.simulate_joint(grid, z, seed=4)
+    for t_check in (1.0, 2.0, 3.0):
+        i = int(np.argmin(np.abs(grid - t_check)))
+        zero = float(np.interp(t_check, [p[0] for p in curve], [p[1] for p in curve]))
+        assert deflators[:, i].mean() == pytest.approx(np.exp(-zero * t_check), rel=2e-3)
+
+
+def test_curve_slope_actually_reaches_the_note_price():
+    """An upward-sloping curve discounts the far coupons harder than its short rate suggests;
+    if the price under the curve equals the price under flat-at-2y, the curve is decorative."""
+    flat = price_mc_hw(_note(), BlackScholesHW(spot=100.0, r0=0.042, q=0.013, sigma=0.2,
+                                               sigma_r=0.010), n_paths=60_000).price
+    steep = ((0.25, 0.030), (1.0, 0.036), (2.0, 0.042), (3.0, 0.050), (5.0, 0.055))
+    curved = price_mc_hw(_note(), BlackScholesHW(spot=100.0, r0=0.042, q=0.013, sigma=0.2,
+                                                 sigma_r=0.010, zero_curve=steep),
+                         n_paths=60_000).price
+    assert curved != pytest.approx(flat, abs=0.02)

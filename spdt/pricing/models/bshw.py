@@ -49,6 +49,37 @@ class BlackScholesHW:
     a: float = 0.10  # rate mean reversion
     sigma_r: float = 0.010  # rate vol (absolute, e.g. 0.010 = 100bp)
     rho: float = -0.15  # equity-rate correlation; equities-up/rates-down is the usual sign
+    # Optional initial zero curve as ((tenor_years, cc_zero_rate), ...) — a tuple of pairs so
+    # the dataclass stays frozen/hashable. When set, f(0,t) is read off this curve instead of
+    # the flat r0, so the funding leg of a multi-year note discounts on the curve's actual
+    # slope (~60bp between 1y and 5y on the current Treasury curve) rather than one level.
+    zero_curve: tuple[tuple[float, float], ...] | None = None
+
+    def _zero(self, t: float) -> float:
+        """Continuously-compounded zero rate at ``t`` — flat r0 when no curve is supplied."""
+        if not self.zero_curve:
+            return self.r0
+        xs = [p[0] for p in self.zero_curve]
+        ys = [p[1] for p in self.zero_curve]
+        return float(np.interp(t, xs, ys))
+
+    def _forward(self, times: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Instantaneous forward f(0,t) on the grid: d/dt[z(t)·t], piecewise on the pillars.
+
+        With linear interpolation in the zero rate, z(t)·t is piecewise quadratic and its
+        derivative piecewise linear — smooth enough that the trapezoidal r-integration in
+        ``simulate_joint`` reprices the curve's bonds to a few 1e-4, which the bond test pins.
+        """
+        if not self.zero_curve:
+            return np.full(times.shape, self.r0)
+        # Floor t BEFORE building both sides of the difference: flooring only the lower side
+        # makes the two coincide at t = 0, which silently returns f(0) = 0 and shorts the
+        # r-integral by f(0)·dt/2 — a ~25bp df error the bond-repricing test caught.
+        eps = 1e-5
+        t_eff = np.maximum(np.asarray(times, dtype=float), eps)
+        zt = np.array([self._zero(t) * t for t in t_eff])
+        zt_up = np.array([self._zero(t + eps) * (t + eps) for t in t_eff])
+        return (zt_up - zt) / eps
 
     def simulate_joint(
         self, times: NDArray[np.float64], normals: NDArray[np.float64], *, seed: int = 0
@@ -79,7 +110,7 @@ class BlackScholesHW:
             x[:, i + 1] = decay * x[:, i] + std * z_r[:, i]
 
         b = (1.0 - np.exp(-self.a * times)) / self.a
-        phi = self.r0 + 0.5 * self.sigma_r**2 * b * b
+        phi = self._forward(times) + 0.5 * self.sigma_r**2 * b * b
         r = x + phi[np.newaxis, :]
 
         # Equity: log-Euler with the *pathwise* short rate in the drift. Unlike plain GBM there
