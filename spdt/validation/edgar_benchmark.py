@@ -411,7 +411,11 @@ class BenchmarkSummary:
 def summarise(results: list[BenchmarkResult]) -> BenchmarkSummary:
     """Aggregate benchmark results. A single note's gap is not evidence; this is."""
     if not results:
-        return BenchmarkSummary(0, *([float("nan")] * 6), 0)
+        nan = float("nan")
+        return BenchmarkSummary(
+            n=0, mean_gap=nan, median_gap=nan, std_gap=nan,
+            min_gap=nan, max_gap=nan, mean_disclosed_load=nan, n_trustworthy=0,
+        )
     gaps = np.array([r.gap for r in results], dtype=float)
     loads = np.array(
         [r.filing.disclosed_load_pct or float("nan") for r in results], dtype=float

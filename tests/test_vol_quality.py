@@ -7,7 +7,6 @@ claims. The deliberately-bad fit below is arbitrage-free and still wrong by vol 
 """
 
 from datetime import date, timedelta
-from math import sqrt
 
 import numpy as np
 import pytest

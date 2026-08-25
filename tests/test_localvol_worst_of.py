@@ -113,7 +113,7 @@ def test_a_steeper_put_wing_lowers_the_worst_of_value():
 def test_surface_total_variance_accepts_arrays():
     """Dupire evaluates the surface on a vector of spots at every step; scalar-only silently
     forces local-vol pricing back onto a flat vol."""
-    from datetime import date, timedelta
+    from datetime import date
 
     from spdt.data.curate.bs_inversion import IVPoint
     from spdt.vol.surface import VolSurface

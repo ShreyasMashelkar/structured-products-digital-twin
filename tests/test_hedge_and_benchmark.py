@@ -1,6 +1,5 @@
 """Hedge backtest and EDGAR benchmark (network-free)."""
 
-from datetime import date
 
 import numpy as np
 import pytest

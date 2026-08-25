@@ -98,7 +98,14 @@ def lr_autocallable_delta(
 def _autocallable_discounted_payoff(
     note: "Autocallable", spots: np.ndarray, obs: np.ndarray, r: float
 ) -> np.ndarray:
-    """Per-path discounted cashflow total of a struck autocallable on observation-date spots."""
+    """Per-path discounted cashflow total of a struck autocallable on observation-date spots.
+
+    The note must be struck: an unstruck one floats its reference with the path start, which
+    makes the payoff scale-invariant and the delta structurally zero. The caller checks this,
+    but the check is repeated here because this helper is reachable on its own.
+    """
+    if note.initial_fixing is None:
+        raise ValueError("payoff needs a struck note (set initial_fixing)")
     k0 = float(note.initial_fixing)
     n = note.notional
     n_paths = spots.shape[0]

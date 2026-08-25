@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +29,12 @@ from spdt.validation.greeks_crosscheck import (
     cross_check_vanilla,
 )
 from spdt.validation.realized import RealizedComparison, compare_priced_vs_realized, summarise
-from spdt.validation.sensitivity import barrier_sensitivity, coupon_sensitivity
+from spdt.validation.sensitivity import (
+    Perturbation,
+    SensitivityTable,
+    barrier_sensitivity,
+    coupon_sensitivity,
+)
 
 OUTPUT = Path("docs/MODEL_VALIDATION_REPORT.md")
 
@@ -63,8 +67,8 @@ class RegimeResult:
     market: AsOfMarket
     atm_vol: float | None = None
     max_reliable_tenor: float = 0.0
-    sensitivity: object | None = None
-    barrier: object | None = None
+    sensitivity: SensitivityTable | None = None
+    barrier: Perturbation | None = None
     realized: RealizedComparison | None = None
     note: str = ""
 
@@ -81,6 +85,7 @@ def collect(markets: list[AsOfMarket]) -> list[RegimeResult]:
     for market in markets:
         result = RegimeResult(market=market)
         fit = market.surface.fit_status
+        assert fit is not None, "freshly calibrated surfaces always carry a fit report"
         reliable = [
             s for s in fit.slices if s.rmse_bps <= RELIABILITY_TOLERANCE_BPS
         ]
@@ -134,6 +139,7 @@ def _calibration_section(results: list[RegimeResult]) -> list[str]:
     ]
     for r in results:
         m, f = r.market, r.market.surface.fit_status
+        assert f is not None, "freshly calibrated surfaces always carry a fit report"
         lines.append(
             f"| {m.label} | {m.as_of} | {m.spot:,.0f} | {f.n_points} | {len(m.surface.slices)} "
             f"| {f.rmse_bps:.0f} | {f.reliable_fraction(RELIABILITY_TOLERANCE_BPS):.0%} "
@@ -269,7 +275,7 @@ def _realized_section(results: list[RegimeResult]) -> list[str]:
     lines = [
         "## 4. Priced versus realised",
         "",
-        f"Each note is priced using **only** data published on or before its issue date, then",
+        "Each note is priced using **only** data published on or before its issue date, then",
         "evaluated on the index path that actually happened. This is the only leg that leaves",
         "the model's own world.",
         "",
@@ -284,7 +290,7 @@ def _realized_section(results: list[RegimeResult]) -> list[str]:
             )
             continue
         called = (
-            f"yes (obs {c.outcome.autocall_period + 1})" if c.outcome.autocalled else "no"
+            f"yes (obs {(c.outcome.autocall_period or 0) + 1})" if c.outcome.autocalled else "no"
         )
         lines.append(
             f"| {c.label} | {c.issue_date} | {c.initial_fixing:,.0f} "
@@ -318,7 +324,6 @@ def _realized_section(results: list[RegimeResult]) -> list[str]:
 
 def build_report(results: list[RegimeResult]) -> str:
     """Assemble the Markdown artefact."""
-    today = max((r.market.as_of for r in results), default=date.today())
     lines = [
         "# SPDT Model Validation Report",
         "",

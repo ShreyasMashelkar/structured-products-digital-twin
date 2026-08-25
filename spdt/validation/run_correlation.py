@@ -89,6 +89,9 @@ def main() -> None:
         seen.add(key)
 
         tau = f.tenor_years
+        ev = f.estimated_value_pct
+        if tau is None or ev is None:
+            continue  # is_benchmarkable implies both, but bind them so the guarantee is local
         vols = {}
         for ticker, _ in f.starting_values:
             v = atm_vol(ticker, tau)
@@ -107,20 +110,23 @@ def main() -> None:
             f, vols=vols, rho=-0.20, r=R, q=Q, funding_spread=FUNDING, n_paths=40_000
         )
         direction = "" if rho is not None else (
-            f" model>{floor_pv:.1f} vs EV {f.estimated_value_pct:.1f} (too HIGH at every rho)"
-            if floor_pv > f.estimated_value_pct else " (too LOW at every rho)"
+            f" model>{floor_pv:.1f} vs EV {ev:.1f} (too HIGH at every rho)"
+            if floor_pv > ev else " (too LOW at every rho)"
         )
         stale = (TODAY - f.pricing_date).days if f.pricing_date else None
         rows.append((f, vols, rho, stale, floor_pv))
         names = "/".join(vols)
         rho_s = f"{rho:.3f}" if rho is not None else "unreachable"
         print(
-            f"  {names:24s} T={tau:.2f}y ki={f.knock_in:.2f} cpn/q={100*f.coupon_per_period/f.denomination:5.2f}% "
-            f"EV={f.estimated_value_pct:6.2f} vols={[round(v,2) for v in vols.values()]} rho={rho_s} stale={stale}d{direction}"
+            f"  {names:24s} T={tau:.2f}y ki={f.knock_in or 0:.2f} cpn/q={100 * (f.coupon_per_period or 0.0) / f.denomination:5.2f}% "
+            f"EV={ev:6.2f} vols={[round(v,2) for v in vols.values()]} rho={rho_s} stale={stale}d{direction}"
         )
 
     solved = [(f, v, rho, s) for f, v, rho, s, _ in rows if rho is not None]
-    too_high = sum(1 for f, _, rho, _, fl in rows if rho is None and fl > f.estimated_value_pct)
+    too_high = sum(
+        1 for f, _, rho, _, fl in rows
+        if rho is None and f.estimated_value_pct is not None and fl > f.estimated_value_pct
+    )
     print(f"\nworst-of notes priced: {len(rows)}   correlation solved: {len(solved)}")
     print(f"unreachable: {len(rows)-len(solved)}  of which model too HIGH at every rho: {too_high}")
     if solved:

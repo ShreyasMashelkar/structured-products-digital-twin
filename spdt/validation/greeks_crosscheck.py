@@ -20,15 +20,13 @@ product, not necessarily an error.
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass
 from math import exp, log, sqrt
 
-import numpy as np
 from scipy.stats import norm
 
 from spdt.greeks.aad import autocallable_aad_greeks, bs_vanilla_aad, call_aad_greeks
-from spdt.greeks.bump import GreekSet, bump_greeks
+from spdt.greeks.bump import bump_greeks
 from spdt.greeks.pathwise import pathwise_vanilla
 from spdt.pricing.models.bs import BlackScholes
 from spdt.products.catalog import Autocallable

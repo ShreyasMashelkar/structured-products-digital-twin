@@ -150,7 +150,6 @@ def backtest_hedge_on_path(
     missed = 0.0
     coupons_paid = 0.0
     autocalled = False
-    autocall_index: int | None = None
     obs = list(note.observation_times)
     last_obs = obs[-1] if obs else 0.0
 
@@ -177,7 +176,7 @@ def backtest_hedge_on_path(
         # Any observation falling in (t, t+dt] settles at the next path point.
         nxt = float(path_times[i + 1])
         spot_next = float(path_spots[i + 1])
-        for j, obs_t in enumerate(obs):
+        for obs_t in obs:
             if t < obs_t <= nxt + 1e-9:
                 if spot_next >= note.coupon_barrier * s0:
                     pay = (missed + 1.0) * note.coupon_rate * note.notional if note.memory else (
@@ -190,7 +189,6 @@ def backtest_hedge_on_path(
                     missed += 1.0
                 if obs_t < last_obs - 1e-9 and spot_next >= note.autocall_level * s0:
                     autocalled = True
-                    autocall_index = j
                     break
 
     # Unwind the hedge and settle the note.
@@ -243,9 +241,10 @@ def rebalance_frequency_sweep(
     """
     out: dict[int, HedgeBacktestResult] = {}
     for k in every:
-        idx = np.arange(0, len(path_times), k)
-        if idx[-1] != len(path_times) - 1:
-            idx = np.append(idx, len(path_times) - 1)
+        # The final path point must always be sampled — dropping it would settle the note
+        # before its last observation. unique() keeps the index sorted and deduplicated when
+        # the stride happens to land exactly on the end.
+        idx = np.unique(np.concatenate([np.arange(0, len(path_times), k), [len(path_times) - 1]]))
         out[k] = backtest_hedge_on_path(
             note, path_times[idx], path_spots[idx],
             vol=vol, r=r, q=q, spread_bps=spread_bps, n_paths=n_paths, seed=seed,
