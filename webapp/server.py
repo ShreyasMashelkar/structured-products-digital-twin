@@ -324,6 +324,9 @@ class StructureRequest(BaseModel):
     # client's target and solves the barrier that funds it — the question income buyers
     # actually ask, which is "how much downside must I carry for 15%?"
     solve_for: str = "coupon"
+    # Surrender the upside tail rather than cap it — unlocks the shark-fin family, which is
+    # otherwise not offered at all.
+    accept_knockout: bool = False
 
 
 class StructureCandidate(BaseModel):
@@ -408,9 +411,13 @@ def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_path
         note = BarrierReverseConvertible(
             100.0, obs, p["coupon_rate"], p["strike"], p["knock_in"], initial_fixing=spot,
         )
-    elif prop.product_type == "capital_protected":
+    elif prop.product_type in ("capital_protected", "shark_fin"):
         note = CapitalProtectedNote(
             100.0, prop.maturity, p["protection"], p["participation"], p["strike"], p.get("cap"),
+            initial_fixing=spot,
+            knock_out=p.get("knock_out"),
+            rebate=p.get("rebate", 0.0),
+            ko_monitoring=tuple(p.get("ko_monitoring", ()) or ()),
         )
     else:
         raise ValueError(f"unknown product_type {prop.product_type!r}")
@@ -479,6 +486,7 @@ def structure(req: StructureRequest) -> StructureResponse:
         objective=_OBJECTIVES.get(req.objective, ClientObjective.INCOME),
         prefer_basket=req.prefer_basket,
         autocall_level=req.autocall_level,
+        accept_knockout=req.accept_knockout,
         solve_for=SolveFor.KNOCK_IN if req.solve_for == "knock_in" else SolveFor.COUPON,
     )
     ranked = recommend(brief)

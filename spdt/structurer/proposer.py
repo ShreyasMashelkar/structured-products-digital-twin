@@ -45,6 +45,12 @@ class ClientBrief:
     # at 1.0; it is a real term a desk negotiates (a step-down autocall below 100% calls the
     # note away sooner, which sells upside and buys coupon).
     autocall_level: float = 1.0
+    # Surrender the tail instead of capping it. A cap keeps the gain and stops it growing; a
+    # knock-out removes it entirely for having been too right — a worse deal per unit of level,
+    # and therefore one that buys far more participation at par. This is the only *limited
+    # upside* concession the catalogue can express directly; the income products can only
+    # approximate it through the autocall level.
+    accept_knockout: bool = False
     # Which term to solve to par. COUPON is the default ("what does this pay?"); KNOCK_IN
     # answers the question income clients actually ask — "I want this coupon, how much
     # downside must I carry?" — by holding the coupon at the target and solving the barrier.
@@ -177,6 +183,37 @@ def _capital_protected_proposal(brief: ClientBrief) -> Proposal:
     )
 
 
+def _shark_fin_proposal(brief: ClientBrief) -> Proposal:
+    """A capital-protected note whose upside vanishes if the index rises too far.
+
+    Same floor as the plain protected note, but the participation is bought by selling the tail
+    above the knock-out rather than by capping it. The knock-out is placed symmetrically with
+    the downside the client already stated — someone who will stomach a 25% fall is quoted a 25%
+    ceiling — so the concession is legible rather than an arbitrary number, and a rebate pays
+    something back for having been right enough to lose the upside.
+    """
+    protection = round(min(1.0, 0.90 + (0.30 - min(brief.max_downside, 0.30))), 4)
+    knock_out = round(1.0 + brief.max_downside, 10)
+    return Proposal(
+        product_type="shark_fin",
+        observation_times=_observation_schedule(brief),
+        maturity=brief.maturity_years,
+        params={
+            "protection": protection,
+            "participation": 1.0,
+            "strike": 1.0,
+            "cap": None,
+            "knock_out": knock_out,
+            "rebate": 0.02,
+            "ko_monitoring": _observation_schedule(brief),
+        },
+        solve_for=SolveFor.PARTICIPATION,
+        free_param_key="participation",
+        # Wide: with the tail sold and vol rich, participation well above 2x is reachable.
+        bracket=(0.0, 8.0),
+    )
+
+
 def _worst_of_proposal(brief: ClientBrief) -> Proposal:
     knock_in = round(1.0 - brief.max_downside, 10)
     return Proposal(
@@ -221,8 +258,10 @@ def recommend(brief: ClientBrief) -> list[RankedProposal]:
         ClientObjective.YIELD_ENHANCED: {
             "worst_of": 0.92, "brc": 0.76, "autocallable": 0.70, "capital_protected": 0.12},
         ClientObjective.PROTECTION: {
-            "capital_protected": 0.95, "autocallable": 0.45, "brc": 0.30, "worst_of": 0.18},
+            "capital_protected": 0.95, "shark_fin": 0.55, "autocallable": 0.45,
+            "brc": 0.30, "worst_of": 0.18},
     }[o]
+    base.setdefault("shark_fin", 0.15)  # not an income product; only competes on protection
 
     # Tilts (small, explainable): downside tolerance and basket appetite.
     tilt = {
@@ -230,6 +269,7 @@ def recommend(brief: ClientBrief) -> list[RankedProposal]:
         "brc": (dd - 0.30) * 0.40,                # more downside sold ⇒ richer fixed coupon
         "worst_of": (dd - 0.30) * 0.40 + (0.35 if brief.prefer_basket else -0.05),
         "capital_protected": (0.30 - dd) * 0.40,  # the more protection they want, the better the fit
+        "shark_fin": (0.30 - dd) * 0.40 + 0.45,
     }
 
     rationale = {
@@ -247,6 +287,11 @@ def recommend(brief: ClientBrief) -> list[RankedProposal]:
             f"{', '.join(_DEFAULT_BASKET)}: selling the basket's dispersion (ρ≈{_DEFAULT_BASKET_RHO:.2f}) "
             f"funds a higher coupon than any single name can."
         ),
+        "shark_fin": (
+            f"Capital preservation, and willing to give up the upside above {1 + dd:.0%} rather "
+            f"than cap it → shark-fin note: the same floor, but participation is bought by "
+            f"selling that tail, with a rebate if the index knocks out."
+        ),
         "capital_protected": (
             "Capital preservation first → capital-protected note: a principal floor plus participation "
             "in the upside (the coupon is given up to buy the protection)."
@@ -259,11 +304,17 @@ def recommend(brief: ClientBrief) -> list[RankedProposal]:
         "worst_of": _worst_of_proposal,
         "capital_protected": _capital_protected_proposal,
     }
+    # The shark fin is only *offerable* once the client has said they will surrender the upside
+    # tail. Absent that it is not a low-ranked candidate, it is not a candidate: quoting a
+    # knock-out to someone who has not accepted one misrepresents the note's upside.
+    if brief.accept_knockout:
+        builders["shark_fin"] = _shark_fin_proposal
     labels = {
         "autocallable": "Phoenix autocallable",
         "brc": "Barrier reverse convertible",
         "worst_of": "Worst-of autocallable",
         "capital_protected": "Capital-protected note",
+        "shark_fin": "Shark-fin (knock-out participation) note",
     }
 
     ranked = [

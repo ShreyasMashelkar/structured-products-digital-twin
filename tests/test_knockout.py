@@ -118,3 +118,69 @@ def test_shark_fin_decomposition_declares_itself_inexact():
     assert not d.is_exact
     assert "barrier_knock_out_call" in [c.component_type for c in d.components]
     assert decompose(_cpn(cap=1.20)).is_exact  # the capped note is still exact
+
+
+# --- the shark fin as a proposable family ---------------------------------------------------
+
+
+def test_shark_fin_is_only_offered_once_the_client_accepts_the_knock_out():
+    """Its upside is conditional, so it must never outrank the plain protected note unless the
+    client has actually said they will surrender the tail."""
+    from spdt.structurer.proposer import ClientBrief, ClientObjective, recommend
+
+    def top(accept: bool) -> str:
+        brief = ClientBrief(0.10, 0.25, 1.0, 4, objective=ClientObjective.PROTECTION,
+                            accept_knockout=accept)
+        return recommend(brief)[0].proposal.product_type
+
+    assert top(False) == "capital_protected"
+    assert top(True) == "shark_fin"
+
+
+def test_shark_fin_is_not_even_a_candidate_without_consent():
+    """Not merely ranked last — absent. Quoting a knock-out to a client who has not accepted one
+    misrepresents what they get for being right."""
+    from spdt.structurer.proposer import ClientBrief, recommend
+
+    kinds = {r.proposal.product_type for r in recommend(ClientBrief(0.12, 0.30))}
+    assert "shark_fin" not in kinds
+
+
+def test_shark_fin_never_leads_for_an_income_client():
+    from spdt.structurer.proposer import ClientBrief, ClientObjective, recommend
+
+    brief = ClientBrief(0.12, 0.30, 1.0, 4, objective=ClientObjective.INCOME,
+                        accept_knockout=True)
+    assert recommend(brief)[0].proposal.product_type != "shark_fin"
+
+
+def test_the_knock_out_mirrors_the_downside_the_client_already_stated():
+    """A client who will stomach a 25% fall is quoted a 25% ceiling — the concession is
+    symmetric with their own stated risk, not a number chosen arbitrarily."""
+    from spdt.structurer.proposer import ClientBrief, _shark_fin_proposal
+
+    prop = _shark_fin_proposal(ClientBrief(0.10, 0.25, 1.0, 4, accept_knockout=True))
+    assert prop.params["knock_out"] == pytest.approx(1.25)
+    assert prop.params["rebate"] > 0.0  # something for having been right
+    assert prop.params["ko_monitoring"] == prop.observation_times
+    assert prop.free_param_key == "participation"
+
+
+def test_shark_fin_proposal_prices_and_solves():
+    """End-to-end: the proposal the recommender emits must actually be priceable."""
+    from spdt.structurer.proposer import ClientBrief, _shark_fin_proposal
+    from spdt.structurer.solver import par_target, solve_to_par
+
+    prop = _shark_fin_proposal(ClientBrief(0.10, 0.25, 1.0, 4, accept_knockout=True))
+    p = prop.params
+
+    def pv(x: float) -> float:
+        note = CapitalProtectedNote(
+            100.0, prop.maturity, p["protection"], x, p["strike"], p["cap"],
+            initial_fixing=100.0, knock_out=p["knock_out"], rebate=p["rebate"],
+            ko_monitoring=tuple(p["ko_monitoring"]),
+        )
+        return price_mc(note, MODEL, n_paths=30_000, seed=5).price
+
+    solved = solve_to_par(pv, par_target(100.0, fee=1.0), prop.bracket)
+    assert 0.0 < solved.param < prop.bracket[1]
