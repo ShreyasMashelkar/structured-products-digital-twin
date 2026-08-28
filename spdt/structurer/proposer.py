@@ -41,6 +41,14 @@ class ClientBrief:
     observations_per_year: int = 4
     objective: ClientObjective = ClientObjective.INCOME
     prefer_basket: bool = False  # willing to take a multi-name (worst-of) basket for more coupon
+    # Level at which the note redeems early, as a fraction of the initial fixing. Was hardcoded
+    # at 1.0; it is a real term a desk negotiates (a step-down autocall below 100% calls the
+    # note away sooner, which sells upside and buys coupon).
+    autocall_level: float = 1.0
+    # Which term to solve to par. COUPON is the default ("what does this pay?"); KNOCK_IN
+    # answers the question income clients actually ask — "I want this coupon, how much
+    # downside must I carry?" — by holding the coupon at the target and solving the barrier.
+    solve_for: SolveFor = SolveFor.COUPON
 
 
 # Default 3-name basket for worst-of proposals (mirrors the desk's WO-000 correlation regime).
@@ -111,20 +119,24 @@ def propose_autocallable(brief: ClientBrief, *, notional: float = 100.0) -> Term
 
 def _autocallable_proposal(brief: ClientBrief) -> Proposal:
     knock_in = round(1.0 - brief.max_downside, 10)
+    solving_barrier = brief.solve_for == SolveFor.KNOCK_IN
     return Proposal(
         product_type="autocallable",
         observation_times=_observation_schedule(brief),
         maturity=brief.maturity_years,
         params={
             "coupon_rate": brief.target_coupon / brief.observations_per_year,
-            "autocall_level": 1.0,
+            "autocall_level": brief.autocall_level,
             "coupon_barrier": knock_in,
             "knock_in": knock_in,
             "memory": True,
         },
-        solve_for=SolveFor.COUPON,
-        free_param_key="coupon_rate",
-        bracket=(0.0, 0.06),
+        solve_for=brief.solve_for,
+        free_param_key="knock_in" if solving_barrier else "coupon_rate",
+        # Barrier bracket runs deep-to-shallow: 0.30 is about as far down as a desk will place
+        # a knock-in before the note stops being an income product and becomes a leveraged
+        # short put; 0.95 is shallow enough that almost no coupon is affordable.
+        bracket=(0.30, 0.95) if solving_barrier else (0.0, 0.06),
     )
 
 
@@ -173,7 +185,7 @@ def _worst_of_proposal(brief: ClientBrief) -> Proposal:
         maturity=brief.maturity_years,
         params={
             "coupon_rate": brief.target_coupon / brief.observations_per_year,
-            "autocall_level": 1.0,
+            "autocall_level": brief.autocall_level,
             "coupon_barrier": knock_in,
             "knock_in": knock_in,
             "memory": True,

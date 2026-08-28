@@ -87,3 +87,39 @@ def test_recommender_covers_all_families_with_rationale():
     scores = [r.fit_score for r in ranked]
     assert scores == sorted(scores, reverse=True)
     assert all(r.rationale and 0.0 <= r.fit_score <= 1.0 for r in ranked)
+
+
+# --- knock-in solve and configurable autocall (the terms a desk negotiates) -----------------
+
+
+def test_brief_can_solve_the_barrier_instead_of_the_coupon():
+    """The question income clients actually ask: 'I want 15% — how much downside is that?'"""
+    from spdt.structurer.objectives import SolveFor
+    from spdt.structurer.proposer import ClientBrief, _autocallable_proposal
+
+    brief = ClientBrief(0.15, 0.30, 1.0, 4, solve_for=SolveFor.KNOCK_IN)
+    prop = _autocallable_proposal(brief)
+    assert prop.solve_for == SolveFor.KNOCK_IN
+    assert prop.free_param_key == "knock_in"
+    lo, hi = prop.bracket
+    assert 0.0 < lo < hi <= 1.0  # a barrier bracket, not a coupon one
+
+
+def test_coupon_remains_the_default_solve():
+    from spdt.structurer.objectives import SolveFor
+    from spdt.structurer.proposer import ClientBrief, _autocallable_proposal
+
+    prop = _autocallable_proposal(ClientBrief(0.12, 0.30, 1.0, 4))
+    assert prop.solve_for == SolveFor.COUPON
+    assert prop.free_param_key == "coupon_rate"
+
+
+def test_autocall_level_is_a_negotiable_term_not_a_constant():
+    """It was hardcoded at 1.0; a step-down autocall is a real concession a desk offers."""
+    from spdt.structurer.proposer import ClientBrief, _autocallable_proposal, _worst_of_proposal
+
+    brief = ClientBrief(0.12, 0.30, 1.0, 4, autocall_level=0.95)
+    assert _autocallable_proposal(brief).params["autocall_level"] == 0.95
+    assert _worst_of_proposal(brief).params["autocall_level"] == 0.95
+    # and the default is unchanged for every existing caller
+    assert _autocallable_proposal(ClientBrief(0.12, 0.30)).params["autocall_level"] == 1.0

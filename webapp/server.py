@@ -75,6 +75,7 @@ from spdt.products import (
 from spdt.reporting import terminal_scenarios
 from spdt.outcomes import OutcomeTerms, hedge_comparison, issuance_study, outcome_profile
 from spdt.stress import STANDARD_SCENARIOS
+from spdt.structurer.levers import manufacture
 from spdt.structurer import (
     ClientBrief,
     ClientObjective,
@@ -316,6 +317,13 @@ class StructureRequest(BaseModel):
     objective: str = "income"  # income | yield_enhanced | protection
     prefer_basket: bool = False
     product: str | None = None  # override: solve this family instead of the recommended one
+    # Early-redemption level as a fraction of the initial fixing. Below 1.0 is a step-down
+    # autocall: the note calls away on a smaller rally, selling upside to buy coupon.
+    autocall_level: float = Field(default=1.0, gt=0.5, le=1.5)
+    # "coupon" (default) solves what the structure pays; "knock_in" holds the coupon at the
+    # client's target and solves the barrier that funds it — the question income buyers
+    # actually ask, which is "how much downside must I carry for 15%?"
+    solve_for: str = "coupon"
 
 
 class StructureCandidate(BaseModel):
@@ -330,7 +338,7 @@ class StructureResponse(BaseModel):
     product_type: str
     label: str
     rationale: str
-    solve_for: str  # "coupon" | "participation"
+    solve_for: str  # "coupon" | "participation" | "knock_in"
     solved_annual_coupon: float | None  # for coupon notes
     solved_participation: float | None  # for capital-protected notes
     solved_display: str | None  # human headline, e.g. "6.21% p.a." or "1.85× upside"
@@ -344,6 +352,11 @@ class StructureResponse(BaseModel):
     book_maturity: float
     x_label: str  # pv_curve x-axis label
     pv_curve: list[dict]  # [{"x": ..., "pv": ...}]
+    # The gap between what the client asked for and what the market affords, plus the single
+    # term concessions that would close it. Empty when the ask is already met.
+    coupon_shortfall: float | None
+    manufacture_summary: str | None
+    levers: list[dict]
     alternatives: list[StructureCandidate]  # every family, ranked best-first (incl. the active one)
 
 
@@ -362,6 +375,12 @@ def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_path
     """Model PV of a proposal with its single free parameter set to ``free``."""
     p = dict(prop.params)
     p[prop.free_param_key] = free
+    # The coupon trigger is set equal to the knock-in by the proposer, so when the barrier is
+    # the free parameter it must travel with it. Left unlinked, the solve would deepen the
+    # capital barrier while the coupon kept paying off the original level — pricing a note
+    # nobody offered.
+    if prop.free_param_key == "knock_in" and "coupon_barrier" in p:
+        p["coupon_barrier"] = free
     obs = prop.observation_times
     if prop.product_type == "worst_of":
         names = tuple(p["underlyings"])
@@ -398,6 +417,26 @@ def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_path
     return price_mc(note, model, n_paths=n_paths, seed=7).price
 
 
+_LEVER_PATHS = 12_000  # nested solve: cheap paths, the negotiation dominates the precision
+
+
+def _solve_coupon_only(prop: Proposal, spot: float, m: dict, fee: float) -> float | None:
+    """Per-period coupon that prices ``prop`` to par, or None if unreachable in its bracket.
+
+    Fewer paths than the headline solve: the lever sweep runs a nested root-find, so this is
+    called tens of times per request and precision here moves the *concession* by far less
+    than the negotiation itself will.
+    """
+    try:
+        return solve_to_par(
+            lambda c: _price_proposal(prop, c, spot, m, n_paths=_LEVER_PATHS),
+            par_target(100.0, fee=fee),
+            prop.bracket,
+        ).param
+    except ValueError:
+        return None
+
+
 def _solve_and_curve(
     prop: Proposal, spot: float, m: dict, obs_per_year: int, fee: float
 ) -> tuple[float | None, float | None, list[dict], float]:
@@ -410,7 +449,8 @@ def _solve_and_curve(
         return _price_proposal(prop, x, spot, m, n_paths=n_paths)
 
     lo, hi = prop.bracket
-    sweep_lo = hi / _CURVE_POINTS if is_coupon else 0.25
+    is_barrier = prop.solve_for == SolveFor.KNOCK_IN
+    sweep_lo = lo if is_barrier else (hi / _CURVE_POINTS if is_coupon else 0.25)
     curve = []
     for i in range(_CURVE_POINTS):
         x = sweep_lo + (hi - sweep_lo) * i / (_CURVE_POINTS - 1)
@@ -438,6 +478,8 @@ def structure(req: StructureRequest) -> StructureResponse:
         req.target_coupon, req.max_downside, req.maturity, req.obs_per_year,
         objective=_OBJECTIVES.get(req.objective, ClientObjective.INCOME),
         prefer_basket=req.prefer_basket,
+        autocall_level=req.autocall_level,
+        solve_for=SolveFor.KNOCK_IN if req.solve_for == "knock_in" else SolveFor.COUPON,
     )
     ranked = recommend(brief)
     active = next((r for r in ranked if r.proposal.product_type == req.product), ranked[0])
@@ -453,6 +495,10 @@ def structure(req: StructureRequest) -> StructureResponse:
         display: str | None = None
     elif is_coupon:
         display = f"{free * req.obs_per_year * 100:.2f}% p.a."
+    elif prop.solve_for == SolveFor.KNOCK_IN:
+        # The barrier solve answers "how much downside buys this coupon?", so it is reported as
+        # the downside the client carries, not as a bare level — the number they must react to.
+        display = f"barrier {free:.0%} ({1 - free:.0%} downside) for {req.target_coupon:.2%} p.a."
     else:
         display = f"{free:.2f}× upside"
     # Achievable = the client's coupon ask is met (income), or it priced to par at all (protection).
@@ -461,8 +507,40 @@ def structure(req: StructureRequest) -> StructureResponse:
     )
 
     book_params = dict(prop.params)
-    if free is not None:
-        book_params[prop.free_param_key] = free
+    # On a failed solve the free parameter is blanked rather than left at its indicative seed.
+    # Leaving the seed makes an unsolved structure look like a solved one — book_params is what
+    # stages the trade, so a stale 0.70 barrier beside achievable=False is a trade waiting to be
+    # booked on terms nobody priced.
+    book_params[prop.free_param_key] = free
+
+    # When the market affords less than the client asked for, the answer is not "no" — it is
+    # "which term will you move?". Only run for coupon solves: a barrier solve has already
+    # answered the question, and a capital-protected note has no coupon to manufacture.
+    shortfall: float | None = None
+    manufacture_summary: str | None = None
+    lever_rows: list[dict] = []
+    if is_coupon and solved_annual is not None:
+        shortfall = round(req.target_coupon - solved_annual, 6)
+        if shortfall > 1e-9:
+            report = manufacture(
+                prop,
+                lambda pr: _solve_coupon_only(pr, spot, m, req.fee),
+                req.target_coupon,
+                req.obs_per_year,
+            )
+            manufacture_summary = report.summary()
+            lever_rows = [
+                {
+                    "key": v.key, "label": v.label, "gives_up": v.gives_up,
+                    "current": round(v.current, 4),
+                    "required": round(v.required, 4) if v.required is not None else None,
+                    "reachable": v.reachable,
+                    "coupon_at_limit": (
+                        round(v.coupon_at_limit, 6) if v.coupon_at_limit is not None else None
+                    ),
+                }
+                for v in report.levers
+            ]
 
     return StructureResponse(
         product_type=prop.product_type,
@@ -480,8 +558,15 @@ def structure(req: StructureRequest) -> StructureResponse:
         book_params=book_params,
         book_observation_times=list(prop.observation_times),
         book_maturity=prop.maturity,
-        x_label="annual coupon (%)" if is_coupon else "participation (×)",
+        x_label=(
+        "annual coupon (%)" if is_coupon
+        else "knock-in barrier (fraction of spot)" if prop.solve_for == SolveFor.KNOCK_IN
+        else "participation (×)"
+    ),
         pv_curve=curve,
+        coupon_shortfall=shortfall,
+        manufacture_summary=manufacture_summary,
+        levers=lever_rows,
         alternatives=[
             StructureCandidate(
                 product_type=r.proposal.product_type, label=r.label,
