@@ -603,6 +603,18 @@ def build_desk_data(
     longest = max(trusted or list(surface.taus), key=lambda e: surface.taus[e])
     atm_vol = surface.implied_vol_kt(0.0, surface.taus[longest])
     atm_vol_tau = surface.taus[longest]
+    # The whole trusted ATM term structure, not just its endpoint. Pricing every note off a
+    # single scalar gave a 3-month and a 1.5-year note the same vol; on an upward-sloping
+    # curve that systematically underprices the long-dated notes a structured desk sells.
+    # Lists rather than tuples: the payload is JSON round-tripped through DeskData.save/load,
+    # and a tuple comes back a list, so emitting tuples makes the payload unequal to itself.
+    atm_term = [
+        [tau, vol]
+        for tau, vol in sorted(
+            (round(surface.taus[e], 6), round(surface.implied_vol_kt(0.0, surface.taus[e]), 6))
+            for e in (trusted or list(surface.taus))
+        )
+    ]
     r = snap.ois_curve.zero_rate(longest)
     q = snap.dividends[underlying].continuous_yield
 
@@ -792,6 +804,7 @@ def build_desk_data(
             # extrapolation, and the desk should say so rather than imply the surface reaches.
             "atm_vol_tau": atm_vol_tau,
             "atm_vol_reliable": vol_reliable,
+            "atm_term": atm_term,
         },
         "market_move": {"spot_bp": 80, "vol_pt": 0.3, "horizon_days": 1},
         "nav": book.total_pv + wo_pv,

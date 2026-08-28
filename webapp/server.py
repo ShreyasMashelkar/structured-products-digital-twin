@@ -64,6 +64,7 @@ from spdt.data.curate.bs_inversion import bs_price
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
 from spdt.pricing import BlackScholes, price_mc, price_worst_of
+from spdt.pricing.models.bs_term import BlackScholesTermVol
 from spdt.products import (
     Autocallable,
     BarrierReverseConvertible,
@@ -388,6 +389,20 @@ _DEFAULT_SOLVE_PATHS = 12_000
 _CURVE_POINTS = 12
 
 
+def _term_vol_model(spot: float, m: dict) -> BlackScholes | BlackScholesTermVol:
+    """The desk's equity model: term-structure Black-Scholes when the surface has a curve.
+
+    Falls back to the flat-vol model on a one-pillar surface, where the two coincide anyway,
+    so callers never have to branch.
+    """
+    pillars = tuple(
+        (float(t), float(v)) for t, v in (m.get("atm_term") or ()) if t > 0.0 and v > 0.0
+    )
+    if len(pillars) < 2:
+        return BlackScholes(spot=spot, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    return BlackScholesTermVol(spot=spot, r=m["r"], q=m["q"], pillars=pillars)
+
+
 def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_paths: int) -> float:
     """Model PV of a proposal with its single free parameter set to ``free``."""
     p = dict(prop.params)
@@ -414,8 +429,9 @@ def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_path
         return price_worst_of(
             wo, spots0, vols, corr, r=m["r"], q=m["q"], n_paths=n_paths, seed=7
         ).price
-    # single-underlying notes price under Black–Scholes on the desk's ATM vol
-    model = BlackScholes(spot=spot, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    # Single-underlying notes price on the desk's ATM *term structure* where one is
+    # available, falling back to a flat vol only when the surface offers a single pillar.
+    model = _term_vol_model(spot, m)
     if prop.product_type == "autocallable":
         note: Product = Autocallable(
             100.0, obs, p["coupon_rate"], p["autocall_level"], p["coupon_barrier"],
