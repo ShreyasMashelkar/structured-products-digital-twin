@@ -247,3 +247,26 @@ def test_stale_desk_serves_immediately_and_revalidates_in_background(client, mon
     # and once rebuilt, subsequent calls serve the fresh payload
     monkeypatch.setattr(server, "_DESK_TTL", 3600.0)
     assert server._desk().get("marker") == "rebuilt"
+
+
+def test_structure_flags_a_note_that_outlives_its_volatility_data(client):
+    """A 1.5y note quoted off a 60-day surface slice looked identical in the response to one
+    quoted off a 2-year slice. Extrapolation is sometimes unavoidable; being silent about it
+    is not."""
+    r = client.post(
+        "/api/structure",
+        json={"target_coupon": 0.18, "max_downside": 0.2, "maturity": 1.5, "obs_per_year": 4},
+    )
+    assert r.status_code == 200
+    b = r.json()
+    assert "vol_extrapolated" in b and "vol_tau" in b
+    if b["vol_tau"] is not None and b["vol_extrapolated"]:
+        assert b["data_warning"] and "extrapolating" in b["data_warning"]
+    # A note comfortably inside the trusted tenor must not be flagged.
+    short = client.post(
+        "/api/structure",
+        json={"target_coupon": 0.10, "max_downside": 0.2, "maturity": 0.25, "obs_per_year": 4},
+    ).json()
+    if short["vol_tau"] is not None and short["vol_tau"] >= 0.30:
+        assert not short["vol_extrapolated"]
+        assert short["data_warning"] is None

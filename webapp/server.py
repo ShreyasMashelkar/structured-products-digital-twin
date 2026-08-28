@@ -360,6 +360,14 @@ class StructureResponse(BaseModel):
     coupon_shortfall: float | None
     manufacture_summary: str | None
     levers: list[dict]
+    # Whether the note outlives the vol data behind it. The desk reads its pricing vol at the
+    # longest expiry whose fit it trusts; a note maturing past that is priced on the surface's
+    # extrapolation, not on quotes. That is not necessarily wrong, but it must never be silent
+    # — a 1.5y note quoted off a 60-day slice looks identical in the response to one quoted off
+    # a 2-year slice, and only this field distinguishes them.
+    vol_tau: float | None
+    vol_extrapolated: bool
+    data_warning: str | None
     alternatives: list[StructureCandidate]  # every family, ranked best-first (incl. the active one)
 
 
@@ -369,6 +377,12 @@ _OBJECTIVES = {
     "protection": ClientObjective.PROTECTION,
 }
 # n_paths kept modest so the live solve stays responsive; worst-of pays for 3 correlated assets.
+# Log-moneyness half-width representing the region a live chain actually quotes; the
+# default Durrleman grid runs to +/-1.5, which for a 2-week slice is pure extrapolation.
+_ARB_DATA_K = 0.35
+# A note may run a little past the last trusted expiry without the price being extrapolation
+# in any meaningful sense; beyond this it is.
+_VOL_TAU_SLACK = 0.10
 _SOLVE_PATHS = {"worst_of": 6_000}
 _DEFAULT_SOLVE_PATHS = 12_000
 _CURVE_POINTS = 12
@@ -550,6 +564,22 @@ def structure(req: StructureRequest) -> StructureResponse:
                 for v in report.levers
             ]
 
+    vol_tau = m.get("atm_vol_tau")
+    extrapolated = vol_tau is not None and prop.maturity > vol_tau * (1.0 + _VOL_TAU_SLACK)
+    warning = None
+    if extrapolated and vol_tau:
+        warning = (
+            f"This note matures in {prop.maturity:.2f}y, but the volatility surface is only "
+            f"trusted out to {vol_tau:.2f}y ({vol_tau * 365:.0f} days) on today's quotes. The "
+            f"price beyond that is the surface extrapolating, not the market speaking — treat "
+            f"it as indicative and re-solve when longer-dated quotes are available."
+        )
+    elif not m.get("atm_vol_reliable", True):
+        warning = (
+            "No expiry cleared the calibration tolerance today; the pricing volatility is taken "
+            "from the longest slice available and is unsupported by a reliable fit."
+        )
+
     return StructureResponse(
         product_type=prop.product_type,
         label=active.label,
@@ -575,6 +605,9 @@ def structure(req: StructureRequest) -> StructureResponse:
         coupon_shortfall=shortfall,
         manufacture_summary=manufacture_summary,
         levers=lever_rows,
+        vol_tau=round(vol_tau, 4) if vol_tau is not None else None,
+        vol_extrapolated=extrapolated,
+        data_warning=warning,
         alternatives=[
             StructureCandidate(
                 product_type=r.proposal.product_type, label=r.label,
@@ -2208,6 +2241,8 @@ def _build_market(underlying: str, source: str) -> dict:
     from spdt.data import build_snapshot
     from spdt.data.curate import invert_chain
     from spdt.data.live import fetch_live_raw
+    from spdt.dashboard.desk_data import _LIVE_MAX_RELATIVE_SPREAD
+    from spdt.vol.arbitrage import check_butterfly
     from spdt.vol.surface import VolSurface
 
     raw = fetch_live_raw(_date.today(), underlying, source=source)
@@ -2221,9 +2256,20 @@ def _build_market(underlying: str, source: str) -> dict:
         moneyness_band=1.0, iv_bounds=(0.03, 3.0), otm_only=True,
         min_contracts=1.0 if has_liquidity else None,
         min_open_interest=1.0 if has_liquidity else None,
+        # Same substitution the desk makes: where a feed publishes no volume, a two-sided
+        # touchline with a sane spread is the only liquidity evidence there is.
+        require_two_sided=not has_liquidity,
+        max_relative_spread=None if has_liquidity else _LIVE_MAX_RELATIVE_SPREAD,
     )
     points = _spread_expiries(inverted, raw.date)
-    surface = VolSurface.calibrate(points, underlying, min_points_per_slice=8)
+    # SSVI, matching the desk. Independent per-slice SVI fits are unconstrained across strikes
+    # and tenors and guarantee nothing: this panel was reporting butterfly and calendar
+    # violations for a surface the desk never prices on, while the desk's own SSVI surface was
+    # clean. A diagnostic that describes a different surface from the one in use is worse than
+    # no diagnostic.
+    surface = VolSurface.calibrate(
+        points, underlying, param_model="SSVI", min_points_per_slice=8
+    )
     fit = surface.fit_status
 
     ordered = sorted(surface.slices, key=lambda e: surface.taus[e])
@@ -2259,6 +2305,27 @@ def _build_market(underlying: str, source: str) -> dict:
             "reliable_pct": round(100.0 * fit.reliable_fraction(200.0), 0) if fit else None,
             "max_reliable_tenor": round(max((s.tau for s in reliable), default=0.0), 3),
             "arbitrage_clean": surface.arb_status.is_clean,
+            # Which condition fails matters: a butterfly breach is a bad *slice* (negative
+            # density, so a call spread prices negative), a calendar breach is a bad *pair*
+            # of slices (total variance falling with maturity). They have different fixes.
+            "butterfly_ok": surface.arb_status.butterfly_ok,
+            "calendar_ok": surface.arb_status.calendar_ok,
+            "min_g": round(surface.arb_status.min_g, 6),
+            "per_slice_arb": [
+                {
+                    "tau": round(surface.taus[e], 4),
+                    "ok": check_butterfly(surface.slices[e])[0],
+                    "min_g": round(check_butterfly(surface.slices[e])[1], 6),
+                    "min_g_in_data": round(
+                        check_butterfly(
+                            surface.slices[e],
+                            k_grid=np.linspace(-_ARB_DATA_K, _ARB_DATA_K, 121, dtype=np.float64),
+                        )[1],
+                        6,
+                    ),
+                }
+                for e in ordered
+            ],
             "per_slice": [
                 {"tau": round(s.tau, 4), "n": s.n_points, "rmse_bps": round(s.rmse_bps, 1)}
                 for s in (fit.slices if fit else ())

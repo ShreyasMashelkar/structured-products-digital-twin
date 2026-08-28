@@ -160,3 +160,28 @@ def test_otm_only_filter_drops_the_itm_half_of_each_strike():
     assert len(otm) < len(both)
     # Every survivor is out of the money: calls above the forward, puts below it.
     assert all(p.is_call == (p.log_moneyness >= 0.0) for p in otm)
+
+
+def test_ssvi_slices_are_arbitrage_free_where_independent_svi_slices_are_not():
+    """The live desk panel reported butterfly and calendar violations while the desk's own
+    surface was clean, because the two calibrated different models off the same chain.
+    Independent per-slice SVI is unconstrained across strikes and tenors and guarantees
+    nothing; SSVI is Gatheral-Jacquier constrained and calendar-free by construction."""
+    from spdt.vol.arbitrage import check_calendar
+
+    # Noisy multi-tenor points of the kind a real chain produces.
+    rng = np.random.default_rng(11)
+    pts: list[IVPoint] = []
+    for tau, atm in ((0.03, 0.096), (0.16, 0.099), (0.34, 0.108), (0.84, 0.128)):
+        expiry = TODAY + timedelta(days=round(tau * 365))
+        for k in np.linspace(-0.30, 0.30, 14):
+            iv = atm - 0.22 * k + 0.55 * k**2 + float(rng.normal(0.0, 0.004))
+            pts.append(IVPoint(expiry, 24000.0 * float(np.exp(k)), k >= 0,
+                               float(k), tau, float(iv)))
+
+    ssvi = VolSurface.calibrate(pts, "NIFTY", param_model="SSVI")
+    ordered = sorted(ssvi.slices, key=lambda e: ssvi.taus[e])
+    assert ssvi.arb_status.butterfly_ok
+    assert ssvi.arb_status.calendar_ok
+    assert ssvi.arb_status.min_g >= 0.0
+    assert check_calendar([ssvi.slices[e] for e in ordered])
