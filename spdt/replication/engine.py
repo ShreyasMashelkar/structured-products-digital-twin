@@ -30,6 +30,10 @@ class ReplicationEngine:
         self, component: RiskComponent, model: Any, surface: Any = None
     ) -> tuple[HedgeInstrument, ...]:
         """Replicate a single RiskComponent."""
+        # "none" is a component that describes risk another component hedges — skipping it is
+        # the point, not a gap in the registry.
+        if component.hedge_strategy == "none":
+            return ()
         strategy = self._registry.get(component.hedge_strategy)
         if strategy is None:
             raise ValueError(

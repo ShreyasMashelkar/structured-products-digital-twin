@@ -143,6 +143,13 @@ class BarrierComponent(RiskComponent):
     is_call: bool = False
     knock_in: bool = True  # True = DI, False = DO
     monitoring: tuple[float, ...] = ()  # barrier monitoring dates
+    # Some barriers describe risk that another component already hedges. An autocallable's
+    # early-redemption level is one: it is emitted so the barrier book, hit-probability engine
+    # and pre-unwind scheduler can see it, while AutocallComponent carries the hedging. A
+    # shark-fin's knock-out is another: the participation call beside it is already a
+    # VanillaComponent. Replicating those barriers as well would hedge the same risk twice, so
+    # they are marked descriptive and the replication engine skips them.
+    descriptive_only: bool = False
 
     @property
     def component_type(self) -> str:
@@ -152,7 +159,7 @@ class BarrierComponent(RiskComponent):
 
     @property
     def hedge_strategy(self) -> str:
-        return "semi_static_replication"
+        return "none" if self.descriptive_only else "semi_static_replication"
 
     def as_product(self, reference_spot: float | None = None) -> Product | None:
         from spdt.products.primitives import DownBarrierPut

@@ -78,7 +78,34 @@ def decompose_autocallable(product: Autocallable) -> Decomposition:
         ),
     ]
 
-    # 4. Autocall triggers: on each non-terminal obs date, a digital that redeems at par
+    # 4a. The autocall as a BARRIER, not only as a redemption rule. Early redemption is an
+    #     up-and-out feature — the note terminates the first time spot closes above the level —
+    #     and modelling it solely inside the payoff kept it invisible to everything that reasons
+    #     about barriers: the book-level barrier inventory, the hit-probability heatmap, the
+    #     radar, and the pre-unwind scheduler, which exists specifically to wind a knock-out
+    #     hedge down as its hit probability rises and previously had no product feeding it.
+    #     Emitted with direction +1 (early redemption is good for the investor) and priced
+    #     nowhere — AutocallComponent below remains the economic description; this is the risk
+    #     layer's handle on the same feature.
+    if autocall_dates:
+        components.append(
+            BarrierComponent(
+                notional=product.notional,
+                expiry=maturity,
+                underlying="NIFTY",
+                direction=+1,
+                leg=Leg.FUNDING,
+                initial_fixing=product.initial_fixing,
+                strike=1.0,
+                barrier=product.autocall_level,
+                is_call=True,       # an UP barrier: breached from below
+                knock_in=False,     # and a knock-OUT: breaching ends the note
+                monitoring=autocall_dates,
+                descriptive_only=True,  # AutocallComponent below carries the hedging
+            )
+        )
+
+    # 4b. Autocall triggers: on each non-terminal obs date, a digital that redeems at par
     #    if spot ≥ autocall_level · S₀.  These are path-dependent (conditional on the note
     #    being alive), so they are descriptive, not independently priceable.
     if autocall_dates:
