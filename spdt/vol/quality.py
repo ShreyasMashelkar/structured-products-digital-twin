@@ -19,6 +19,8 @@ that the aggregate RMSE hides by averaging them against a dense, well-behaved co
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
@@ -135,7 +137,9 @@ def slice_errors_bps(
 
 
 def assess_fit(
-    iv_points: list[IVPoint], slices: dict[date, SVIParams], taus: dict[date, float]
+    iv_points: list[IVPoint],
+    slices: Mapping[date, SVIParams],
+    taus: Mapping[date, float],
 ) -> FitReport:
     """Measure how closely the calibrated ``slices`` reproduce the ``iv_points`` fitted to them.
 

@@ -373,3 +373,37 @@ def test_instrument_master_parses_lot_size():
     real = "NSEFO|61093|1|NIFTY|NIFTY26JULFUT|FUTIDX|NIFTY-FUTIDX|1|26474.5|21661.1|1801|0.1|65|1|-1|Nifty 50|2026-07-28T14:30:00|NIFTY 28JUL2026|1|1|NIFTY26JULFUT"
     (fut,) = parse_instrument_master(real)
     assert fut.lot_size == 65
+
+
+# --- term-structure coverage: the nearest N expiries are all weeklies ------------------------
+
+
+def test_expiry_selection_spans_the_curve_not_just_the_front():
+    """NIFTY lists weeklies through 5-year LEAPS. Taking the nearest four gives a surface that
+    stops at ~25 days, and every longer-dated note then prices off a front-month vol."""
+    from spdt.data.ingest.xts import select_term_spanning_expiries
+
+    as_of = date(2026, 8, 28)
+    expiries = [
+        date(2026, 9, 1), date(2026, 9, 8), date(2026, 9, 15), date(2026, 9, 22),
+        date(2026, 9, 29), date(2026, 10, 27), date(2026, 11, 23), date(2026, 12, 29),
+        date(2027, 3, 30), date(2027, 6, 29), date(2027, 12, 28), date(2028, 6, 27),
+        date(2029, 12, 24), date(2031, 6, 24),
+    ]
+    picked = select_term_spanning_expiries(expiries, as_of, 8)
+    assert len(picked) == 8
+    assert picked == sorted(picked)
+    assert picked[0] < date(2026, 9, 30)          # front is still covered
+    assert (picked[-1] - as_of).days > 365 * 3    # and so is the long end
+    # log spacing, so the front stays denser than the back
+    assert sum(1 for e in picked if (e - as_of).days <= 90) >= 3
+
+
+def test_expiry_selection_degenerate_cases():
+    from spdt.data.ingest.xts import select_term_spanning_expiries
+
+    as_of = date(2026, 8, 28)
+    three = [date(2026, 9, 8), date(2026, 10, 27), date(2027, 6, 29)]
+    assert select_term_spanning_expiries(three, as_of, 8) == three  # fewer than asked
+    assert select_term_spanning_expiries(three, as_of, 1) == three[:1]  # no spacing to compute
+    assert select_term_spanning_expiries([date(2026, 1, 1)], as_of, 4) == []  # already expired

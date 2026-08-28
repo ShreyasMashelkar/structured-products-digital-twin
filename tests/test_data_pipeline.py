@@ -118,3 +118,34 @@ def test_iv_points_parquet_round_trip(raw, tmp_path):
     assert [round(p.implied_vol, 9) for p in reloaded] == [
         round(p.implied_vol, 9) for p in points
     ]
+
+
+# --- touchline liquidity screens (for feeds with no volume or open interest) -----------
+
+
+def test_two_sided_and_spread_screens_drop_placeholder_quotes(raw):
+    """The XTS broker feed publishes no volume or open interest, so a two-sided touchline with
+    a sane spread is the only liquidity evidence it offers. Without it the live NIFTY surface
+    was fitted to minimum-tick far wings that inverted to 50%+ vol against a 9.6% ATM."""
+    from dataclasses import replace
+
+    snap = build_snapshot(raw)
+    chain = list(raw.option_chain)
+    # Give every contract a tight two-sided market, then spoil two of them.
+    priced = [
+        replace(q, bid=q.settlement_price * 0.99, ask=q.settlement_price * 1.01)
+        for q in chain
+    ]
+    priced[0] = replace(priced[0], bid=None, ask=None)          # one-sided
+    priced[1] = replace(priced[1], bid=0.05, ask=0.60)          # 169%-of-mid spread
+    screened_raw = replace(raw, option_chain=tuple(priced))
+
+    kept_all = invert_chain(screened_raw, snap.ois_curve)
+    kept = invert_chain(
+        screened_raw, snap.ois_curve, require_two_sided=True, max_relative_spread=0.60
+    )
+    assert len(kept) == len(kept_all) - 2
+
+    # And the screens are opt-in: a settlement feed with no bid/ask at all is untouched by
+    # default, or it would discard every quote it has.
+    assert len(invert_chain(raw, snap.ois_curve)) == len(raw.option_chain)

@@ -134,6 +134,8 @@ def invert_chain(
     otm_only: bool = False,
     min_contracts: float | None = None,
     min_open_interest: float | None = None,
+    require_two_sided: bool = False,
+    max_relative_spread: float | None = None,
 ) -> list[IVPoint]:
     """Invert every option settlement print in ``raw`` to an :class:`IVPoint`.
 
@@ -181,6 +183,18 @@ def invert_chain(
 
     Both default to ``None`` (no filtering), because a source that cannot supply volume reports
     it as 0.0 and would otherwise have its entire chain discarded.
+
+    Finally, for feeds that publish a touchline rather than a settlement mark — the XTS broker
+    feed, which carries **no** volume or open interest at all — liquidity has to be read off the
+    quote itself:
+
+    * ``require_two_sided`` — keep only contracts showing a real bid *and* a real ask. A
+      one-sided contract has no market: the last trade may be hours old, and on the far wings
+      it is usually a minimum-tick print.
+    * ``max_relative_spread`` — drop quotes whose bid-ask spread exceeds this fraction of the
+      mid. A deep-wing option quoted 0.05/0.60 is a 169%-of-mid spread; its "price" is a
+      placeholder, but inverted it becomes a confident-looking 50%+ implied vol that drags the
+      whole slice. This is the touchline analogue of the volume screen above.
     """
     points: list[IVPoint] = []
     for q in raw.option_chain:
@@ -191,6 +205,14 @@ def invert_chain(
             continue  # settlement mark on a contract nobody traded — not a market price
         if min_open_interest is not None and q.open_interest < min_open_interest:
             continue
+        if require_two_sided and (q.bid is None or q.ask is None or q.bid <= 0.0 or q.ask <= 0.0):
+            continue  # one-sided touchline — no market, whatever the last print says
+        if max_relative_spread is not None:
+            if q.bid is None or q.ask is None or q.bid <= 0.0 or q.ask <= 0.0:
+                continue
+            mid = 0.5 * (q.bid + q.ask)
+            if mid <= 0.0 or (q.ask - q.bid) / mid > max_relative_spread:
+                continue  # quoted so wide the "price" is a placeholder, not a market
         rate = ois_curve.zero_rate(q.expiry)
         forward = raw.spot * exp((rate - raw.dividend_yield) * tau)
         discount = ois_curve.discount_factor(q.expiry)

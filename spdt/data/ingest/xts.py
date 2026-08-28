@@ -20,9 +20,13 @@ import warnings
 from dataclasses import dataclass, replace
 from datetime import date as Date
 from datetime import datetime, timezone
+from math import log, sqrt
 
 from spdt.core.types import SourceTag, Underlying, year_fraction
-from spdt.data.curate.implied_dividend import implied_dividend_yield
+from spdt.data.curate.implied_dividend import (
+    implied_dividend_yield,
+    implied_dividend_yield_from_strip,
+)
 from spdt.data.curate.rate_bootstrap import RateInstrument, bootstrap_zero_rates
 from spdt.data.ingest import RawMarketData, RawOptionQuote
 
@@ -35,6 +39,9 @@ _INDEX_NAMES = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}  # underlying �
 # XTS timestamps count seconds since 1980-01-01 00:00 IST (verified against the live
 # AC Agarwal feed 2026-07-16), not the Unix epoch.
 XTS_EPOCH_OFFSET_S = 315_513_000  # Unix timestamp of 1980-01-01T00:00:00+05:30
+# Maturity at which ``strike_window`` is taken at face value; longer expiries widen as √τ.
+_STRIKE_WINDOW_REF_TAU = 1.0 / 12.0
+_MAX_STRIKE_WINDOW = 0.60
 
 
 @dataclass(frozen=True)
@@ -196,6 +203,39 @@ def _calibration_price(quote: Quote) -> float | None:
     return quote.ltp
 
 
+def select_term_spanning_expiries(
+    expiries: list[Date], as_of: Date, n: int
+) -> list[Date]:
+    """Pick up to ``n`` expiries spread across the term structure, not merely the nearest ``n``.
+
+    Taking the nearest N is the obvious rule and, on NIFTY, a damaging one: the four nearest
+    contracts are all weeklies inside a month, so the calibrated surface reaches ~25 days while
+    the master lists expiries out to 4.8 years. Everything longer than a month then prices off
+    the front-month ATM vol — a 1.5-year note valued on a 25-day smile.
+
+    Selection is log-spaced in tenor, which keeps the front dense (where the smile has the most
+    curvature and the quotes are best) while still reaching the long end.
+    """
+    dated = sorted({e for e in expiries if e > as_of})
+    if len(dated) <= n or n <= 0:
+        return dated
+    if n == 1:
+        return dated[:1]  # one slot: the front contract, and no spacing to compute
+    taus = [year_fraction(as_of, e) for e in dated]
+    lo, hi = log(taus[0]), log(taus[-1])
+    picked: list[Date] = []
+    for i in range(n):
+        target = lo + (hi - lo) * i / (n - 1)
+        best = min(
+            (e for e in dated if e not in picked),
+            key=lambda e: abs(log(year_fraction(as_of, e)) - target),
+            default=None,
+        )
+        if best is not None:
+            picked.append(best)
+    return sorted(picked)
+
+
 def build_raw_market_data(
     spot: float,
     option_quotes: list[Quote],
@@ -224,7 +264,14 @@ def build_raw_market_data(
         price = _calibration_price(quote)
         if quote.stale or price is None:
             continue
-        chain.append(RawOptionQuote(ref.expiry, ref.strike, ref.option_type == "CE", price))
+        # Carry the touchline's two sides through. XTS publishes no volume or open interest, so
+        # the presence of a real bid *and* a real ask is the only liquidity evidence this feed
+        # offers — and dropping it here left the live surface with no liquidity screen at all,
+        # fitted to whatever the chain happened to print.
+        chain.append(RawOptionQuote(
+            ref.expiry, ref.strike, ref.option_type == "CE", price,
+            bid=quote.bid, ask=quote.ask,
+        ))
     if not chain:
         raise ValueError("no live priced option quotes in the XTS chain")
     if rate_instruments:
@@ -390,7 +437,12 @@ class XTSSource:
         self,
         *,
         client: XTSMarketDataClient | None = None,
-        n_expiries: int = 4,
+        # Enough to span weeklies through the multi-year LEAPS the NIFTY master lists; the
+        # selection below spreads them across the curve rather than taking the nearest N.
+        n_expiries: int = 8,
+        # Contracts fed to the dividend-carry fit. Three covers the liquid part of the NIFTY
+        # futures curve; beyond that the quotes thin out and add noise to the slope.
+        n_dividend_futures: int = 3,
         strike_window: float = 0.10,
         batch_size: int = 50,  # XTS quote API caps instruments per request
         # Marking source, like bhavcopy: outside market hours quotes sit at the last
@@ -409,6 +461,7 @@ class XTSSource:
         self.clock = clock
         self.max_age_s = max_age_s
         self.n_expiries = n_expiries
+        self.n_dividend_futures = n_dividend_futures
         self.strike_window = strike_window
         self.batch_size = batch_size
         self.risk_free_rate = risk_free_rate
@@ -451,12 +504,24 @@ class XTSSource:
         fo_master = [r for r in self.client.instruments("NSEFO")
                      if r.symbol == underlying and r.expiry and r.expiry >= as_of]
         options = [r for r in fo_master if r.option_type and r.strike is not None]
-        expiries = sorted({r.expiry for r in options if r.expiry is not None})[: self.n_expiries]
-        lo, hi = spot * (1 - self.strike_window), spot * (1 + self.strike_window)
-        chain_refs = [
-            r for r in options
-            if r.expiry in expiries and r.strike is not None and lo <= r.strike <= hi
-        ]
+        expiries = select_term_spanning_expiries(
+            [r.expiry for r in options if r.expiry is not None], as_of, self.n_expiries
+        )
+        # The strike window has to widen with maturity: ±10% spans a 1-month smile but
+        # truncates a 2-year one to a sliver around the forward, which is both too few points
+        # to fit and blind to exactly the wings a barrier note is sensitive to. Scale by √τ
+        # against a one-month reference, capped so a 5-year request stays a sane size.
+        expiry_set = set(expiries)
+        chain_refs = []
+        for r in options:
+            if r.expiry not in expiry_set or r.strike is None:
+                continue
+            tau = max(year_fraction(as_of, r.expiry), _STRIKE_WINDOW_REF_TAU / 4.0)
+            width = min(
+                self.strike_window * sqrt(tau / _STRIKE_WINDOW_REF_TAU), _MAX_STRIKE_WINDOW
+            )
+            if spot * (1 - width) <= r.strike <= spot * (1 + width):
+                chain_refs.append(r)
 
         return build_raw_market_data(
             spot, self._quotes_with_refs(chain_refs, now), as_of,
@@ -468,25 +533,44 @@ class XTSSource:
 
     def _implied_dividend(self, fo_master: list[InstrumentRef], spot: float,
                           as_of: Date, now: datetime | None) -> float:
-        """Imply q from the nearest index future's carry; fall back to the configured yield."""
+        """Imply q from the futures curve's carry; fall back to the configured yield.
+
+        Fits the whole strip when two or more contracts quote, because that reads the carry
+        off the *slope* and so never touches spot — the input most likely to be stale against
+        the futures, and the one a single-contract inversion amplifies by 1/T. Only when a
+        lone contract quotes does this fall back to the spot-based form.
+        """
         futures = sorted(
             (r for r in fo_master if r.instrument_type == "FUTIDX" and r.expiry is not None),
             key=lambda r: r.expiry or Date.max,
         )
         if not futures:
             return self.dividend_yield
-        front = futures[0]
-        expiry = front.expiry
-        assert expiry is not None
-        quotes = self._quotes_with_refs([front], now)
-        price = _calibration_price(quotes[0]) if quotes and not quotes[0].stale else None
-        if price is None:
+        quotes = self._quotes_with_refs(futures[: self.n_dividend_futures], now)
+        priced: list[tuple[Date, float]] = []
+        for quote in quotes:
+            expiry = quote.instrument.expiry
+            price = _calibration_price(quote) if not quote.stale else None
+            if expiry is not None and price is not None:
+                priced.append((expiry, price))
+        if not priced:
             return self.dividend_yield
-        rate = self.risk_free_rate
-        if self.rate_instruments:
-            zeros = bootstrap_zero_rates(as_of, self.rate_instruments)
-            rate = zeros[min(zeros, key=lambda p: abs((p - expiry).days))]
+        priced.sort()
+
+        zeros = bootstrap_zero_rates(as_of, self.rate_instruments) if self.rate_instruments else {}
+
+        def rate_for(expiry: Date) -> float:
+            if not zeros:
+                return self.risk_free_rate
+            return zeros[min(zeros, key=lambda p: abs((p - expiry).days))]
+
         try:
-            return implied_dividend_yield(spot, price, year_fraction(as_of, expiry), rate)
+            if len(priced) >= 2:
+                strip = [(year_fraction(as_of, e), p) for e, p in priced]
+                return implied_dividend_yield_from_strip(strip, rate_for(priced[-1][0]))
+            expiry, price = priced[0]
+            return implied_dividend_yield(
+                spot, price, year_fraction(as_of, expiry), rate_for(expiry)
+            )
         except ValueError:  # bad futures print — keep the assumption rather than a wild q
             return self.dividend_yield

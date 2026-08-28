@@ -50,6 +50,7 @@ from spdt.products import (
 )
 from spdt.stress import STANDARD_SCENARIOS, stress_book
 from spdt.vol import VolSurface
+from spdt.vol.quality import assess_fit
 
 # A fixed reproducible "as of" for the synthetic desk when no date is supplied to a build that
 # wants determinism (the synthetic source is date-agnostic; this only labels the snapshot).
@@ -77,7 +78,15 @@ _LIVE_MIN_OPEN_INTEREST = 1.0
 # dragged to their midpoint and reports a residual that is an artefact of the input. Keeping the
 # out-of-the-money half (the reliable one — an ITM settlement carries full intrinsic, so a stale
 # print's error is amplified when divided by a small vega) is the market convention.
+_VOL_TOLERANCE_BPS = 200.0  # matches the desk's reliable/unreliable slice bar
 _LIVE_OTM_ONLY = True
+
+# Touchline liquidity, for feeds that publish a two-sided quote but no volume or open interest
+# (XTS). A NIFTY option quoted more than 60% of mid wide is not being made a market in — on the
+# live chain those are the minimum-tick far wings that inverted to 50–88% vol against a 9.6%
+# ATM, a smile shape no index has.
+_LIVE_REQUIRE_TWO_SIDED = True
+_LIVE_MAX_RELATIVE_SPREAD = 0.60
 
 # Halved from 40 because ``_LIVE_OTM_ONLY`` discards roughly half of every expiry's quotes by
 # construction. Left at 40 the screens would silently starve every slice and calibrate nothing.
@@ -125,6 +134,8 @@ def _liquid_iv_points(raw, ois_curve: Curve):
     * **out-of-the-money only** — settlements violate put-call parity, so keeping both halves of
       a strike makes the slice unfittable rather than merely noisy.
     * **moneyness band and IV bounds** — the original screens, which drop stale deep wings.
+    * **two-sided touchline and a sane spread** — the substitute for volume on a broker feed
+      that publishes neither volume nor open interest.
     * **populated, non-immediate expiries** — thin far-dated and same-day slices wreck the SSVI
       fit and are numerically unstable respectively.
 
@@ -147,6 +158,12 @@ def _liquid_iv_points(raw, ois_curve: Curve):
         otm_only=_LIVE_OTM_ONLY,
         min_contracts=_LIVE_MIN_CONTRACTS if has_liquidity_data else None,
         min_open_interest=_LIVE_MIN_OPEN_INTEREST if has_liquidity_data else None,
+        # Only where volume/OI are absent: the touchline screens are the substitute, not an
+        # addition. Feeds that publish volume have already been screened harder by it, and
+        # NSE settlement files carry no bid/ask at all, so requiring two sides there would
+        # discard the entire chain.
+        require_two_sided=_LIVE_REQUIRE_TWO_SIDED if not has_liquidity_data else False,
+        max_relative_spread=_LIVE_MAX_RELATIVE_SPREAD if not has_liquidity_data else None,
     )
     by_expiry: dict = {}
     for p in pts:
@@ -567,14 +584,25 @@ def build_desk_data(
     # Live: liquid quotes + the arbitrage-free SSVI calibration (real settlement data needs both).
     # Synthetic: per-slice SVI on the clean generated smile (already arb-free, keeps the fast path).
     if live:
-        surface = VolSurface.calibrate(
-            _liquid_iv_points(raw, snap.ois_curve), underlying, param_model="SSVI"
-        )
+        iv_points = _liquid_iv_points(raw, snap.ois_curve)
+        surface = VolSurface.calibrate(iv_points, underlying, param_model="SSVI")
     else:
-        surface = VolSurface.calibrate(invert_chain(raw, snap.ois_curve), underlying)
+        iv_points = invert_chain(raw, snap.ois_curve)
+        surface = VolSurface.calibrate(iv_points, underlying)
     spot = snap.spots[underlying]
-    longest = max(surface.taus, key=lambda e: surface.taus[e])
+    # ATM vol at the longest expiry the fit can actually be *trusted* at, not simply the
+    # longest one calibrated. The far end of a live chain is where quotes thin out — the NIFTY
+    # 305-day slice fits on eight points at 274bps against ~60bps in the front — so taking the
+    # longest slice unconditionally hands every long-dated note a vol backed by almost no
+    # market. Falls back to the longest available when nothing clears the bar, because a
+    # flagged number is still better than none; ``vol_reliable`` records which happened.
+    fit = assess_fit(iv_points, surface.slices, surface.taus) if live else None
+    unreliable = {s.expiry for s in fit.unreliable_slices(_VOL_TOLERANCE_BPS)} if fit else set()
+    trusted = [e for e in surface.taus if e not in unreliable]
+    vol_reliable = bool(trusted)
+    longest = max(trusted or list(surface.taus), key=lambda e: surface.taus[e])
     atm_vol = surface.implied_vol_kt(0.0, surface.taus[longest])
+    atm_vol_tau = surface.taus[longest]
     r = snap.ois_curve.zero_rate(longest)
     q = snap.dividends[underlying].continuous_yield
 
@@ -757,7 +785,14 @@ def build_desk_data(
         "underlying": underlying,
         "note_face": note_face,
         "spot": spot,
-        "model": {"r": r, "q": q, "atm_vol": atm_vol},
+        "model": {
+            "r": r, "q": q, "atm_vol": atm_vol,
+            # The tenor the pricing vol was read at, and whether that slice cleared the fit
+            # tolerance. A note maturing well beyond ``atm_vol_tau`` is being priced by
+            # extrapolation, and the desk should say so rather than imply the surface reaches.
+            "atm_vol_tau": atm_vol_tau,
+            "atm_vol_reliable": vol_reliable,
+        },
         "market_move": {"spot_bp": 80, "vol_pt": 0.3, "horizon_days": 1},
         "nav": book.total_pv + wo_pv,
         "day_pnl": book_pnl["total"],
