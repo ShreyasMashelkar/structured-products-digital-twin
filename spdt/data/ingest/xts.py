@@ -20,7 +20,7 @@ import warnings
 from dataclasses import dataclass, replace
 from datetime import date as Date
 from datetime import datetime, timezone
-from math import sqrt
+from math import exp, log1p, sqrt
 
 from spdt.core.types import SourceTag, Underlying, year_fraction
 from spdt.data.curate.implied_dividend import (
@@ -40,8 +40,12 @@ _INDEX_NAMES = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}  # underlying �
 # XTS timestamps count seconds since 1980-01-01 00:00 IST (verified against the live
 # AC Agarwal feed 2026-07-16), not the Unix epoch.
 XTS_EPOCH_OFFSET_S = 315_513_000  # Unix timestamp of 1980-01-01T00:00:00+05:30
-# Maturity at which ``strike_window`` is taken at face value; longer expiries widen as √τ.
-_STRIKE_WINDOW_REF_TAU = 1.0 / 12.0
+# The fetch window is a *log-moneyness* band scaled by √τ, not a fixed percentage of spot:
+# the strikes that matter at 1.3 years sit far further from spot than those at 1 month, and a
+# ±10%-of-spot request captured 25 of the 48 quoted contracts at the 123-day expiry — enough
+# of a loss to push that slice under the minimum-strike bar and out of the surface entirely.
+_BAND_SD = 3.0          # how many standard deviations of the reference vol to span
+_BAND_REF_VOL = 0.15    # a representative NIFTY vol; only sets the band's scale, not a price
 _MAX_STRIKE_WINDOW = 0.60
 
 
@@ -484,11 +488,9 @@ class XTSSource:
         for r in options:
             if r.expiry not in expiry_set or r.strike is None:
                 continue
-            tau = max(year_fraction(as_of, r.expiry), _STRIKE_WINDOW_REF_TAU / 4.0)
-            width = min(
-                self.strike_window * sqrt(tau / _STRIKE_WINDOW_REF_TAU), _MAX_STRIKE_WINDOW
-            )
-            if spot * (1 - width) <= r.strike <= spot * (1 + width):
+            tau = max(year_fraction(as_of, r.expiry), 1.0 / 365.0)
+            half_width = min(_BAND_SD * _BAND_REF_VOL * sqrt(tau), log1p(_MAX_STRIKE_WINDOW))
+            if spot * exp(-half_width) <= r.strike <= spot * exp(half_width):
                 chain_refs.append(r)
 
         return build_raw_market_data(

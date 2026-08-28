@@ -185,3 +185,15 @@ def test_ssvi_slices_are_arbitrage_free_where_independent_svi_slices_are_not():
     assert ssvi.arb_status.calendar_ok
     assert ssvi.arb_status.min_g >= 0.0
     assert check_calendar([ssvi.slices[e] for e in ordered])
+
+
+def test_long_dated_slices_are_held_to_a_bar_the_model_actually_needs():
+    """Under SSVI the smile shape is global; a slice contributes one free parameter, theta.
+    A 20-strike bar identifies five independent raw-SVI parameters -- far more than theta
+    needs -- and applying it to NIFTY's long end discarded every expiry past 60 days."""
+    import spdt.dashboard.desk_data as D
+
+    # NIFTY's four-month expiry carries ~13 usable quotes; the front-month bar is 20.
+    assert D._LIVE_MIN_STRIKES_LONG < 13 < D._LIVE_MIN_STRIKES
+    # ...and the long-tenor threshold must sit below it, or the relaxed bar never applies.
+    assert D._LIVE_LONG_TENOR < 123 / 365.0

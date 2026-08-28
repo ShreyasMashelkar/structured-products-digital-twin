@@ -92,6 +92,18 @@ _LIVE_MAX_RELATIVE_SPREAD = 0.60
 # Halved from 40 because ``_LIVE_OTM_ONLY`` discards roughly half of every expiry's quotes by
 # construction. Left at 40 the screens would silently starve every slice and calibrate nothing.
 _LIVE_MIN_STRIKES = 20
+# Long-dated slices are held to a lower bar, and the reason is the model, not impatience.
+# Under SSVI the smile *shape* (ρ, η, γ) is fitted globally across all tenors; an individual
+# slice contributes essentially one free parameter, θ, its ATM total variance. Twenty strikes
+# is the right bar for identifying five independent raw-SVI parameters — it is far more than
+# θ needs. NIFTY quotes 21 two-sided contracts at 1.3 years and 15 at 2.3; holding those to a
+# front-month bar discards the entire long end of the only surface Indian clients can be
+# quoted on, to protect against a fit that is not being performed.
+# Three months. Set at 0.4y this threshold sat just above NIFTY's 123-day expiry (0.337y),
+# which held a four-month slice carrying 13 usable quotes to a bar meant for the front month
+# and dropped it — the single expiry that would have taken the surface past 60 days.
+_LIVE_LONG_TENOR = 0.25
+_LIVE_MIN_STRIKES_LONG = 6
 
 
 def _chain_rows(
@@ -170,7 +182,14 @@ def _liquid_iv_points(raw, ois_curve: Curve):
     for p in pts:
         if year_fraction(raw.date, p.expiry) >= _LIVE_MIN_TENOR:
             by_expiry.setdefault(p.expiry, []).append(p)
-    liquid = {e: v for e, v in by_expiry.items() if len(v) >= _LIVE_MIN_STRIKES}
+    liquid = {
+        e: v for e, v in by_expiry.items()
+        if len(v) >= (
+            _LIVE_MIN_STRIKES_LONG
+            if year_fraction(raw.date, e) >= _LIVE_LONG_TENOR
+            else _LIVE_MIN_STRIKES
+        )
+    }
     # Spread across the curve rather than taking the nearest N. The nearest six SPX expiries
     # span seventeen days out of a chain that quotes to five years, so a front-loaded pick
     # throws away exactly the tenors a multi-year note needs — the same mistake the ingest
