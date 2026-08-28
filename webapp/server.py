@@ -92,6 +92,11 @@ _CORS = os.environ.get("SPDT_CORS_ORIGINS", "http://localhost:5173,http://127.0.
 _DESK_TTL = float(os.environ.get("SPDT_DESK_TTL", "3600"))  # seconds before a rebuild
 _LIVE = os.environ.get("SPDT_LIVE", "").lower() in ("1", "true", "yes")
 _SOURCE = os.environ.get("SPDT_SOURCE", "bhavcopy")  # live engine: bhavcopy (EOD) | dhan (intraday)
+# Which underlying the desk itself books and prices. The market *panel* has always served any
+# registered underlying; the desk was hardwired to NIFTY, so a US note could be inspected but
+# never structured. SPX matters beyond geography: it is the only chain here that quotes a
+# reliable surface past a year, which is the tenor range structured notes actually live in.
+_UNDERLYING = os.environ.get("SPDT_UNDERLYING", "NIFTY").upper()
 # replay: serve a recorded session (tick tape + saved desk payload) instead of a broker feed —
 # the public-deploy mode, since redistributing a live broker feed needs an exchange licence.
 _REPLAY = _SOURCE == "replay"
@@ -138,7 +143,9 @@ def _build_payload() -> dict:
         from spdt.dashboard.desk_data import DeskData
 
         return DeskData.load(os.path.join(_REPLAY_DIR, "desk.json")).payload
-    return build_desk_data(live=_LIVE, source=_SOURCE, face_per_note=_FACE_PER_NOTE).payload
+    return build_desk_data(
+        live=_LIVE, source=_SOURCE, underlying=_UNDERLYING, face_per_note=_FACE_PER_NOTE,
+    ).payload
 
 
 def _rebuild_desk() -> None:

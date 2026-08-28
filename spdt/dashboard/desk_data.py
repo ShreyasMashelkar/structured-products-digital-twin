@@ -24,6 +24,7 @@ from spdt.backtest import aggregate, generate_realized_series, roll_issuance
 from spdt.book import generate_mixed_book, mark_book
 from spdt.data import build_snapshot
 from spdt.data.curate import invert_chain
+from spdt.data.curate.expiries import select_term_spanning_expiries
 from spdt.data.ingest.bloomberg_rates_overlay import BloombergRatesOverlaySource
 from spdt.data.ingest.synthetic import SyntheticSource
 from spdt.hedging import simulate_delta_hedge
@@ -62,7 +63,7 @@ _DT = 1.0 / 252.0
 # wings whose stale settlement IVs inject large static arbitrage. We calibrate only on liquid quotes.
 _LIVE_BAND = 0.8                  # keep |log(K/F)| ≤ band·√τ
 _LIVE_IV_BOUNDS = (0.03, 1.5)     # drop implausibly inverted vols
-_LIVE_MAX_EXPIRIES = 6            # nearest N liquid expiries
+_LIVE_MAX_EXPIRIES = 8            # liquid expiries kept, spread across the term structure
 _LIVE_MIN_TENOR = 10.0 / 365.0    # skip ~same-day expiries (numerically unstable)
 
 # A settlement price is not evidence that anyone traded at it. NSE publishes a mark for every
@@ -170,7 +171,11 @@ def _liquid_iv_points(raw, ois_curve: Curve):
         if year_fraction(raw.date, p.expiry) >= _LIVE_MIN_TENOR:
             by_expiry.setdefault(p.expiry, []).append(p)
     liquid = {e: v for e, v in by_expiry.items() if len(v) >= _LIVE_MIN_STRIKES}
-    keep = sorted(liquid)[:_LIVE_MAX_EXPIRIES]
+    # Spread across the curve rather than taking the nearest N. The nearest six SPX expiries
+    # span seventeen days out of a chain that quotes to five years, so a front-loaded pick
+    # throws away exactly the tenors a multi-year note needs — the same mistake the ingest
+    # layer makes when it fetches only the nearest contracts.
+    keep = select_term_spanning_expiries(sorted(liquid), raw.date, _LIVE_MAX_EXPIRIES)
     return [p for e in keep for p in liquid[e]]
 
 
