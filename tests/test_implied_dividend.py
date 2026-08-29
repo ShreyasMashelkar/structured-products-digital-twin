@@ -77,3 +77,53 @@ def test_xts_source_uses_futures_implied_dividend(monkeypatch):
     expected_q = r - log(fut_price / spot) / year_fraction(as_of, fut_expiry)
     assert raw.dividend_yield == pytest.approx(expected_q)
     assert raw.dividend_yield != 0.013  # no longer the assumption
+
+
+# --- the strip fit: carry from the slope, so a stale spot cannot corrupt q -------------------
+
+
+def test_strip_recovers_known_carry():
+    from spdt.data.curate.implied_dividend import implied_dividend_yield_from_strip
+
+    spot, r, q = 24000.0, 0.065, 0.013
+    strip = [(t, spot * exp((r - q) * t)) for t in (0.09, 0.17, 0.24)]
+    assert implied_dividend_yield_from_strip(strip, r) == pytest.approx(q)
+
+
+def test_strip_is_immune_to_a_stale_spot():
+    """The live bug: the cash index printed ~0.2% behind the futures, and dividing that lag
+    by a 32-day T turned it into a −2% 'dividend'. The slope never looks at spot."""
+    from spdt.data.curate.implied_dividend import implied_dividend_yield_from_strip
+
+    true_spot, r, q = 24136.3, 0.065, 0.013
+    strip = [(t, true_spot * exp((r - q) * t)) for t in (0.0877, 0.1644, 0.2384)]
+
+    stale_spot = true_spot * 0.998  # what the index tick actually said
+    single = r - log(strip[0][1] / stale_spot) / strip[0][0]
+    assert single < 0.0  # the old path: a negative dividend out of a 0.2% spot lag
+
+    assert implied_dividend_yield_from_strip(strip, r) == pytest.approx(q)
+
+
+def test_strip_needs_two_contracts_and_a_real_lever_arm():
+    from spdt.data.curate.implied_dividend import implied_dividend_yield_from_strip
+
+    with pytest.raises(ValueError, match="at least two"):
+        implied_dividend_yield_from_strip([(0.1, 24100.0)], 0.065)
+    # two contracts a few days apart: the slope is quote noise, not a carry
+    with pytest.raises(ValueError, match="too short"):
+        implied_dividend_yield_from_strip([(0.09, 24100.0), (0.10, 24110.0)], 0.065)
+
+
+def test_a_negative_implied_yield_is_rejected_not_returned():
+    """An index cannot pay a negative dividend. When the futures carry above the risk-free
+    rate — routine in India, where the strip embeds a financing premium — the inversion is
+    measuring funding, not dividends, and must not be believed."""
+    from spdt.data.curate.implied_dividend import implied_dividend_yield_from_strip
+
+    spot, r = 24000.0, 0.0526
+    strip = [(t, spot * exp(0.0614 * t)) for t in (0.0877, 0.1644, 0.2384)]  # live carry
+    with pytest.raises(ValueError, match="implausible"):
+        implied_dividend_yield_from_strip(strip, r)
+    with pytest.raises(ValueError, match="implausible"):
+        implied_dividend_yield(spot, spot * exp(0.0614 * 0.25), 0.25, r)

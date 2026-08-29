@@ -118,3 +118,56 @@ def test_iv_points_parquet_round_trip(raw, tmp_path):
     assert [round(p.implied_vol, 9) for p in reloaded] == [
         round(p.implied_vol, 9) for p in points
     ]
+
+
+# --- touchline liquidity screens (for feeds with no volume or open interest) -----------
+
+
+def test_two_sided_and_spread_screens_drop_placeholder_quotes(raw):
+    """The XTS broker feed publishes no volume or open interest, so a two-sided touchline with
+    a sane spread is the only liquidity evidence it offers. Without it the live NIFTY surface
+    was fitted to minimum-tick far wings that inverted to 50%+ vol against a 9.6% ATM."""
+    from dataclasses import replace
+
+    snap = build_snapshot(raw)
+    chain = list(raw.option_chain)
+    # Give every contract a tight two-sided market, then spoil two of them.
+    priced = [
+        replace(q, bid=q.settlement_price * 0.99, ask=q.settlement_price * 1.01)
+        for q in chain
+    ]
+    priced[0] = replace(priced[0], bid=None, ask=None)          # one-sided
+    priced[1] = replace(priced[1], bid=0.05, ask=0.60)          # 169%-of-mid spread
+    screened_raw = replace(raw, option_chain=tuple(priced))
+
+    kept_all = invert_chain(screened_raw, snap.ois_curve)
+    kept = invert_chain(
+        screened_raw, snap.ois_curve, require_two_sided=True, max_relative_spread=0.60
+    )
+    assert len(kept) == len(kept_all) - 2
+
+    # And the screens are opt-in: a settlement feed with no bid/ask at all is untouched by
+    # default, or it would discard every quote it has.
+    assert len(invert_chain(raw, snap.ois_curve)) == len(raw.option_chain)
+
+
+def test_expiry_selection_keeps_the_long_end_a_note_is_priced_against():
+    """The desk kept the nearest N liquid expiries. On SPX the nearest six span seventeen days
+    out of a chain quoting to five years, so the surface stopped short of every note it was
+    used to price -- while the market panel, using a term-spanning selector, showed 4.3 years
+    off the same chain."""
+    from datetime import timedelta
+
+    from spdt.data.curate.expiries import select_term_spanning_expiries
+
+    as_of = date(2026, 8, 28)
+    # An SPX-shaped ladder: dense weeklies up front, LEAPS at the back.
+    expiries = [as_of + timedelta(days=d) for d in
+                (11, 17, 21, 28, 34, 45, 68, 125, 203, 306, 476, 1575)]
+
+    nearest = sorted(expiries)[:6]
+    assert (nearest[-1] - as_of).days == 45  # the old rule: six weeks of a five-year chain
+
+    spread = select_term_spanning_expiries(expiries, as_of, 6)
+    assert (spread[-1] - as_of).days > 365 * 2
+    assert (spread[0] - as_of).days <= 21  # the front is still represented

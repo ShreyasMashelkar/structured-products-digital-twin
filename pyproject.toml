@@ -28,7 +28,11 @@ dependencies = [
 [project.optional-dependencies]
 ad = ["jax>=0.4.25", "jaxlib>=0.4.25"]
 dashboard = ["streamlit>=1.32", "plotly>=5.20"]
-web = ["fastapi>=0.110", "uvicorn>=0.27"]
+# fastapi pins its own starlette range, but a stray `pip install starlette` (or any dependency
+# that pulls a newer one) silently breaks the app at import with an unrelated-looking TypeError
+# — which is what happened here. Bounding it makes the incompatibility a resolver error at
+# install time instead of a crash at boot.
+web = ["fastapi>=0.110,<0.116", "starlette>=0.37.2,<0.39", "uvicorn>=0.27"]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.100",
@@ -40,7 +44,8 @@ dev = [
     # — CI sat red for weeks on 287 lint findings that no commit had introduced.
     "ruff>=0.15,<0.16",
     "mypy>=2.1,<2.2",
-    "fastapi>=0.110",
+    "fastapi>=0.110,<0.116",
+    "starlette>=0.37.2,<0.39",
     "httpx>=0.27",
     # Exercised by the Bloomberg-overlay test; without it the test skips, so declaring it here
     # keeps CI actually running that path instead of silently skipping it forever.

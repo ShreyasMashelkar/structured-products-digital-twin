@@ -280,8 +280,11 @@ class TestAutocallableDecomposition:
 
     def test_component_count(self, autocallable):
         d = decompose(autocallable)
-        # funding + conditional_coupons + barrier + autocall = 4
-        assert len(d.components) == 4
+        # funding + conditional coupons + knock-in put + knock-out call + autocall = 5.
+        # The knock-out call is the early-redemption level expressed as a barrier, so the
+        # barrier book and pre-unwind scheduler can see it; AutocallComponent still carries
+        # the hedging, and the barrier is marked descriptive so it is not replicated twice.
+        assert len(d.components) == 5
 
     def test_is_approximate(self, autocallable):
         d = decompose(autocallable)

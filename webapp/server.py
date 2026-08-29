@@ -64,6 +64,12 @@ from spdt.data.curate.bs_inversion import bs_price
 from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
 from spdt.pricing import BlackScholes, price_mc, price_worst_of
+from spdt.pricing.models.bs_term import BlackScholesTermVol
+from spdt.structurer.executable import (
+    ListedCall,
+    build_participation_note,
+    floor_for_participation,
+)
 from spdt.products import (
     Autocallable,
     BarrierReverseConvertible,
@@ -75,6 +81,7 @@ from spdt.products import (
 from spdt.reporting import terminal_scenarios
 from spdt.outcomes import OutcomeTerms, hedge_comparison, issuance_study, outcome_profile
 from spdt.stress import STANDARD_SCENARIOS
+from spdt.structurer.levers import manufacture
 from spdt.structurer import (
     ClientBrief,
     ClientObjective,
@@ -90,6 +97,11 @@ _CORS = os.environ.get("SPDT_CORS_ORIGINS", "http://localhost:5173,http://127.0.
 _DESK_TTL = float(os.environ.get("SPDT_DESK_TTL", "3600"))  # seconds before a rebuild
 _LIVE = os.environ.get("SPDT_LIVE", "").lower() in ("1", "true", "yes")
 _SOURCE = os.environ.get("SPDT_SOURCE", "bhavcopy")  # live engine: bhavcopy (EOD) | dhan (intraday)
+# Which underlying the desk itself books and prices. The market *panel* has always served any
+# registered underlying; the desk was hardwired to NIFTY, so a US note could be inspected but
+# never structured. SPX matters beyond geography: it is the only chain here that quotes a
+# reliable surface past a year, which is the tenor range structured notes actually live in.
+_UNDERLYING = os.environ.get("SPDT_UNDERLYING", "NIFTY").upper()
 # replay: serve a recorded session (tick tape + saved desk payload) instead of a broker feed —
 # the public-deploy mode, since redistributing a live broker feed needs an exchange licence.
 _REPLAY = _SOURCE == "replay"
@@ -136,7 +148,9 @@ def _build_payload() -> dict:
         from spdt.dashboard.desk_data import DeskData
 
         return DeskData.load(os.path.join(_REPLAY_DIR, "desk.json")).payload
-    return build_desk_data(live=_LIVE, source=_SOURCE, face_per_note=_FACE_PER_NOTE).payload
+    return build_desk_data(
+        live=_LIVE, source=_SOURCE, underlying=_UNDERLYING, face_per_note=_FACE_PER_NOTE,
+    ).payload
 
 
 def _rebuild_desk() -> None:
@@ -316,6 +330,28 @@ class StructureRequest(BaseModel):
     objective: str = "income"  # income | yield_enhanced | protection
     prefer_basket: bool = False
     product: str | None = None  # override: solve this family instead of the recommended one
+    # Early-redemption level as a fraction of the initial fixing. Below 1.0 is a step-down
+    # autocall: the note calls away on a smaller rally, selling upside to buy coupon.
+    autocall_level: float = Field(default=1.0, gt=0.5, le=1.5)
+    # "coupon" (default) solves what the structure pays; "knock_in" holds the coupon at the
+    # client's target and solves the barrier that funds it — the question income buyers
+    # actually ask, which is "how much downside must I carry for 15%?"
+    solve_for: str = "coupon"
+    # Surrender the upside tail rather than cap it — unlocks the shark-fin family, which is
+    # otherwise not offered at all.
+    accept_knockout: bool = False
+    # The client's own fixed-deposit rate funds the floor. It is not the wholesale curve and
+    # the difference is material: at 7.5% against 5.3% the deposit discounts harder, leaving a
+    # larger option budget. Omitting it was why the app understated every protected note.
+    fd_rate: float = 0.075
+    notional: float = 1e7
+    # Set the floor directly. Absent, it is derived from max_downside, which is fine for a
+    # recommendation and useless when the client has already named the floor they want.
+    protection: float | None = None
+    # The inverse solve: name the upside and the floor becomes the answer. Participation is
+    # otherwise only ever an output, which leaves the more natural client question -- "I want
+    # 1.5x the index, what does that cost me?" -- unanswerable.
+    target_participation: float | None = None
 
 
 class StructureCandidate(BaseModel):
@@ -330,7 +366,7 @@ class StructureResponse(BaseModel):
     product_type: str
     label: str
     rationale: str
-    solve_for: str  # "coupon" | "participation"
+    solve_for: str  # "coupon" | "participation" | "knock_in"
     solved_annual_coupon: float | None  # for coupon notes
     solved_participation: float | None  # for capital-protected notes
     solved_display: str | None  # human headline, e.g. "6.21% p.a." or "1.85× upside"
@@ -344,6 +380,23 @@ class StructureResponse(BaseModel):
     book_maturity: float
     x_label: str  # pv_curve x-axis label
     pv_curve: list[dict]  # [{"x": ..., "pv": ...}]
+    # The gap between what the client asked for and what the market affords, plus the single
+    # term concessions that would close it. Empty when the ask is already met.
+    coupon_shortfall: float | None
+    manufacture_summary: str | None
+    levers: list[dict]
+    # Whether the note outlives the vol data behind it. The desk reads its pricing vol at the
+    # longest expiry whose fit it trusts; a note maturing past that is priced on the surface's
+    # extrapolation, not on quotes. That is not necessarily wrong, but it must never be silent
+    # — a 1.5y note quoted off a 60-day slice looks identical in the response to one quoted off
+    # a 2-year slice, and only this field distinguishes them.
+    vol_tau: float | None
+    vol_extrapolated: bool
+    data_warning: str | None
+    # What can actually be bought, as distinct from what the model solves. Present only for
+    # participation notes, and None when no listed contract supports the request.
+    executable: dict | None
+    executable_error: str | None
     alternatives: list[StructureCandidate]  # every family, ranked best-first (incl. the active one)
 
 
@@ -353,15 +406,106 @@ _OBJECTIVES = {
     "protection": ClientObjective.PROTECTION,
 }
 # n_paths kept modest so the live solve stays responsive; worst-of pays for 3 correlated assets.
+# Log-moneyness half-width representing the region a live chain actually quotes; the
+# default Durrleman grid runs to +/-1.5, which for a 2-week slice is pure extrapolation.
+# The solver's par target is par minus 1.00 of 100, i.e. 1% of notional. The executable
+# build must charge the same fee or its budget would not match the solved note's.
+_STRUCTURING_FEE = 0.01
+_ARB_DATA_K = 0.35
+# A note may run a little past the last trusted expiry without the price being extrapolation
+# in any meaningful sense; beyond this it is.
+_VOL_TAU_SLACK = 0.10
 _SOLVE_PATHS = {"worst_of": 6_000}
 _DEFAULT_SOLVE_PATHS = 12_000
 _CURVE_POINTS = 12
+
+
+
+def _executable_build(prop: Proposal, req: "StructureRequest", spot: float, d: dict) -> tuple:
+    """The orderable version of a participation note, or why there isn't one.
+
+    Only participation notes decompose into a floor plus a single listed call, so only they get
+    an executable build. Income notes are path-dependent portfolios and stay model-priced, which
+    the response makes explicit rather than leaving the caller to assume.
+    """
+    if prop.product_type not in ("capital_protected", "shark_fin"):
+        return None, "executable build applies to participation notes only"
+    rows = d.get("executable_calls") or []
+    if not rows:
+        return None, "no two-sided call quotes in today's chain"
+    chain = [
+        ListedCall(date.fromisoformat(r["expiry"]), float(r["strike"]), float(r["ask"]),
+                   int(r["lot_size"]), r.get("bid"))
+        for r in rows
+    ]
+    as_of = date.fromisoformat(d["as_of"])
+    try:
+        if req.target_participation is not None:
+            note = floor_for_participation(
+                spot=spot, as_of=as_of, maturity_years=prop.maturity,
+                target_participation=req.target_participation, chain=chain,
+                fd_rate=req.fd_rate, notional=req.notional, fee=_STRUCTURING_FEE,
+            )
+        else:
+            note = build_participation_note(
+                spot=spot, as_of=as_of, maturity_years=prop.maturity,
+                floor=float(prop.params.get("protection", 1.0)), chain=chain,
+                fd_rate=req.fd_rate, notional=req.notional, fee=_STRUCTURING_FEE,
+            )
+    except ValueError as exc:
+        return None, str(exc)
+    be = note.breakeven()
+    return {
+        "floor": round(note.floor, 6),
+        "solved_floor": req.target_participation is not None,
+        "expiry": note.leg.expiry.isoformat(), "strike": note.leg.strike,
+        "ask": note.leg.ask, "bid": note.leg.bid,
+        "relative_spread": (round(note.leg.relative_spread, 4)
+                            if note.leg.relative_spread is not None else None),
+        "lot_size": note.leg.lot_size, "lots": note.lots, "units": note.units,
+        "tenor_years": round(note.tau, 4),
+        "participation": round(note.participation(spot), 4),
+        "fd_rate": note.fd_rate, "notional": note.notional,
+        "fd_invested": round(note.fd_invested, 2), "fd_matures": round(note.fd_matures, 2),
+        "option_cost": round(note.option_cost, 2), "residual": round(note.residual, 2),
+        "residual_matures": round(note.residual_matures, 2),
+        "worst_case": round(note.worst_case, 6),
+        "capital_protected": note.capital_protected,
+        "breakeven": None if be is None else round(be, 2),
+        "breakeven_pct": None if be is None else round(be / spot - 1.0, 6),
+        "scenarios": [
+            {"pct": m, "level": round(spot * (1 + m), 2),
+             "total": round(note.value_at(spot * (1 + m)), 2),
+             "ret": round(note.value_at(spot * (1 + m)) / note.notional - 1.0, 6)}
+            for m in (-0.30, -0.15, -0.10, 0.0, 0.05, 0.10, 0.20, 0.30)
+        ],
+    }, None
+
+
+def _term_vol_model(spot: float, m: dict) -> BlackScholes | BlackScholesTermVol:
+    """The desk's equity model: term-structure Black-Scholes when the surface has a curve.
+
+    Falls back to the flat-vol model on a one-pillar surface, where the two coincide anyway,
+    so callers never have to branch.
+    """
+    pillars = tuple(
+        (float(t), float(v)) for t, v in (m.get("atm_term") or ()) if t > 0.0 and v > 0.0
+    )
+    if len(pillars) < 2:
+        return BlackScholes(spot=spot, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    return BlackScholesTermVol(spot=spot, r=m["r"], q=m["q"], pillars=pillars)
 
 
 def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_paths: int) -> float:
     """Model PV of a proposal with its single free parameter set to ``free``."""
     p = dict(prop.params)
     p[prop.free_param_key] = free
+    # The coupon trigger is set equal to the knock-in by the proposer, so when the barrier is
+    # the free parameter it must travel with it. Left unlinked, the solve would deepen the
+    # capital barrier while the coupon kept paying off the original level — pricing a note
+    # nobody offered.
+    if prop.free_param_key == "knock_in" and "coupon_barrier" in p:
+        p["coupon_barrier"] = free
     obs = prop.observation_times
     if prop.product_type == "worst_of":
         names = tuple(p["underlyings"])
@@ -378,8 +522,9 @@ def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_path
         return price_worst_of(
             wo, spots0, vols, corr, r=m["r"], q=m["q"], n_paths=n_paths, seed=7
         ).price
-    # single-underlying notes price under Black–Scholes on the desk's ATM vol
-    model = BlackScholes(spot=spot, r=m["r"], q=m["q"], sigma=m["atm_vol"])
+    # Single-underlying notes price on the desk's ATM *term structure* where one is
+    # available, falling back to a flat vol only when the surface offers a single pillar.
+    model = _term_vol_model(spot, m)
     if prop.product_type == "autocallable":
         note: Product = Autocallable(
             100.0, obs, p["coupon_rate"], p["autocall_level"], p["coupon_barrier"],
@@ -389,13 +534,37 @@ def _price_proposal(prop: Proposal, free: float, spot: float, m: dict, *, n_path
         note = BarrierReverseConvertible(
             100.0, obs, p["coupon_rate"], p["strike"], p["knock_in"], initial_fixing=spot,
         )
-    elif prop.product_type == "capital_protected":
+    elif prop.product_type in ("capital_protected", "shark_fin"):
         note = CapitalProtectedNote(
             100.0, prop.maturity, p["protection"], p["participation"], p["strike"], p.get("cap"),
+            initial_fixing=spot,
+            knock_out=p.get("knock_out"),
+            rebate=p.get("rebate", 0.0),
+            ko_monitoring=tuple(p.get("ko_monitoring", ()) or ()),
         )
     else:
         raise ValueError(f"unknown product_type {prop.product_type!r}")
     return price_mc(note, model, n_paths=n_paths, seed=7).price
+
+
+_LEVER_PATHS = 12_000  # nested solve: cheap paths, the negotiation dominates the precision
+
+
+def _solve_coupon_only(prop: Proposal, spot: float, m: dict, fee: float) -> float | None:
+    """Per-period coupon that prices ``prop`` to par, or None if unreachable in its bracket.
+
+    Fewer paths than the headline solve: the lever sweep runs a nested root-find, so this is
+    called tens of times per request and precision here moves the *concession* by far less
+    than the negotiation itself will.
+    """
+    try:
+        return solve_to_par(
+            lambda c: _price_proposal(prop, c, spot, m, n_paths=_LEVER_PATHS),
+            par_target(100.0, fee=fee),
+            prop.bracket,
+        ).param
+    except ValueError:
+        return None
 
 
 def _solve_and_curve(
@@ -410,7 +579,8 @@ def _solve_and_curve(
         return _price_proposal(prop, x, spot, m, n_paths=n_paths)
 
     lo, hi = prop.bracket
-    sweep_lo = hi / _CURVE_POINTS if is_coupon else 0.25
+    is_barrier = prop.solve_for == SolveFor.KNOCK_IN
+    sweep_lo = lo if is_barrier else (hi / _CURVE_POINTS if is_coupon else 0.25)
     curve = []
     for i in range(_CURVE_POINTS):
         x = sweep_lo + (hi - sweep_lo) * i / (_CURVE_POINTS - 1)
@@ -438,10 +608,25 @@ def structure(req: StructureRequest) -> StructureResponse:
         req.target_coupon, req.max_downside, req.maturity, req.obs_per_year,
         objective=_OBJECTIVES.get(req.objective, ClientObjective.INCOME),
         prefer_basket=req.prefer_basket,
+        autocall_level=req.autocall_level,
+        accept_knockout=req.accept_knockout,
+        protection=req.protection,
+        solve_for=SolveFor.KNOCK_IN if req.solve_for == "knock_in" else SolveFor.COUPON,
     )
     ranked = recommend(brief)
     active = next((r for r in ranked if r.proposal.product_type == req.product), ranked[0])
     prop = active.proposal
+
+    # Build the orderable note first. In the inverse mode the floor is the *answer*, so the
+    # model solve has to be re-run against that same floor -- otherwise the headline card
+    # prices a note with a different floor from the one the client would be sold, and the two
+    # numbers on screen cannot be compared to each other.
+    executable, executable_error = _executable_build(prop, req, spot, d)
+    if executable is not None and executable.get("solved_floor"):
+        brief = dataclasses.replace(brief, protection=executable["floor"])
+        ranked = recommend(brief)
+        active = next((r for r in ranked if r.proposal.product_type == req.product), ranked[0])
+        prop = active.proposal
 
     free, achieved, curve, target = _solve_and_curve(prop, spot, m, req.obs_per_year, req.fee)
     is_coupon = prop.solve_for == SolveFor.COUPON
@@ -453,6 +638,10 @@ def structure(req: StructureRequest) -> StructureResponse:
         display: str | None = None
     elif is_coupon:
         display = f"{free * req.obs_per_year * 100:.2f}% p.a."
+    elif prop.solve_for == SolveFor.KNOCK_IN:
+        # The barrier solve answers "how much downside buys this coupon?", so it is reported as
+        # the downside the client carries, not as a bare level — the number they must react to.
+        display = f"barrier {free:.0%} ({1 - free:.0%} downside) for {req.target_coupon:.2%} p.a."
     else:
         display = f"{free:.2f}× upside"
     # Achievable = the client's coupon ask is met (income), or it priced to par at all (protection).
@@ -461,8 +650,56 @@ def structure(req: StructureRequest) -> StructureResponse:
     )
 
     book_params = dict(prop.params)
-    if free is not None:
-        book_params[prop.free_param_key] = free
+    # On a failed solve the free parameter is blanked rather than left at its indicative seed.
+    # Leaving the seed makes an unsolved structure look like a solved one — book_params is what
+    # stages the trade, so a stale 0.70 barrier beside achievable=False is a trade waiting to be
+    # booked on terms nobody priced.
+    book_params[prop.free_param_key] = free
+
+    # When the market affords less than the client asked for, the answer is not "no" — it is
+    # "which term will you move?". Only run for coupon solves: a barrier solve has already
+    # answered the question, and a capital-protected note has no coupon to manufacture.
+    shortfall: float | None = None
+    manufacture_summary: str | None = None
+    lever_rows: list[dict] = []
+    if is_coupon and solved_annual is not None:
+        shortfall = round(req.target_coupon - solved_annual, 6)
+        if shortfall > 1e-9:
+            report = manufacture(
+                prop,
+                lambda pr: _solve_coupon_only(pr, spot, m, req.fee),
+                req.target_coupon,
+                req.obs_per_year,
+            )
+            manufacture_summary = report.summary()
+            lever_rows = [
+                {
+                    "key": v.key, "label": v.label, "gives_up": v.gives_up,
+                    "current": round(v.current, 4),
+                    "required": round(v.required, 4) if v.required is not None else None,
+                    "reachable": v.reachable,
+                    "coupon_at_limit": (
+                        round(v.coupon_at_limit, 6) if v.coupon_at_limit is not None else None
+                    ),
+                }
+                for v in report.levers
+            ]
+
+    vol_tau = m.get("atm_vol_tau")
+    extrapolated = vol_tau is not None and prop.maturity > vol_tau * (1.0 + _VOL_TAU_SLACK)
+    warning = None
+    if extrapolated and vol_tau:
+        warning = (
+            f"This note matures in {prop.maturity:.2f}y, but the volatility surface is only "
+            f"trusted out to {vol_tau:.2f}y ({vol_tau * 365:.0f} days) on today's quotes. The "
+            f"price beyond that is the surface extrapolating, not the market speaking — treat "
+            f"it as indicative and re-solve when longer-dated quotes are available."
+        )
+    elif not m.get("atm_vol_reliable", True):
+        warning = (
+            "No expiry cleared the calibration tolerance today; the pricing volatility is taken "
+            "from the longest slice available and is unsupported by a reliable fit."
+        )
 
     return StructureResponse(
         product_type=prop.product_type,
@@ -480,8 +717,20 @@ def structure(req: StructureRequest) -> StructureResponse:
         book_params=book_params,
         book_observation_times=list(prop.observation_times),
         book_maturity=prop.maturity,
-        x_label="annual coupon (%)" if is_coupon else "participation (×)",
+        x_label=(
+        "annual coupon (%)" if is_coupon
+        else "knock-in barrier (fraction of spot)" if prop.solve_for == SolveFor.KNOCK_IN
+        else "participation (×)"
+    ),
         pv_curve=curve,
+        coupon_shortfall=shortfall,
+        manufacture_summary=manufacture_summary,
+        levers=lever_rows,
+        vol_tau=round(vol_tau, 4) if vol_tau is not None else None,
+        vol_extrapolated=extrapolated,
+        data_warning=warning,
+        executable=executable,
+        executable_error=executable_error,
         alternatives=[
             StructureCandidate(
                 product_type=r.proposal.product_type, label=r.label,
@@ -2115,6 +2364,8 @@ def _build_market(underlying: str, source: str) -> dict:
     from spdt.data import build_snapshot
     from spdt.data.curate import invert_chain
     from spdt.data.live import fetch_live_raw
+    from spdt.dashboard.desk_data import _LIVE_MAX_RELATIVE_SPREAD
+    from spdt.vol.arbitrage import check_butterfly
     from spdt.vol.surface import VolSurface
 
     raw = fetch_live_raw(_date.today(), underlying, source=source)
@@ -2128,9 +2379,20 @@ def _build_market(underlying: str, source: str) -> dict:
         moneyness_band=1.0, iv_bounds=(0.03, 3.0), otm_only=True,
         min_contracts=1.0 if has_liquidity else None,
         min_open_interest=1.0 if has_liquidity else None,
+        # Same substitution the desk makes: where a feed publishes no volume, a two-sided
+        # touchline with a sane spread is the only liquidity evidence there is.
+        require_two_sided=not has_liquidity,
+        max_relative_spread=None if has_liquidity else _LIVE_MAX_RELATIVE_SPREAD,
     )
     points = _spread_expiries(inverted, raw.date)
-    surface = VolSurface.calibrate(points, underlying, min_points_per_slice=8)
+    # SSVI, matching the desk. Independent per-slice SVI fits are unconstrained across strikes
+    # and tenors and guarantee nothing: this panel was reporting butterfly and calendar
+    # violations for a surface the desk never prices on, while the desk's own SSVI surface was
+    # clean. A diagnostic that describes a different surface from the one in use is worse than
+    # no diagnostic.
+    surface = VolSurface.calibrate(
+        points, underlying, param_model="SSVI", min_points_per_slice=8
+    )
     fit = surface.fit_status
 
     ordered = sorted(surface.slices, key=lambda e: surface.taus[e])
@@ -2166,6 +2428,27 @@ def _build_market(underlying: str, source: str) -> dict:
             "reliable_pct": round(100.0 * fit.reliable_fraction(200.0), 0) if fit else None,
             "max_reliable_tenor": round(max((s.tau for s in reliable), default=0.0), 3),
             "arbitrage_clean": surface.arb_status.is_clean,
+            # Which condition fails matters: a butterfly breach is a bad *slice* (negative
+            # density, so a call spread prices negative), a calendar breach is a bad *pair*
+            # of slices (total variance falling with maturity). They have different fixes.
+            "butterfly_ok": surface.arb_status.butterfly_ok,
+            "calendar_ok": surface.arb_status.calendar_ok,
+            "min_g": round(surface.arb_status.min_g, 6),
+            "per_slice_arb": [
+                {
+                    "tau": round(surface.taus[e], 4),
+                    "ok": check_butterfly(surface.slices[e])[0],
+                    "min_g": round(check_butterfly(surface.slices[e])[1], 6),
+                    "min_g_in_data": round(
+                        check_butterfly(
+                            surface.slices[e],
+                            k_grid=np.linspace(-_ARB_DATA_K, _ARB_DATA_K, 121, dtype=np.float64),
+                        )[1],
+                        6,
+                    ),
+                }
+                for e in ordered
+            ],
             "per_slice": [
                 {"tau": round(s.tau, 4), "n": s.n_points, "rmse_bps": round(s.rmse_bps, 1)}
                 for s in (fit.slices if fit else ())

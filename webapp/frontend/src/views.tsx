@@ -338,6 +338,17 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
   const [fee, setFee] = useState(1);
   const [objective, setObjective] = useState("income");
   const [preferBasket, setPreferBasket] = useState(false);
+  // The floor stated directly, the client's own deposit rate, and the mandate. Without these
+  // the app could only infer a floor from the risk slider and funded it on the wholesale
+  // curve, which is not how the note is actually built.
+  const [floorPct, setFloorPct] = useState(0.9);
+  const [fdRate, setFdRate] = useState(0.075);
+  const [notionalCr, setNotionalCr] = useState(1);
+  // Which way round the protected note is solved. "floor" names the capital at risk and the
+  // upside falls out; "upside" names the participation and the floor is what it costs. The
+  // second is the question clients actually ask and was previously unanswerable.
+  const [protMode, setProtMode] = useState<"floor" | "upside">("floor");
+  const [targetPart, setTargetPart] = useState(1.5);
   const [activeProduct, setActiveProduct] = useState<string | null>(null); // null ⇒ use the recommendation
   const [res, setRes] = useState<StructureResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -347,11 +358,14 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
     let cancel = false;
     setLoading(true);
     const id = setTimeout(() => {
-      solveStructure({ target_coupon: tc, max_downside: dd, maturity: mat, obs_per_year: obs, fee, objective, prefer_basket: preferBasket, product: activeProduct })
+      solveStructure({ target_coupon: tc, max_downside: dd, maturity: mat, obs_per_year: obs, fee, objective, prefer_basket: preferBasket, product: activeProduct,
+        protection: objective === "protection" && protMode === "floor" ? floorPct : null,
+        target_participation: objective === "protection" && protMode === "upside" ? targetPart : null,
+        fd_rate: fdRate, notional: notionalCr * 1e7 })
         .then((r) => !cancel && setRes(r)).finally(() => !cancel && setLoading(false));
     }, 250);
     return () => { cancel = true; clearTimeout(id); };
-  }, [tc, dd, mat, obs, fee, objective, preferBasket, activeProduct]);
+  }, [tc, dd, mat, obs, fee, objective, preferBasket, activeProduct, floorPct, fdRate, notionalCr, protMode, targetPart]);
 
   // Changing the objective or basket appetite re-opens the recommendation (drops any manual override).
   function pickObjective(k: string) { setObjective(k); setActiveProduct(null); }
@@ -397,13 +411,51 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
             {preferBasket ? "✓ " : ""}Open to a basket (worst-of)
           </button>
         </div>
-        <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
-          <Slider label="Target annual coupon" value={tc} min={0.04} max={0.2} step={0.01} onChange={setTc} display={pct(tc, 0)} />
-          <Slider label="Protection buffer" value={dd} min={0.1} max={0.5} step={0.05} onChange={setDd} display={`${pct(dd, 0)} → KI ${pct(1 - dd, 0)}`} />
-          <Slider label="Maturity (years)" value={mat} min={1} max={3} step={1} onChange={setMat} display={`${mat}y`} />
-          <Slider label="Observations / year" value={obs} min={2} max={12} step={2} onChange={setObs} display={`${obs}`} />
-          <Slider label="Placement fee" value={fee} min={0} max={3} step={0.25} onChange={setFee} display={`${fee.toFixed(2)}`} />
-        </div>
+        {/* Only the controls that move the answer. A protected note has no coupon, no
+            knock-in and one payoff at maturity, so a coupon, buffer or observation slider
+            sits there doing nothing -- which reads as broken rather than as inapplicable. */}
+        {objective === "protection" ? (
+          <>
+            <div>
+              <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">Solve for</div>
+              <div className="inline-flex gap-1 rounded-lg border border-border bg-panel2/50 p-1">
+                {([["floor", "Upside \u2014 I set the floor"], ["upside", "Floor \u2014 I set the upside"]] as const).map(([k, lbl]) => (
+                  <button key={k} onClick={() => setProtMode(k)}
+                    className={cn("ring-desk rounded-md px-3 py-1.5 text-[12px] font-semibold transition-colors", protMode === k ? "bg-accent/20 text-accent" : "text-muted hover:text-ink")}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
+              {protMode === "floor" ? (
+                <Slider label="Capital floor" value={floorPct} min={0.7} max={1} step={0.05} onChange={setFloorPct}
+                  display={`${pct(floorPct, 0)} \u2014 risks ${pct(1 - floorPct, 0)}`} />
+              ) : (
+                <Slider label="Target upside" value={targetPart} min={0.25} max={4} step={0.25} onChange={setTargetPart}
+                  display={`${targetPart.toFixed(2)}\u00d7`} />
+              )}
+              <Slider label="Maturity" value={mat} min={1 / 12} max={3} step={1 / 12} onChange={setMat}
+                display={mat < 1 ? `${Math.round(mat * 12)}m` : `${(mat).toFixed(2)}y`} />
+              <Slider label="Client's own FD rate" value={fdRate} min={0.05} max={0.09} step={0.0025} onChange={setFdRate}
+                display={pct(fdRate, 2)} />
+              <Slider label="Mandate" value={notionalCr} min={0.25} max={10} step={0.25} onChange={setNotionalCr}
+                display={`\u20b9${notionalCr.toFixed(2)} Cr`} />
+              <Slider label="Placement fee" value={fee} min={0} max={3} step={0.25} onChange={setFee} display={`${fee.toFixed(2)}`} />
+            </div>
+          </>
+        ) : (
+          <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
+            <Slider label="Target annual coupon" value={tc} min={0.04} max={0.2} step={0.01} onChange={setTc} display={pct(tc, 0)} />
+            <Slider label="Protection buffer" value={dd} min={0.1} max={0.5} step={0.05} onChange={setDd} display={`${pct(dd, 0)} \u2192 KI ${pct(1 - dd, 0)}`} />
+            {/* Monthly steps, not yearly: NIFTY's listed expiries sit at 4, 7, 16 and 28
+                months, and a quarter-year step cannot land on any of them. */}
+            <Slider label="Maturity" value={mat} min={1 / 12} max={3} step={1 / 12} onChange={setMat}
+              display={mat < 1 ? `${Math.round(mat * 12)}m` : `${(mat).toFixed(2)}y`} />
+            <Slider label="Observations / year" value={obs} min={2} max={12} step={2} onChange={setObs} display={`${obs}`} />
+            <Slider label="Placement fee" value={fee} min={0} max={3} step={0.25} onChange={setFee} display={`${fee.toFixed(2)}`} />
+          </div>
+        )}
       </Panel>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
@@ -439,6 +491,84 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
           <AreaSpark data={curve} x="x" y="pv" color={C.teal} height={300} yDomain={[lo, hi]} xLabel={res?.x_label ?? ""} yLabel="model PV" yTickFormat={(v) => v.toFixed(0)} />
         </Panel>
       </div>
+
+      {(res?.executable || res?.executable_error) && (
+        <>
+          <SectionTitle>What can actually be bought · live ask, whole lots, client's own deposit</SectionTitle>
+          {res?.executable ? (
+            <Panel className="p-4">
+              <div className="flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <div className="text-small uppercase tracking-[0.1em] text-muted">Executable participation</div>
+                  <div className="tnum mt-1 text-hero font-bold leading-none text-accent">
+                    {res.executable.participation.toFixed(2)}×
+                  </div>
+                  <div className="mt-1 text-[11.5px] text-muted">
+                    against a model solve of {res.solved_display ?? "—"}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <GreekStat label="Worst case" value={pct(res.executable.worst_case, 2)}
+                    tone={res.executable.worst_case >= 0 ? "pos" : "neg"} />
+                  <GreekStat label="Breakeven"
+                    value={res.executable.capital_protected ? "protected"
+                      : `${res.executable.breakeven_pct! >= 0 ? "+" : ""}${pct(res.executable.breakeven_pct!, 1)}`} />
+                  <GreekStat label={res.executable.solved_floor ? "Floor it costs" : "Lots"}
+                    value={res.executable.solved_floor
+                      ? pct(res.executable.floor, 1)
+                      : `${res.executable.lots} \u00d7 ${res.executable.lot_size}`} />
+                  <GreekStat label="Bid-ask"
+                    value={res.executable.relative_spread == null ? "—" : pct(res.executable.relative_spread, 1)} />
+                </div>
+              </div>
+              <div className="mt-4 rounded-lg border border-border bg-panel2/60 p-3">
+                <div className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">The order</div>
+                <div className="tnum mt-1.5 text-[13px] text-ink">
+                  BUY {res.executable.lots} lots ({res.executable.units.toLocaleString("en-IN")} units) NIFTY{" "}
+                  {res.executable.expiry} {res.executable.strike.toLocaleString("en-IN")} CE at the ask ₹
+                  {res.executable.ask.toFixed(2)}
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-[11.5px] text-muted sm:grid-cols-4">
+                  <span>FD invested <span className="tnum text-ink">₹{Math.round(res.executable.fd_invested).toLocaleString("en-IN")}</span></span>
+                  <span>matures to <span className="tnum text-ink">₹{Math.round(res.executable.fd_matures).toLocaleString("en-IN")}</span></span>
+                  <span>option cost <span className="tnum text-ink">₹{Math.round(res.executable.option_cost).toLocaleString("en-IN")}</span></span>
+                  <span>residual <span className="tnum text-ink">₹{Math.round(res.executable.residual).toLocaleString("en-IN")}</span></span>
+                </div>
+              </div>
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full text-[11.5px]">
+                  <thead>
+                    <tr className="text-muted">
+                      {res.executable.scenarios.map((sc) => (
+                        <th key={sc.pct} className="tnum px-2 py-1 text-right font-semibold">
+                          {sc.pct === 0 ? "flat" : `${sc.pct > 0 ? "+" : ""}${Math.round(sc.pct * 100)}%`}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      {res.executable.scenarios.map((sc) => (
+                        <td key={sc.pct} className={cn("tnum px-2 py-1.5 text-right font-semibold",
+                          sc.ret > 0 ? "text-up" : sc.ret < 0 ? "text-down" : "text-ink")}>
+                          {sc.ret >= 0 ? "+" : ""}{pct(sc.ret, 2)}
+                        </td>
+                      ))}
+                    </tr>
+                  </tbody>
+                </table>
+                <div className="mt-1 text-[11px] text-muted">Client return on the mandate, by where NIFTY closes on {res.executable.expiry}.</div>
+              </div>
+            </Panel>
+          ) : (
+            <Panel className="p-4">
+              <div className="text-[12.5px] text-muted">
+                <span className="font-semibold text-ink">No orderable build.</span> {res?.executable_error}
+              </div>
+            </Panel>
+          )}
+        </>
+      )}
 
       <SectionTitle>Alternatives the desk could pitch · ranked by fit</SectionTitle>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">

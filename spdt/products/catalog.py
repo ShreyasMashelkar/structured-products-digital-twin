@@ -256,9 +256,21 @@ class CapitalProtectedNote(Product):
     strike: float = 1.0  # call strike, as a fraction of S₀
     cap: float | None = None  # max underlying return participated in (fraction of S₀); None ⇒ uncapped
     initial_fixing: float | None = None
+    # Knock-out ("shark fin"): if the underlying ever closes above this level on a monitoring
+    # date, ALL participation is extinguished and the investor receives ``protection`` plus
+    # ``rebate``. This is a different bargain from a cap: a cap keeps the gain and stops it
+    # growing, while a knock-out takes the gain away for having been too right. Clients accept
+    # it because giving up the tail buys far more participation than a cap at the same level —
+    # it is the catalogue's home for a *limited-upside* concession, which the other three
+    # products can only express through the autocall.
+    knock_out: float | None = None  # barrier as a fraction of S₀; None ⇒ no knock-out
+    rebate: float = 0.0  # paid on top of protection if knocked out, as a fraction of notional
+    ko_monitoring: tuple[float, ...] = ()  # observation dates; empty ⇒ maturity only
 
     def monitoring_times(self) -> tuple[float, ...]:
-        return (self.maturity,)
+        if self.knock_out is None:
+            return (self.maturity,)
+        return tuple(sorted(set(self.ko_monitoring) | {self.maturity}))
 
     def cashflows(self, paths: PathSet) -> list[Cashflow]:
         s0 = paths.initial if self.initial_fixing is None else self.initial_fixing
@@ -267,12 +279,25 @@ class CapitalProtectedNote(Product):
         upside = np.maximum(ret - self.strike, 0.0)
         if self.cap is not None:
             upside = np.minimum(upside, self.cap - self.strike)
+        if self.knock_out is not None:
+            cols = [paths.index_of(t) for t in self.monitoring_times()]
+            knocked = (paths.spots[:, cols] / s0 >= self.knock_out).any(axis=1)
+            # The rebate is the consolation for a knocked-out note, so it is paid only on the
+            # knocked paths — and the participation is extinguished on exactly those paths.
+            upside = np.where(knocked, 0.0, upside)
+            rebate_flow = np.where(knocked, self.rebate * n, 0.0)
+        else:
+            rebate_flow = None
         # Two legs (the doc's decomposition): the protected principal is the zero-coupon bond
         # ⇒ funding curve; the participation call is hedged optionality ⇒ OIS curve.
-        return [
+        flows = [
             Cashflow(self.maturity, np.full(paths.n_paths, self.protection * n), Leg.FUNDING),
             Cashflow(self.maturity, n * self.participation * upside, Leg.OPTION),
         ]
+        if rebate_flow is not None and self.rebate:
+            # The rebate is a promise of the issuer, not hedged optionality: funding leg.
+            flows.append(Cashflow(self.maturity, rebate_flow, Leg.FUNDING))
+        return flows
 
     @classmethod
     def from_termsheet(
@@ -286,6 +311,9 @@ class CapitalProtectedNote(Product):
             participation=p.get("participation", 1.0),
             strike=p.get("strike", 1.0),
             cap=p.get("cap"),
+            knock_out=p.get("knock_out"),
+            rebate=p.get("rebate", 0.0),
+            ko_monitoring=tuple(p.get("ko_monitoring", ()) or ()),
             initial_fixing=initial_fixing,
         )
 

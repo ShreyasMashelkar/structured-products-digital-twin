@@ -247,3 +247,97 @@ def test_stale_desk_serves_immediately_and_revalidates_in_background(client, mon
     # and once rebuilt, subsequent calls serve the fresh payload
     monkeypatch.setattr(server, "_DESK_TTL", 3600.0)
     assert server._desk().get("marker") == "rebuilt"
+
+
+def test_structure_flags_a_note_that_outlives_its_volatility_data(client):
+    """A 1.5y note quoted off a 60-day surface slice looked identical in the response to one
+    quoted off a 2-year slice. Extrapolation is sometimes unavoidable; being silent about it
+    is not."""
+    r = client.post(
+        "/api/structure",
+        json={"target_coupon": 0.18, "max_downside": 0.2, "maturity": 1.5, "obs_per_year": 4},
+    )
+    assert r.status_code == 200
+    b = r.json()
+    assert "vol_extrapolated" in b and "vol_tau" in b
+    if b["vol_tau"] is not None and b["vol_extrapolated"]:
+        assert b["data_warning"] and "extrapolating" in b["data_warning"]
+    # A note comfortably inside the trusted tenor must not be flagged.
+    short = client.post(
+        "/api/structure",
+        json={"target_coupon": 0.10, "max_downside": 0.2, "maturity": 0.25, "obs_per_year": 4},
+    ).json()
+    if short["vol_tau"] is not None and short["vol_tau"] >= 0.30:
+        assert not short["vol_extrapolated"]
+        assert short["data_warning"] is None
+
+
+def test_structure_returns_an_orderable_build_not_just_a_solved_one(client):
+    """The web app quoted a model participation: fair-value option price, continuous lots,
+    wholesale funding. None of the three is what a client transacts at. The response now
+    carries an executable build alongside, or states why there isn't one."""
+    r = client.post("/api/structure", json={
+        "target_coupon": 0.08, "max_downside": 0.25, "maturity": 1.0, "obs_per_year": 4,
+        "objective": "protection", "protection": 0.90, "fd_rate": 0.075, "notional": 1e7,
+    })
+    assert r.status_code == 200
+    b = r.json()
+    assert "executable" in b and "executable_error" in b
+    e = b["executable"]
+    if e is None:
+        assert b["executable_error"]          # never silently absent
+    else:
+        assert e["lots"] >= 1                  # whole lots only
+        assert e["units"] == e["lots"] * e["lot_size"]
+        assert e["option_cost"] == pytest.approx(e["lots"] * e["ask"] * e["lot_size"])
+        assert e["fd_matures"] == pytest.approx(0.90 * e["notional"])
+        assert e["worst_case"] < 0             # a 90% floor risks capital
+        assert len(e["scenarios"]) == 8
+
+
+def test_the_floor_can_be_set_directly(client):
+    """It used to be reverse-engineered from max_downside, so a client who had already named
+    their floor could not simply state it."""
+    out = {}
+    for floor in (1.00, 0.90):
+        b = client.post("/api/structure", json={
+            "target_coupon": 0.08, "max_downside": 0.25, "maturity": 1.0, "obs_per_year": 4,
+            "objective": "protection", "protection": floor,
+        }).json()
+        out[floor] = b["book_params"]["protection"]
+    assert out[1.00] == pytest.approx(1.00)
+    assert out[0.90] == pytest.approx(0.90)
+
+
+def test_income_notes_say_why_they_have_no_executable_build(client):
+    """An autocallable is a path-dependent portfolio, not a floor plus one listed call. It
+    stays model-priced, and the response says so rather than leaving the caller to assume."""
+    b = client.post("/api/structure", json={
+        "target_coupon": 0.12, "max_downside": 0.30, "maturity": 1.5, "obs_per_year": 4,
+        "objective": "income",
+    }).json()
+    assert b["executable"] is None
+    assert "participation notes only" in b["executable_error"]
+
+
+def test_inverse_mode_prices_the_same_note_in_both_panels(client):
+    """Setting a target upside makes the floor the answer. The model solve must then be re-run
+    against that solved floor: otherwise the headline card prices a note with a different floor
+    from the one actually built, and the two numbers on screen cannot be compared.
+
+    Observed before the fix: target 2.50x showed "1.96x upside on a 90% protected floor" beside
+    an executable build on an 83.7% floor. Two different notes, side by side, unlabelled."""
+    for target in (1.0, 1.5, 2.5):
+        b = client.post("/api/structure", json={
+            "target_coupon": 0.12, "max_downside": 0.30, "maturity": 1.0, "obs_per_year": 4,
+            "objective": "protection", "target_participation": target,
+            "fd_rate": 0.075, "notional": 1e7,
+        }).json()
+        e = b["executable"]
+        if e is None:
+            continue
+        assert e["solved_floor"] is True
+        # the card and the order describe one note, not two
+        assert b["book_params"]["protection"] == pytest.approx(e["floor"], abs=1e-9)
+        # and the model is the optimistic one, always: it prices at fair value, not the ask
+        assert b["solved_participation"] >= e["participation"]

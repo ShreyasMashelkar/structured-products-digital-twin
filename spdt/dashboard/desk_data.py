@@ -24,6 +24,7 @@ from spdt.backtest import aggregate, generate_realized_series, roll_issuance
 from spdt.book import generate_mixed_book, mark_book
 from spdt.data import build_snapshot
 from spdt.data.curate import invert_chain
+from spdt.data.curate.expiries import select_term_spanning_expiries
 from spdt.data.ingest.bloomberg_rates_overlay import BloombergRatesOverlaySource
 from spdt.data.ingest.synthetic import SyntheticSource
 from spdt.hedging import simulate_delta_hedge
@@ -50,6 +51,7 @@ from spdt.products import (
 )
 from spdt.stress import STANDARD_SCENARIOS, stress_book
 from spdt.vol import VolSurface
+from spdt.vol.quality import assess_fit
 
 # A fixed reproducible "as of" for the synthetic desk when no date is supplied to a build that
 # wants determinism (the synthetic source is date-agnostic; this only labels the snapshot).
@@ -61,7 +63,7 @@ _DT = 1.0 / 252.0
 # wings whose stale settlement IVs inject large static arbitrage. We calibrate only on liquid quotes.
 _LIVE_BAND = 0.8                  # keep |log(K/F)| ≤ band·√τ
 _LIVE_IV_BOUNDS = (0.03, 1.5)     # drop implausibly inverted vols
-_LIVE_MAX_EXPIRIES = 6            # nearest N liquid expiries
+_LIVE_MAX_EXPIRIES = 8            # liquid expiries kept, spread across the term structure
 _LIVE_MIN_TENOR = 10.0 / 365.0    # skip ~same-day expiries (numerically unstable)
 
 # A settlement price is not evidence that anyone traded at it. NSE publishes a mark for every
@@ -77,11 +79,31 @@ _LIVE_MIN_OPEN_INTEREST = 1.0
 # dragged to their midpoint and reports a residual that is an artefact of the input. Keeping the
 # out-of-the-money half (the reliable one — an ITM settlement carries full intrinsic, so a stale
 # print's error is amplified when divided by a small vega) is the market convention.
+_VOL_TOLERANCE_BPS = 200.0  # matches the desk's reliable/unreliable slice bar
 _LIVE_OTM_ONLY = True
+
+# Touchline liquidity, for feeds that publish a two-sided quote but no volume or open interest
+# (XTS). A NIFTY option quoted more than 60% of mid wide is not being made a market in — on the
+# live chain those are the minimum-tick far wings that inverted to 50–88% vol against a 9.6%
+# ATM, a smile shape no index has.
+_LIVE_REQUIRE_TWO_SIDED = True
+_LIVE_MAX_RELATIVE_SPREAD = 0.60
 
 # Halved from 40 because ``_LIVE_OTM_ONLY`` discards roughly half of every expiry's quotes by
 # construction. Left at 40 the screens would silently starve every slice and calibrate nothing.
 _LIVE_MIN_STRIKES = 20
+# Long-dated slices are held to a lower bar, and the reason is the model, not impatience.
+# Under SSVI the smile *shape* (ρ, η, γ) is fitted globally across all tenors; an individual
+# slice contributes essentially one free parameter, θ, its ATM total variance. Twenty strikes
+# is the right bar for identifying five independent raw-SVI parameters — it is far more than
+# θ needs. NIFTY quotes 21 two-sided contracts at 1.3 years and 15 at 2.3; holding those to a
+# front-month bar discards the entire long end of the only surface Indian clients can be
+# quoted on, to protect against a fit that is not being performed.
+# Three months. Set at 0.4y this threshold sat just above NIFTY's 123-day expiry (0.337y),
+# which held a four-month slice carrying 13 usable quotes to a bar meant for the front month
+# and dropped it — the single expiry that would have taken the surface past 60 days.
+_LIVE_LONG_TENOR = 0.25
+_LIVE_MIN_STRIKES_LONG = 6
 
 
 def _chain_rows(
@@ -125,6 +147,8 @@ def _liquid_iv_points(raw, ois_curve: Curve):
     * **out-of-the-money only** — settlements violate put-call parity, so keeping both halves of
       a strike makes the slice unfittable rather than merely noisy.
     * **moneyness band and IV bounds** — the original screens, which drop stale deep wings.
+    * **two-sided touchline and a sane spread** — the substitute for volume on a broker feed
+      that publishes neither volume nor open interest.
     * **populated, non-immediate expiries** — thin far-dated and same-day slices wreck the SSVI
       fit and are numerically unstable respectively.
 
@@ -147,13 +171,30 @@ def _liquid_iv_points(raw, ois_curve: Curve):
         otm_only=_LIVE_OTM_ONLY,
         min_contracts=_LIVE_MIN_CONTRACTS if has_liquidity_data else None,
         min_open_interest=_LIVE_MIN_OPEN_INTEREST if has_liquidity_data else None,
+        # Only where volume/OI are absent: the touchline screens are the substitute, not an
+        # addition. Feeds that publish volume have already been screened harder by it, and
+        # NSE settlement files carry no bid/ask at all, so requiring two sides there would
+        # discard the entire chain.
+        require_two_sided=_LIVE_REQUIRE_TWO_SIDED if not has_liquidity_data else False,
+        max_relative_spread=_LIVE_MAX_RELATIVE_SPREAD if not has_liquidity_data else None,
     )
     by_expiry: dict = {}
     for p in pts:
         if year_fraction(raw.date, p.expiry) >= _LIVE_MIN_TENOR:
             by_expiry.setdefault(p.expiry, []).append(p)
-    liquid = {e: v for e, v in by_expiry.items() if len(v) >= _LIVE_MIN_STRIKES}
-    keep = sorted(liquid)[:_LIVE_MAX_EXPIRIES]
+    liquid = {
+        e: v for e, v in by_expiry.items()
+        if len(v) >= (
+            _LIVE_MIN_STRIKES_LONG
+            if year_fraction(raw.date, e) >= _LIVE_LONG_TENOR
+            else _LIVE_MIN_STRIKES
+        )
+    }
+    # Spread across the curve rather than taking the nearest N. The nearest six SPX expiries
+    # span seventeen days out of a chain that quotes to five years, so a front-loaded pick
+    # throws away exactly the tenors a multi-year note needs — the same mistake the ingest
+    # layer makes when it fetches only the nearest contracts.
+    keep = select_term_spanning_expiries(sorted(liquid), raw.date, _LIVE_MAX_EXPIRIES)
     return [p for e in keep for p in liquid[e]]
 
 
@@ -567,14 +608,37 @@ def build_desk_data(
     # Live: liquid quotes + the arbitrage-free SSVI calibration (real settlement data needs both).
     # Synthetic: per-slice SVI on the clean generated smile (already arb-free, keeps the fast path).
     if live:
-        surface = VolSurface.calibrate(
-            _liquid_iv_points(raw, snap.ois_curve), underlying, param_model="SSVI"
-        )
+        iv_points = _liquid_iv_points(raw, snap.ois_curve)
+        surface = VolSurface.calibrate(iv_points, underlying, param_model="SSVI")
     else:
-        surface = VolSurface.calibrate(invert_chain(raw, snap.ois_curve), underlying)
+        iv_points = invert_chain(raw, snap.ois_curve)
+        surface = VolSurface.calibrate(iv_points, underlying)
     spot = snap.spots[underlying]
-    longest = max(surface.taus, key=lambda e: surface.taus[e])
+    # ATM vol at the longest expiry the fit can actually be *trusted* at, not simply the
+    # longest one calibrated. The far end of a live chain is where quotes thin out — the NIFTY
+    # 305-day slice fits on eight points at 274bps against ~60bps in the front — so taking the
+    # longest slice unconditionally hands every long-dated note a vol backed by almost no
+    # market. Falls back to the longest available when nothing clears the bar, because a
+    # flagged number is still better than none; ``vol_reliable`` records which happened.
+    fit = assess_fit(iv_points, surface.slices, surface.taus) if live else None
+    unreliable = {s.expiry for s in fit.unreliable_slices(_VOL_TOLERANCE_BPS)} if fit else set()
+    trusted = [e for e in surface.taus if e not in unreliable]
+    vol_reliable = bool(trusted)
+    longest = max(trusted or list(surface.taus), key=lambda e: surface.taus[e])
     atm_vol = surface.implied_vol_kt(0.0, surface.taus[longest])
+    atm_vol_tau = surface.taus[longest]
+    # The whole trusted ATM term structure, not just its endpoint. Pricing every note off a
+    # single scalar gave a 3-month and a 1.5-year note the same vol; on an upward-sloping
+    # curve that systematically underprices the long-dated notes a structured desk sells.
+    # Lists rather than tuples: the payload is JSON round-tripped through DeskData.save/load,
+    # and a tuple comes back a list, so emitting tuples makes the payload unequal to itself.
+    atm_term = [
+        [tau, vol]
+        for tau, vol in sorted(
+            (round(surface.taus[e], 6), round(surface.implied_vol_kt(0.0, surface.taus[e]), 6))
+            for e in (trusted or list(surface.taus))
+        )
+    ]
     r = snap.ois_curve.zero_rate(longest)
     q = snap.dividends[underlying].continuous_yield
 
@@ -728,6 +792,17 @@ def build_desk_data(
     payload = {
         "as_of": as_of.isoformat(),
         "option_chain": _chain_rows(raw, snap.ois_curve, spot),
+        # Every call an order could actually be placed against: a real ask, a known lot size,
+        # and a strike near enough to spot to matter. This is deliberately separate from
+        # ``option_chain`` above, which is a display slice of the nearest expiries and carries
+        # no bid/ask -- a note cannot be sized from it.
+        "executable_calls": [
+            {"expiry": q.expiry.isoformat(), "strike": q.strike, "ask": q.ask,
+             "bid": q.bid, "lot_size": q.lot_size}
+            for q in raw.option_chain
+            if q.is_call and q.ask and q.ask > 0.0 and q.lot_size
+            and 0.75 * spot <= q.strike <= 1.25 * spot
+        ],
         "data_date": raw.date.isoformat(),  # the actual market-data date (e.g. last EOD bhavcopy)
         "data_source": (
             "live+mifor-funding"
@@ -757,7 +832,15 @@ def build_desk_data(
         "underlying": underlying,
         "note_face": note_face,
         "spot": spot,
-        "model": {"r": r, "q": q, "atm_vol": atm_vol},
+        "model": {
+            "r": r, "q": q, "atm_vol": atm_vol,
+            # The tenor the pricing vol was read at, and whether that slice cleared the fit
+            # tolerance. A note maturing well beyond ``atm_vol_tau`` is being priced by
+            # extrapolation, and the desk should say so rather than imply the surface reaches.
+            "atm_vol_tau": atm_vol_tau,
+            "atm_vol_reliable": vol_reliable,
+            "atm_term": atm_term,
+        },
         "market_move": {"spot_bp": 80, "vol_pt": 0.3, "horizon_days": 1},
         "nav": book.total_pv + wo_pv,
         "day_pnl": book_pnl["total"],
