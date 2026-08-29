@@ -344,6 +344,11 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
   const [floorPct, setFloorPct] = useState(0.9);
   const [fdRate, setFdRate] = useState(0.075);
   const [notionalCr, setNotionalCr] = useState(1);
+  // Which way round the protected note is solved. "floor" names the capital at risk and the
+  // upside falls out; "upside" names the participation and the floor is what it costs. The
+  // second is the question clients actually ask and was previously unanswerable.
+  const [protMode, setProtMode] = useState<"floor" | "upside">("floor");
+  const [targetPart, setTargetPart] = useState(1.5);
   const [activeProduct, setActiveProduct] = useState<string | null>(null); // null ⇒ use the recommendation
   const [res, setRes] = useState<StructureResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -354,11 +359,13 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
     setLoading(true);
     const id = setTimeout(() => {
       solveStructure({ target_coupon: tc, max_downside: dd, maturity: mat, obs_per_year: obs, fee, objective, prefer_basket: preferBasket, product: activeProduct,
-        protection: objective === "protection" ? floorPct : null, fd_rate: fdRate, notional: notionalCr * 1e7 })
+        protection: objective === "protection" && protMode === "floor" ? floorPct : null,
+        target_participation: objective === "protection" && protMode === "upside" ? targetPart : null,
+        fd_rate: fdRate, notional: notionalCr * 1e7 })
         .then((r) => !cancel && setRes(r)).finally(() => !cancel && setLoading(false));
     }, 250);
     return () => { cancel = true; clearTimeout(id); };
-  }, [tc, dd, mat, obs, fee, objective, preferBasket, activeProduct, floorPct, fdRate, notionalCr]);
+  }, [tc, dd, mat, obs, fee, objective, preferBasket, activeProduct, floorPct, fdRate, notionalCr, protMode, targetPart]);
 
   // Changing the objective or basket appetite re-opens the recommendation (drops any manual override).
   function pickObjective(k: string) { setObjective(k); setActiveProduct(null); }
@@ -404,24 +411,49 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
             {preferBasket ? "✓ " : ""}Open to a basket (worst-of)
           </button>
         </div>
-        <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
-          <Slider label="Target annual coupon" value={tc} min={0.04} max={0.2} step={0.01} onChange={setTc} display={pct(tc, 0)} />
-          <Slider label="Protection buffer" value={dd} min={0.1} max={0.5} step={0.05} onChange={setDd} display={`${pct(dd, 0)} → KI ${pct(1 - dd, 0)}`} />
-          {/* Monthly steps, not yearly: NIFTY's listed expiries sit at 4, 7, 16 and 28 months,
-              and a quarter-year step cannot land on any of them. */}
-          <Slider label="Maturity" value={mat} min={1 / 12} max={3} step={1 / 12} onChange={setMat}
-            display={mat < 1 ? `${Math.round(mat * 12)}m` : `${(mat).toFixed(2)}y`} />
-          <Slider label="Observations / year" value={obs} min={2} max={12} step={2} onChange={setObs} display={`${obs}`} />
-          <Slider label="Placement fee" value={fee} min={0} max={3} step={0.25} onChange={setFee} display={`${fee.toFixed(2)}`} />
-        </div>
-        {objective === "protection" && (
-          <div className="grid grid-cols-2 gap-5 border-t border-border pt-4 md:grid-cols-3">
-            <Slider label="Capital floor" value={floorPct} min={0.7} max={1} step={0.05} onChange={setFloorPct}
-              display={`${pct(floorPct, 0)} — risks ${pct(1 - floorPct, 0)}`} />
-            <Slider label="Client's own FD rate" value={fdRate} min={0.05} max={0.09} step={0.0025} onChange={setFdRate}
-              display={pct(fdRate, 2)} />
-            <Slider label="Mandate" value={notionalCr} min={0.25} max={10} step={0.25} onChange={setNotionalCr}
-              display={`₹${notionalCr.toFixed(2)} Cr`} />
+        {/* Only the controls that move the answer. A protected note has no coupon, no
+            knock-in and one payoff at maturity, so a coupon, buffer or observation slider
+            sits there doing nothing -- which reads as broken rather than as inapplicable. */}
+        {objective === "protection" ? (
+          <>
+            <div>
+              <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.07em] text-muted">Solve for</div>
+              <div className="inline-flex gap-1 rounded-lg border border-border bg-panel2/50 p-1">
+                {([["floor", "Upside \u2014 I set the floor"], ["upside", "Floor \u2014 I set the upside"]] as const).map(([k, lbl]) => (
+                  <button key={k} onClick={() => setProtMode(k)}
+                    className={cn("ring-desk rounded-md px-3 py-1.5 text-[12px] font-semibold transition-colors", protMode === k ? "bg-accent/20 text-accent" : "text-muted hover:text-ink")}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
+              {protMode === "floor" ? (
+                <Slider label="Capital floor" value={floorPct} min={0.7} max={1} step={0.05} onChange={setFloorPct}
+                  display={`${pct(floorPct, 0)} \u2014 risks ${pct(1 - floorPct, 0)}`} />
+              ) : (
+                <Slider label="Target upside" value={targetPart} min={0.25} max={4} step={0.25} onChange={setTargetPart}
+                  display={`${targetPart.toFixed(2)}\u00d7`} />
+              )}
+              <Slider label="Maturity" value={mat} min={1 / 12} max={3} step={1 / 12} onChange={setMat}
+                display={mat < 1 ? `${Math.round(mat * 12)}m` : `${(mat).toFixed(2)}y`} />
+              <Slider label="Client's own FD rate" value={fdRate} min={0.05} max={0.09} step={0.0025} onChange={setFdRate}
+                display={pct(fdRate, 2)} />
+              <Slider label="Mandate" value={notionalCr} min={0.25} max={10} step={0.25} onChange={setNotionalCr}
+                display={`\u20b9${notionalCr.toFixed(2)} Cr`} />
+              <Slider label="Placement fee" value={fee} min={0} max={3} step={0.25} onChange={setFee} display={`${fee.toFixed(2)}`} />
+            </div>
+          </>
+        ) : (
+          <div className="grid grid-cols-2 gap-5 md:grid-cols-5">
+            <Slider label="Target annual coupon" value={tc} min={0.04} max={0.2} step={0.01} onChange={setTc} display={pct(tc, 0)} />
+            <Slider label="Protection buffer" value={dd} min={0.1} max={0.5} step={0.05} onChange={setDd} display={`${pct(dd, 0)} \u2192 KI ${pct(1 - dd, 0)}`} />
+            {/* Monthly steps, not yearly: NIFTY's listed expiries sit at 4, 7, 16 and 28
+                months, and a quarter-year step cannot land on any of them. */}
+            <Slider label="Maturity" value={mat} min={1 / 12} max={3} step={1 / 12} onChange={setMat}
+              display={mat < 1 ? `${Math.round(mat * 12)}m` : `${(mat).toFixed(2)}y`} />
+            <Slider label="Observations / year" value={obs} min={2} max={12} step={2} onChange={setObs} display={`${obs}`} />
+            <Slider label="Placement fee" value={fee} min={0} max={3} step={0.25} onChange={setFee} display={`${fee.toFixed(2)}`} />
           </div>
         )}
       </Panel>
@@ -481,7 +513,10 @@ export function Originate({ desk, onStage, volShiftPct = 0 }: { desk: Desk; onSt
                   <GreekStat label="Breakeven"
                     value={res.executable.capital_protected ? "protected"
                       : `${res.executable.breakeven_pct! >= 0 ? "+" : ""}${pct(res.executable.breakeven_pct!, 1)}`} />
-                  <GreekStat label="Lots" value={`${res.executable.lots} × ${res.executable.lot_size}`} />
+                  <GreekStat label={res.executable.solved_floor ? "Floor it costs" : "Lots"}
+                    value={res.executable.solved_floor
+                      ? pct(res.executable.floor, 1)
+                      : `${res.executable.lots} \u00d7 ${res.executable.lot_size}`} />
                   <GreekStat label="Bid-ask"
                     value={res.executable.relative_spread == null ? "—" : pct(res.executable.relative_spread, 1)} />
                 </div>

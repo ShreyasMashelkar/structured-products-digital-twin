@@ -75,6 +75,7 @@ export interface StructureCandidate {
 /** What can actually be bought: whole lots, at the ask, funded by the client's deposit.
  *  Distinct from the solved participation, which is a fair-value model number. */
 export interface ExecutableBuild {
+  floor: number; solved_floor: boolean;
   expiry: string; strike: number; ask: number; bid: number | null;
   relative_spread: number | null; lot_size: number; lots: number; units: number;
   tenor_years: number; participation: number;
@@ -290,6 +291,8 @@ export async function solveStructure(body: {
   product?: string | null;
   /* The floor, stated directly rather than inferred from max_downside. */
   protection?: number | null;
+  /* The inverse solve: name the upside and the floor becomes the answer. */
+  target_participation?: number | null;
   /* The client's own deposit funds the floor; it is not the wholesale curve. */
   fd_rate?: number;
   notional?: number;

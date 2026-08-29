@@ -139,3 +139,47 @@ def test_refuses_to_substitute_a_different_tenor():
     n = build_participation_note(spot=SPOT, as_of=AS_OF, maturity_years=851/365, floor=0.90,
                                  chain=short_chain, fd_rate=0.075, max_tenor_mismatch=0.60)
     assert n.leg.expiry == date(2027, 12, 28)
+
+
+# --- the inverse solve: client names the upside, the floor is what it costs ----------------
+
+
+@pytest.mark.parametrize("target", [0.5, 1.0, 1.5, 2.0, 2.5])
+def test_floor_for_participation_meets_the_target(target):
+    from spdt.structurer.executable import floor_for_participation
+
+    n = floor_for_participation(spot=SPOT, as_of=AS_OF, maturity_years=123/365,
+                                target_participation=target, chain=LIVE, fd_rate=0.075)
+    assert n.participation(SPOT) >= target - 1e-9        # met, never missed
+    assert n.participation(SPOT) < target + (65 * SPOT / n.notional)  # by under one lot
+    assert 0.0 < n.floor <= 1.0
+
+
+def test_more_upside_costs_more_capital():
+    from spdt.structurer.executable import floor_for_participation
+
+    floors = [
+        floor_for_participation(spot=SPOT, as_of=AS_OF, maturity_years=123/365,
+                                target_participation=t, chain=LIVE).floor
+        for t in (0.5, 1.0, 1.5, 2.0, 2.5)
+    ]
+    assert floors == sorted(floors, reverse=True)        # strictly cheaper upside ⇒ higher floor
+
+
+def test_a_cheap_target_returns_full_protection_not_a_worse_floor():
+    """Asking for less than the interest budget buys should hand back 100% protection and
+    the extra upside, not a floor above par."""
+    from spdt.structurer.executable import floor_for_participation
+
+    n = floor_for_participation(spot=SPOT, as_of=AS_OF, maturity_years=851/365,
+                                target_participation=0.05, chain=LIVE)
+    assert n.floor == pytest.approx(1.0)
+    assert n.capital_protected
+
+
+def test_an_unaffordable_target_is_refused():
+    from spdt.structurer.executable import floor_for_participation
+
+    with pytest.raises(ValueError, match="more than the mandate"):
+        floor_for_participation(spot=SPOT, as_of=AS_OF, maturity_years=123/365,
+                                target_participation=25.0, chain=LIVE)

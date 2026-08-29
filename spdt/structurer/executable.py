@@ -180,3 +180,64 @@ def calls_from_chain(chain, *, min_lot_size: int = 0) -> list[ListedCall]:
             continue
         out.append(ListedCall(q.expiry, q.strike, float(q.ask), int(lot), q.bid))
     return out
+
+
+def floor_for_participation(
+    *,
+    spot: float,
+    as_of: Date,
+    maturity_years: float,
+    target_participation: float,
+    chain: list[ListedCall],
+    fd_rate: float = 0.075,
+    notional: float = 1e7,
+    fee: float = 0.01,
+    max_tenor_mismatch: float = 0.25,
+) -> ExecutableNote:
+    """The inverse solve: the client names the upside, the floor is what it costs.
+
+    Participation is normally the *output* of a protected note, which leaves the more natural
+    client question unanswerable: "I want 1.5 times the index. How much capital is that?"
+
+    No search is needed. Participation is a step function of the floor (whole lots), so invert
+    it directly: the target implies a lot count, the lot count implies a cost, and the cost
+    implies the largest floor the remaining budget can still fund. The result is exact rather
+    than the nearest point on a grid.
+
+    The floor is capped at 100%: if the target is cheap enough to leave more than full
+    protection unspent, the client gets full protection and *more* participation than asked
+    for, which is not a failure to hit the target.
+    """
+    if target_participation <= 0.0:
+        raise ValueError("target participation must be positive")
+    dated = [c for c in chain if year_fraction(as_of, c.expiry) > 0.0]
+    if not dated:
+        raise ValueError("no listed calls with a future expiry")
+    target_expiry = min(
+        {c.expiry for c in dated},
+        key=lambda e: abs(year_fraction(as_of, e) - maturity_years),
+    )
+    tau = year_fraction(as_of, target_expiry)
+    if abs(tau - maturity_years) > max_tenor_mismatch * maturity_years:
+        raise ValueError(
+            f"nearest listed expiry is {tau:.2f}y against {maturity_years:.2f}y requested — "
+            f"no contract quotes at that tenor"
+        )
+    leg = min((c for c in dated if c.expiry == target_expiry),
+              key=lambda c: abs(c.strike - spot))
+
+    units_needed = target_participation * notional / spot
+    lots = max(1, -(-units_needed // leg.lot_size))  # ceil, so the target is met not missed
+    lots = int(lots)
+    cost = lots * leg.cost_per_lot
+    spare = notional - cost - notional * fee
+    if spare <= 0.0:
+        raise ValueError(
+            f"{target_participation:.2f}x needs {lots} lots costing {cost:,.0f}, which is more "
+            f"than the mandate after fees — lower the target or lengthen the maturity"
+        )
+    floor = min(1.0, spare * ((1.0 + fd_rate) ** tau) / notional)
+    return build_participation_note(
+        spot=spot, as_of=as_of, maturity_years=maturity_years, floor=floor, chain=chain,
+        fd_rate=fd_rate, notional=notional, fee=fee, max_tenor_mismatch=max_tenor_mismatch,
+    )

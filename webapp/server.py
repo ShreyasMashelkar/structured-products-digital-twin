@@ -65,7 +65,11 @@ from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
 from spdt.pricing import BlackScholes, price_mc, price_worst_of
 from spdt.pricing.models.bs_term import BlackScholesTermVol
-from spdt.structurer.executable import ListedCall, build_participation_note
+from spdt.structurer.executable import (
+    ListedCall,
+    build_participation_note,
+    floor_for_participation,
+)
 from spdt.products import (
     Autocallable,
     BarrierReverseConvertible,
@@ -344,6 +348,10 @@ class StructureRequest(BaseModel):
     # Set the floor directly. Absent, it is derived from max_downside, which is fine for a
     # recommendation and useless when the client has already named the floor they want.
     protection: float | None = None
+    # The inverse solve: name the upside and the floor becomes the answer. Participation is
+    # otherwise only ever an output, which leaves the more natural client question -- "I want
+    # 1.5x the index, what does that cost me?" -- unanswerable.
+    target_participation: float | None = None
 
 
 class StructureCandidate(BaseModel):
@@ -430,17 +438,26 @@ def _executable_build(prop: Proposal, req: "StructureRequest", spot: float, d: d
                    int(r["lot_size"]), r.get("bid"))
         for r in rows
     ]
-    floor = float(prop.params.get("protection", 1.0))
+    as_of = date.fromisoformat(d["as_of"])
     try:
-        note = build_participation_note(
-            spot=spot, as_of=date.fromisoformat(d["as_of"]),
-            maturity_years=prop.maturity, floor=floor, chain=chain,
-            fd_rate=req.fd_rate, notional=req.notional, fee=_STRUCTURING_FEE,
-        )
+        if req.target_participation is not None:
+            note = floor_for_participation(
+                spot=spot, as_of=as_of, maturity_years=prop.maturity,
+                target_participation=req.target_participation, chain=chain,
+                fd_rate=req.fd_rate, notional=req.notional, fee=_STRUCTURING_FEE,
+            )
+        else:
+            note = build_participation_note(
+                spot=spot, as_of=as_of, maturity_years=prop.maturity,
+                floor=float(prop.params.get("protection", 1.0)), chain=chain,
+                fd_rate=req.fd_rate, notional=req.notional, fee=_STRUCTURING_FEE,
+            )
     except ValueError as exc:
         return None, str(exc)
     be = note.breakeven()
     return {
+        "floor": round(note.floor, 6),
+        "solved_floor": req.target_participation is not None,
         "expiry": note.leg.expiry.isoformat(), "strike": note.leg.strike,
         "ask": note.leg.ask, "bid": note.leg.bid,
         "relative_spread": (round(note.leg.relative_spread, 4)
