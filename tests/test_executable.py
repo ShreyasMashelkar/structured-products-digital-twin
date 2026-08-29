@@ -183,3 +183,26 @@ def test_an_unaffordable_target_is_refused():
     with pytest.raises(ValueError, match="more than the mandate"):
         floor_for_participation(spot=SPOT, as_of=AS_OF, maturity_years=123/365,
                                 target_participation=25.0, chain=LIVE)
+
+
+def test_refuses_a_strike_too_far_from_spot_to_be_participation():
+    """Live, the 850-day NIFTY expiry quoted exactly one strike: 30,000, 24% out of the money.
+    The builder took it and reported 4.56x 'participation' — on a call that pays nothing until
+    the index rises 24%. The word does not mean that."""
+    far = [ListedCall(date(2028, 12, 26), 30000.0, 1190.00, 65, bid=1082.00)]
+    with pytest.raises(ValueError, match="too far to call the payoff participation"):
+        build_participation_note(spot=SPOT, as_of=AS_OF, maturity_years=851/365, floor=0.90,
+                                 chain=far, fd_rate=0.075)
+    # the inverse solve shares the hazard and the guard
+    from spdt.structurer.executable import floor_for_participation
+    with pytest.raises(ValueError, match="too far to call the payoff participation"):
+        floor_for_participation(spot=SPOT, as_of=AS_OF, maturity_years=851/365,
+                                target_participation=1.5, chain=far, fd_rate=0.075)
+
+
+def test_a_near_strike_is_still_accepted():
+    """The pack's own legs sit within a percent or two of spot and must keep working."""
+    n = build_participation_note(spot=SPOT, as_of=AS_OF, maturity_years=123/365, floor=0.90,
+                                 chain=LIVE, fd_rate=0.075)
+    assert abs(n.leg.strike / SPOT - 1) < 0.05
+    assert n.lots == 16

@@ -115,6 +115,7 @@ def build_participation_note(
     notional: float = 1e7,
     fee: float = 0.01,
     max_tenor_mismatch: float = 0.25,
+    max_strike_offset: float = 0.05,
 ) -> ExecutableNote:
     """Build the largest note the budget affords from contracts that actually quote.
 
@@ -125,7 +126,12 @@ def build_participation_note(
     * the budget cannot buy a single lot, so there is no note to build;
     * no listed expiry lands within ``max_tenor_mismatch`` of the maturity asked for. Quietly
       substituting a 1.3-year contract for a 2.3-year request is not an approximation, it is a
-      different product, and the caller must widen the tolerance deliberately to accept one.
+      different product, and the caller must widen the tolerance deliberately to accept one;
+    * the nearest quoted strike sits further than ``max_strike_offset`` from spot. Observed
+      live: the 850-day NIFTY expiry quoted exactly one strike, 24% out of the money, and the
+      builder happily reported 4.56x "participation" on it. The client would have received
+      nothing until the index rose 24%. Participation only means what the word implies when
+      the strike is near spot, so a far strike is refused rather than described wrongly.
     """
     if not 0.0 < floor <= 1.0:
         raise ValueError("floor must be a fraction of notional in (0, 1]")
@@ -146,6 +152,12 @@ def build_participation_note(
             f"no contract quotes at that tenor"
         )
     leg = min((c for c in dated if c.expiry == target), key=lambda c: abs(c.strike - spot))
+    offset = leg.strike / spot - 1.0
+    if abs(offset) > max_strike_offset:
+        raise ValueError(
+            f"nearest quoted strike at {tau:.2f}y is {leg.strike:,.0f}, {offset:+.1%} from spot "
+            f"— too far to call the payoff participation"
+        )
 
     fd_matures = notional * floor
     fd_invested = fd_matures / ((1.0 + fd_rate) ** tau)
@@ -193,6 +205,7 @@ def floor_for_participation(
     notional: float = 1e7,
     fee: float = 0.01,
     max_tenor_mismatch: float = 0.25,
+    max_strike_offset: float = 0.05,
 ) -> ExecutableNote:
     """The inverse solve: the client names the upside, the floor is what it costs.
 
@@ -225,6 +238,12 @@ def floor_for_participation(
         )
     leg = min((c for c in dated if c.expiry == target_expiry),
               key=lambda c: abs(c.strike - spot))
+    offset = leg.strike / spot - 1.0
+    if abs(offset) > max_strike_offset:
+        raise ValueError(
+            f"nearest quoted strike at {tau:.2f}y is {leg.strike:,.0f}, {offset:+.1%} from spot "
+            f"— too far to call the payoff participation"
+        )
 
     units_needed = target_participation * notional / spot
     lots = max(1, -(-units_needed // leg.lot_size))  # ceil, so the target is met not missed
@@ -240,4 +259,5 @@ def floor_for_participation(
     return build_participation_note(
         spot=spot, as_of=as_of, maturity_years=maturity_years, floor=floor, chain=chain,
         fd_rate=fd_rate, notional=notional, fee=fee, max_tenor_mismatch=max_tenor_mismatch,
+        max_strike_offset=max_strike_offset,
     )
