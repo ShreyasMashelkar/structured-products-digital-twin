@@ -792,6 +792,17 @@ def build_desk_data(
     payload = {
         "as_of": as_of.isoformat(),
         "option_chain": _chain_rows(raw, snap.ois_curve, spot),
+        # Every call an order could actually be placed against: a real ask, a known lot size,
+        # and a strike near enough to spot to matter. This is deliberately separate from
+        # ``option_chain`` above, which is a display slice of the nearest expiries and carries
+        # no bid/ask -- a note cannot be sized from it.
+        "executable_calls": [
+            {"expiry": q.expiry.isoformat(), "strike": q.strike, "ask": q.ask,
+             "bid": q.bid, "lot_size": q.lot_size}
+            for q in raw.option_chain
+            if q.is_call and q.ask and q.ask > 0.0 and q.lot_size
+            and 0.75 * spot <= q.strike <= 1.25 * spot
+        ],
         "data_date": raw.date.isoformat(),  # the actual market-data date (e.g. last EOD bhavcopy)
         "data_source": (
             "live+mifor-funding"

@@ -44,6 +44,10 @@ class RawOptionQuote:
     # different statement from a zero-width spread and must not be silently read as one.
     bid: float | None = None
     ask: float | None = None
+    # Contract multiplier, where the source publishes an instrument master (XTS does; the NSE
+    # bhavcopy does not). Zero means "unknown", and any caller sizing a real order must refuse
+    # rather than assume: a wrong lot size silently misstates every quantity on a term sheet.
+    lot_size: int = 0
 
     @property
     def mid(self) -> float:

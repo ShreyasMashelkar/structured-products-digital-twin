@@ -242,7 +242,7 @@ def build_raw_market_data(
         # fitted to whatever the chain happened to print.
         chain.append(RawOptionQuote(
             ref.expiry, ref.strike, ref.option_type == "CE", price,
-            bid=quote.bid, ask=quote.ask,
+            bid=quote.bid, ask=quote.ask, lot_size=ref.lot_size,
         ))
     if not chain:
         raise ValueError("no live priced option quotes in the XTS chain")
@@ -409,9 +409,12 @@ class XTSSource:
         self,
         *,
         client: XTSMarketDataClient | None = None,
-        # Enough to span weeklies through the multi-year LEAPS the NIFTY master lists; the
-        # selection below spreads them across the curve rather than taking the nearest N.
-        n_expiries: int = 8,
+        # Above the ~18 expiries NIFTY lists, so the whole curve is fetched rather than a
+        # sample of it. A log-spaced subset is right for calibrating a surface and wrong for
+        # building a note: a client asking for four months must land on the 123-day contract,
+        # not on whichever expiry the sampler happened to keep. Surface calibration does its
+        # own term-spanning selection downstream and is unaffected.
+        n_expiries: int = 20,
         # Contracts fed to the dividend-carry fit. Three covers the liquid part of the NIFTY
         # futures curve; beyond that the quotes thin out and add noise to the slope.
         n_dividend_futures: int = 3,

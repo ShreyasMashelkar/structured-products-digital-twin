@@ -51,6 +51,10 @@ class ClientBrief:
     # upside* concession the catalogue can express directly; the income products can only
     # approximate it through the autocall level.
     accept_knockout: bool = False
+    # The capital floor, stated directly. Absent, it is derived from ``max_downside`` below,
+    # which is right for a recommendation and wrong once the client has named the floor they
+    # want: a 90% floor is a term, not an inference from a risk-tolerance slider.
+    protection: float | None = None
     # Which term to solve to par. COUPON is the default ("what does this pay?"); KNOCK_IN
     # answers the question income clients actually ask — "I want this coupon, how much
     # downside must I carry?" — by holding the coupon at the target and solving the barrier.
@@ -166,7 +170,10 @@ def _brc_proposal(brief: ClientBrief) -> Proposal:
 def _capital_protected_proposal(brief: ClientBrief) -> Proposal:
     # Protection scales with how risk-averse the client is: a small downside tolerance ⇒ near-full
     # capital protection; a larger one ⇒ a lower floor that funds more upside participation.
-    protection = round(min(1.0, 0.90 + (0.30 - min(brief.max_downside, 0.30))), 4)
+    protection = (
+        brief.protection if brief.protection is not None
+        else round(min(1.0, 0.90 + (0.30 - min(brief.max_downside, 0.30))), 4)
+    )
     return Proposal(
         product_type="capital_protected",
         observation_times=_observation_schedule(brief),
@@ -192,7 +199,10 @@ def _shark_fin_proposal(brief: ClientBrief) -> Proposal:
     ceiling — so the concession is legible rather than an arbitrary number, and a rebate pays
     something back for having been right enough to lose the upside.
     """
-    protection = round(min(1.0, 0.90 + (0.30 - min(brief.max_downside, 0.30))), 4)
+    protection = (
+        brief.protection if brief.protection is not None
+        else round(min(1.0, 0.90 + (0.30 - min(brief.max_downside, 0.30))), 4)
+    )
     knock_out = round(1.0 + brief.max_downside, 10)
     return Proposal(
         product_type="shark_fin",

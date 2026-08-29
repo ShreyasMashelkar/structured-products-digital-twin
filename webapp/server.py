@@ -65,6 +65,7 @@ from spdt.dashboard.desk_data import build_desk_data
 from spdt.greeks import bump_greeks
 from spdt.pricing import BlackScholes, price_mc, price_worst_of
 from spdt.pricing.models.bs_term import BlackScholesTermVol
+from spdt.structurer.executable import ListedCall, build_participation_note
 from spdt.products import (
     Autocallable,
     BarrierReverseConvertible,
@@ -335,6 +336,14 @@ class StructureRequest(BaseModel):
     # Surrender the upside tail rather than cap it — unlocks the shark-fin family, which is
     # otherwise not offered at all.
     accept_knockout: bool = False
+    # The client's own fixed-deposit rate funds the floor. It is not the wholesale curve and
+    # the difference is material: at 7.5% against 5.3% the deposit discounts harder, leaving a
+    # larger option budget. Omitting it was why the app understated every protected note.
+    fd_rate: float = 0.075
+    notional: float = 1e7
+    # Set the floor directly. Absent, it is derived from max_downside, which is fine for a
+    # recommendation and useless when the client has already named the floor they want.
+    protection: float | None = None
 
 
 class StructureCandidate(BaseModel):
@@ -376,6 +385,10 @@ class StructureResponse(BaseModel):
     vol_tau: float | None
     vol_extrapolated: bool
     data_warning: str | None
+    # What can actually be bought, as distinct from what the model solves. Present only for
+    # participation notes, and None when no listed contract supports the request.
+    executable: dict | None
+    executable_error: str | None
     alternatives: list[StructureCandidate]  # every family, ranked best-first (incl. the active one)
 
 
@@ -387,6 +400,9 @@ _OBJECTIVES = {
 # n_paths kept modest so the live solve stays responsive; worst-of pays for 3 correlated assets.
 # Log-moneyness half-width representing the region a live chain actually quotes; the
 # default Durrleman grid runs to +/-1.5, which for a 2-week slice is pure extrapolation.
+# The solver's par target is par minus 1.00 of 100, i.e. 1% of notional. The executable
+# build must charge the same fee or its budget would not match the solved note's.
+_STRUCTURING_FEE = 0.01
 _ARB_DATA_K = 0.35
 # A note may run a little past the last trusted expiry without the price being extrapolation
 # in any meaningful sense; beyond this it is.
@@ -394,6 +410,59 @@ _VOL_TAU_SLACK = 0.10
 _SOLVE_PATHS = {"worst_of": 6_000}
 _DEFAULT_SOLVE_PATHS = 12_000
 _CURVE_POINTS = 12
+
+
+
+def _executable_build(prop: Proposal, req: "StructureRequest", spot: float, d: dict) -> tuple:
+    """The orderable version of a participation note, or why there isn't one.
+
+    Only participation notes decompose into a floor plus a single listed call, so only they get
+    an executable build. Income notes are path-dependent portfolios and stay model-priced, which
+    the response makes explicit rather than leaving the caller to assume.
+    """
+    if prop.product_type not in ("capital_protected", "shark_fin"):
+        return None, "executable build applies to participation notes only"
+    rows = d.get("executable_calls") or []
+    if not rows:
+        return None, "no two-sided call quotes in today's chain"
+    chain = [
+        ListedCall(date.fromisoformat(r["expiry"]), float(r["strike"]), float(r["ask"]),
+                   int(r["lot_size"]), r.get("bid"))
+        for r in rows
+    ]
+    floor = float(prop.params.get("protection", 1.0))
+    try:
+        note = build_participation_note(
+            spot=spot, as_of=date.fromisoformat(d["as_of"]),
+            maturity_years=prop.maturity, floor=floor, chain=chain,
+            fd_rate=req.fd_rate, notional=req.notional, fee=_STRUCTURING_FEE,
+        )
+    except ValueError as exc:
+        return None, str(exc)
+    be = note.breakeven()
+    return {
+        "expiry": note.leg.expiry.isoformat(), "strike": note.leg.strike,
+        "ask": note.leg.ask, "bid": note.leg.bid,
+        "relative_spread": (round(note.leg.relative_spread, 4)
+                            if note.leg.relative_spread is not None else None),
+        "lot_size": note.leg.lot_size, "lots": note.lots, "units": note.units,
+        "tenor_years": round(note.tau, 4),
+        "participation": round(note.participation(spot), 4),
+        "fd_rate": note.fd_rate, "notional": note.notional,
+        "fd_invested": round(note.fd_invested, 2), "fd_matures": round(note.fd_matures, 2),
+        "option_cost": round(note.option_cost, 2), "residual": round(note.residual, 2),
+        "residual_matures": round(note.residual_matures, 2),
+        "worst_case": round(note.worst_case, 6),
+        "capital_protected": note.capital_protected,
+        "breakeven": None if be is None else round(be, 2),
+        "breakeven_pct": None if be is None else round(be / spot - 1.0, 6),
+        "scenarios": [
+            {"pct": m, "level": round(spot * (1 + m), 2),
+             "total": round(note.value_at(spot * (1 + m)), 2),
+             "ret": round(note.value_at(spot * (1 + m)) / note.notional - 1.0, 6)}
+            for m in (-0.30, -0.15, -0.10, 0.0, 0.05, 0.10, 0.20, 0.30)
+        ],
+    }, None
 
 
 def _term_vol_model(spot: float, m: dict) -> BlackScholes | BlackScholesTermVol:
@@ -524,6 +593,7 @@ def structure(req: StructureRequest) -> StructureResponse:
         prefer_basket=req.prefer_basket,
         autocall_level=req.autocall_level,
         accept_knockout=req.accept_knockout,
+        protection=req.protection,
         solve_for=SolveFor.KNOCK_IN if req.solve_for == "knock_in" else SolveFor.COUPON,
     )
     ranked = recommend(brief)
@@ -587,6 +657,7 @@ def structure(req: StructureRequest) -> StructureResponse:
                 for v in report.levers
             ]
 
+    executable, executable_error = _executable_build(prop, req, spot, d)
     vol_tau = m.get("atm_vol_tau")
     extrapolated = vol_tau is not None and prop.maturity > vol_tau * (1.0 + _VOL_TAU_SLACK)
     warning = None
@@ -631,6 +702,8 @@ def structure(req: StructureRequest) -> StructureResponse:
         vol_tau=round(vol_tau, 4) if vol_tau is not None else None,
         vol_extrapolated=extrapolated,
         data_warning=warning,
+        executable=executable,
+        executable_error=executable_error,
         alternatives=[
             StructureCandidate(
                 product_type=r.proposal.product_type, label=r.label,

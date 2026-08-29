@@ -270,3 +270,51 @@ def test_structure_flags_a_note_that_outlives_its_volatility_data(client):
     if short["vol_tau"] is not None and short["vol_tau"] >= 0.30:
         assert not short["vol_extrapolated"]
         assert short["data_warning"] is None
+
+
+def test_structure_returns_an_orderable_build_not_just_a_solved_one(client):
+    """The web app quoted a model participation: fair-value option price, continuous lots,
+    wholesale funding. None of the three is what a client transacts at. The response now
+    carries an executable build alongside, or states why there isn't one."""
+    r = client.post("/api/structure", json={
+        "target_coupon": 0.08, "max_downside": 0.25, "maturity": 1.0, "obs_per_year": 4,
+        "objective": "protection", "protection": 0.90, "fd_rate": 0.075, "notional": 1e7,
+    })
+    assert r.status_code == 200
+    b = r.json()
+    assert "executable" in b and "executable_error" in b
+    e = b["executable"]
+    if e is None:
+        assert b["executable_error"]          # never silently absent
+    else:
+        assert e["lots"] >= 1                  # whole lots only
+        assert e["units"] == e["lots"] * e["lot_size"]
+        assert e["option_cost"] == pytest.approx(e["lots"] * e["ask"] * e["lot_size"])
+        assert e["fd_matures"] == pytest.approx(0.90 * e["notional"])
+        assert e["worst_case"] < 0             # a 90% floor risks capital
+        assert len(e["scenarios"]) == 8
+
+
+def test_the_floor_can_be_set_directly(client):
+    """It used to be reverse-engineered from max_downside, so a client who had already named
+    their floor could not simply state it."""
+    out = {}
+    for floor in (1.00, 0.90):
+        b = client.post("/api/structure", json={
+            "target_coupon": 0.08, "max_downside": 0.25, "maturity": 1.0, "obs_per_year": 4,
+            "objective": "protection", "protection": floor,
+        }).json()
+        out[floor] = b["book_params"]["protection"]
+    assert out[1.00] == pytest.approx(1.00)
+    assert out[0.90] == pytest.approx(0.90)
+
+
+def test_income_notes_say_why_they_have_no_executable_build(client):
+    """An autocallable is a path-dependent portfolio, not a floor plus one listed call. It
+    stays model-priced, and the response says so rather than leaving the caller to assume."""
+    b = client.post("/api/structure", json={
+        "target_coupon": 0.12, "max_downside": 0.30, "maturity": 1.5, "obs_per_year": 4,
+        "objective": "income",
+    }).json()
+    assert b["executable"] is None
+    assert "participation notes only" in b["executable_error"]
