@@ -617,6 +617,17 @@ def structure(req: StructureRequest) -> StructureResponse:
     active = next((r for r in ranked if r.proposal.product_type == req.product), ranked[0])
     prop = active.proposal
 
+    # Build the orderable note first. In the inverse mode the floor is the *answer*, so the
+    # model solve has to be re-run against that same floor -- otherwise the headline card
+    # prices a note with a different floor from the one the client would be sold, and the two
+    # numbers on screen cannot be compared to each other.
+    executable, executable_error = _executable_build(prop, req, spot, d)
+    if executable is not None and executable.get("solved_floor"):
+        brief = dataclasses.replace(brief, protection=executable["floor"])
+        ranked = recommend(brief)
+        active = next((r for r in ranked if r.proposal.product_type == req.product), ranked[0])
+        prop = active.proposal
+
     free, achieved, curve, target = _solve_and_curve(prop, spot, m, req.obs_per_year, req.fee)
     is_coupon = prop.solve_for == SolveFor.COUPON
 
@@ -674,7 +685,6 @@ def structure(req: StructureRequest) -> StructureResponse:
                 for v in report.levers
             ]
 
-    executable, executable_error = _executable_build(prop, req, spot, d)
     vol_tau = m.get("atm_vol_tau")
     extrapolated = vol_tau is not None and prop.maturity > vol_tau * (1.0 + _VOL_TAU_SLACK)
     warning = None

@@ -318,3 +318,26 @@ def test_income_notes_say_why_they_have_no_executable_build(client):
     }).json()
     assert b["executable"] is None
     assert "participation notes only" in b["executable_error"]
+
+
+def test_inverse_mode_prices_the_same_note_in_both_panels(client):
+    """Setting a target upside makes the floor the answer. The model solve must then be re-run
+    against that solved floor: otherwise the headline card prices a note with a different floor
+    from the one actually built, and the two numbers on screen cannot be compared.
+
+    Observed before the fix: target 2.50x showed "1.96x upside on a 90% protected floor" beside
+    an executable build on an 83.7% floor. Two different notes, side by side, unlabelled."""
+    for target in (1.0, 1.5, 2.5):
+        b = client.post("/api/structure", json={
+            "target_coupon": 0.12, "max_downside": 0.30, "maturity": 1.0, "obs_per_year": 4,
+            "objective": "protection", "target_participation": target,
+            "fd_rate": 0.075, "notional": 1e7,
+        }).json()
+        e = b["executable"]
+        if e is None:
+            continue
+        assert e["solved_floor"] is True
+        # the card and the order describe one note, not two
+        assert b["book_params"]["protection"] == pytest.approx(e["floor"], abs=1e-9)
+        # and the model is the optimistic one, always: it prices at fair value, not the ask
+        assert b["solved_participation"] >= e["participation"]
