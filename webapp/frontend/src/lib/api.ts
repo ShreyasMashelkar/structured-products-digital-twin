@@ -72,6 +72,19 @@ export interface StructureCandidate {
   fit_score: number;
 }
 
+/** What can actually be bought: whole lots, at the ask, funded by the client's deposit.
+ *  Distinct from the solved participation, which is a fair-value model number. */
+export interface ExecutableBuild {
+  expiry: string; strike: number; ask: number; bid: number | null;
+  relative_spread: number | null; lot_size: number; lots: number; units: number;
+  tenor_years: number; participation: number;
+  fd_rate: number; notional: number; fd_invested: number; fd_matures: number;
+  option_cost: number; residual: number; residual_matures: number;
+  worst_case: number; capital_protected: boolean;
+  breakeven: number | null; breakeven_pct: number | null;
+  scenarios: { pct: number; level: number; total: number; ret: number }[];
+}
+
 export interface StructureResult {
   product_type: string;
   label: string;
@@ -91,6 +104,12 @@ export interface StructureResult {
   x_label: string;
   pv_curve: { x: number; pv: number }[];
   alternatives: StructureCandidate[];
+  /* Present for participation notes; null with a reason for path-dependent income notes. */
+  executable: ExecutableBuild | null;
+  executable_error: string | null;
+  vol_tau: number | null;
+  vol_extrapolated: boolean;
+  data_warning: string | null;
 }
 
 export interface PriceRequest {
@@ -269,6 +288,11 @@ export async function solveStructure(body: {
   objective?: string;
   prefer_basket?: boolean;
   product?: string | null;
+  /* The floor, stated directly rather than inferred from max_downside. */
+  protection?: number | null;
+  /* The client's own deposit funds the floor; it is not the wholesale curve. */
+  fd_rate?: number;
+  notional?: number;
 }): Promise<StructureResult> {
   const r = await apiFetch("/api/structure", {
     method: "POST",
